@@ -11,14 +11,42 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 - PHP のマイナーバージョンが変わったら、このファイルの表を更新し、serializer/VM 両方を再ビルド
 - op_array header の `php_version_major/minor` が 8.4 でなければ VM は即 halt
 
-## MVP 対応 opcode (最小)
+## 対応 opcode (MVP + 延長 第 1・2 段階)
 
-| Zend opcode | 番号 (PHP 8.4.6) | 実装 | nesphp での扱い |
+| Zend opcode | 番号 (PHP 8.4.6) | 段階 | nesphp での扱い |
 |-------------|------------------|------|----------------|
-| `ZEND_ECHO` | **136 (0x88)** | ✓ | op1 (IS_CONST) → literals → zend_string → PPU nametable に出力 |
-| `ZEND_RETURN` | **62 (0x3e)** | ✓ | PPUMASK 有効化 → NMI 待ちの無限ループ |
+| `ZEND_ADD` | **1 (0x01)** | 延長1 | op1+op2 (IS_LONG 前提) → result。16bit 符号付き加算 |
+| `ZEND_SUB` | **2 (0x02)** | 延長1 | op1-op2 → result。16bit 符号付き減算 |
+| `ZEND_IS_EQUAL` | **18 (0x12)** | 延長2 | 同じ型 + 同じ payload なら TYPE_TRUE、それ以外 TYPE_FALSE を result へ |
+| `ZEND_IS_SMALLER` | **20 (0x14)** | 延長2 | op1 < op2 (IS_LONG 符号付き 16bit) なら TYPE_TRUE を result へ |
+| `ZEND_ASSIGN` | **22 (0x16)** | 延長1 | op1 (IS_CV) ← op2 の値。4B tagged value をそのままコピー |
+| `ZEND_QM_ASSIGN` | **31 (0x1F)** | 延長1 | op1 → result。値コピー |
+| `ZEND_JMP` | **42 (0x2A)** | 延長2 | op1.num (op_index) に無条件分岐。VM_PC = OPS_FIRST_OP + op_index*24 |
+| `ZEND_JMPZ` | **43 (0x2B)** | 延長2 | op1 が falsy のとき op2.num に分岐 |
+| `ZEND_JMPNZ` | **44 (0x2C)** | 延長2 | op1 が truthy のとき op2.num に分岐 |
+| `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 → NMI 待ちの無限ループ |
+| `ZEND_ECHO` | **136 (0x88)** | MVP / 延長1 | op1 (IS_STRING / IS_LONG) を PPU nametable に出力。IS_LONG は decimal ASCII に変換 |
+
+### ジャンプ先のエンコード
+
+opcache dump では jump target は `JMP 0005` / `JMPNZ T4 0002` のように **4 桁の raw op_index** で表示される。serializer はこれを対応する operand フィールド (`op1` for JMP, `op2` for JMPZ/JMPNZ) の下位 2 バイトに uint16 として埋め込み、operand type は `IS_UNUSED` (0x00) にする。VM は `op_index * 24 + OPS_FIRST_OP` で絶対 ROM アドレスに変換して `VM_PC` にセットする。
+
+### truthy / falsy の判定 (JMPZ/JMPNZ 用)
+
+| zval type | 判定 |
+|---|---|
+| `IS_NULL` / `IS_FALSE` / `IS_UNDEF` | falsy |
+| `IS_TRUE` | truthy |
+| `IS_LONG` | 値 ≠ 0 なら truthy |
+| `IS_STRING` | 常に truthy (簡略化、PHP の `""` / `"0"` は falsy なのだが未対応) |
 
 番号は `/opt/homebrew/Cellar/php/8.4.6/include/php/Zend/zend_vm_opcodes.h` で確定。
+
+### operand slot 番号の表現
+
+CV / TMP_VAR / VAR の `op.var` フィールドには **slot 番号 × 16** を入れる (Zend の runtime byte-offset 慣習に近似、ただし `sizeof(zend_execute_data)` オフセットは除去する)。VM 側は `LSR / LSR` で 4 倍にしてから `VM_CVBASE` / `VM_TMPBASE` に加算、4B tagged value スロットにアクセスする。
+
+serializer は opcache ダンプの `CV0($a)` / `T2` / `V1` をそれぞれ `IS_CV/0*16`, `IS_TMP_VAR/2*16`, `IS_VAR/1*16` に変換する。
 
 ## operand type (`zend_compile.h` より確定値)
 

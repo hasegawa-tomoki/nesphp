@@ -26,6 +26,15 @@ const PHP_VERSION_REQUIRED_MINOR = 4;
 
 // === Zend 定数 (PHP 8.4.6 Zend/zend_vm_opcodes.h より確定) ===
 const ZEND_NOP         = 0;
+const ZEND_ADD         = 1;
+const ZEND_SUB         = 2;
+const ZEND_IS_EQUAL    = 18;
+const ZEND_IS_SMALLER  = 20;
+const ZEND_ASSIGN      = 22;
+const ZEND_QM_ASSIGN   = 31;
+const ZEND_JMP         = 42;
+const ZEND_JMPZ        = 43;
+const ZEND_JMPNZ       = 44;
 const ZEND_RETURN      = 62;
 const ZEND_ECHO        = 136;
 
@@ -53,11 +62,20 @@ const ZEND_OP_SIZE     = 24;   // handler 除去版
 const ZVAL_SIZE        = 16;
 const ZSTR_HEADER_SIZE = 24;
 
-// === ニーモニック → opcode 番号 (MVP 対応分のみ) ===
+// === ニーモニック → opcode 番号 ===
 const OPCODE_MAP = [
-    'NOP'    => ZEND_NOP,
-    'ECHO'   => ZEND_ECHO,
-    'RETURN' => ZEND_RETURN,
+    'NOP'        => ZEND_NOP,
+    'ADD'        => ZEND_ADD,
+    'SUB'        => ZEND_SUB,
+    'IS_EQUAL'   => ZEND_IS_EQUAL,
+    'IS_SMALLER' => ZEND_IS_SMALLER,
+    'ASSIGN'     => ZEND_ASSIGN,
+    'QM_ASSIGN'  => ZEND_QM_ASSIGN,
+    'JMP'        => ZEND_JMP,
+    'JMPZ'       => ZEND_JMPZ,
+    'JMPNZ'      => ZEND_JMPNZ,
+    'ECHO'       => ZEND_ECHO,
+    'RETURN'     => ZEND_RETURN,
 ];
 
 // =================================================================
@@ -124,12 +142,13 @@ function check_php_version(): void
 /**
  * 入力例:
  *   $_main:
- *        ; (lines=2, args=0, vars=0, tmps=0)
+ *        ; (lines=5, args=0, vars=1, tmps=3)
  *        ; (before optimizer)
- *        ; /path/to/hello.php:1-2
- *        ; return  [] RANGE[0..0]
- *   0000 ECHO string("HELLO, NES!")
- *   0001 RETURN int(1)
+ *   0000 ASSIGN CV0($a) int(1)
+ *   0001 T2 = ADD CV0($a) int(2)
+ *   0002 ASSIGN CV0($a) T2
+ *   0003 ECHO CV0($a)
+ *   0004 RETURN int(1)
  *
  * 出力: ['header' => [...], 'ops' => [...], 'literals' => [...]]
  */
@@ -145,6 +164,11 @@ function parse_opcache_dump(string $text): array
         'tmps'  => 0,
     ];
 
+    // 行の構造:
+    //   NNNN [Tn = ] MNEMONIC [op1 [op2]]
+    // result の候補は T\d+ (IS_TMP_VAR) または V\d+ (IS_VAR)
+    $lineRe = '/^(\d{4})\s+(?:([TV]\d+)\s*=\s*)?([A-Z_]+)(?:\s+(.*))?$/';
+
     foreach (preg_split('/\R/', $text) as $line) {
         if (preg_match('/^\s*;\s*\(lines=(\d+),\s*args=\d+,\s*vars=(\d+),\s*tmps=(\d+)\)/', $line, $m)) {
             $header['lines'] = (int)$m[1];
@@ -153,18 +177,35 @@ function parse_opcache_dump(string $text): array
             continue;
         }
 
-        if (!preg_match('/^(\d{4})\s+([A-Z_]+)(?:\s+(.*))?$/', $line, $m)) {
+        if (!preg_match($lineRe, $line, $m)) {
             continue;
         }
-        $index    = (int)$m[1];
-        $mnemonic = $m[2];
-        $operands = trim($m[3] ?? '');
+        $index      = (int)$m[1];
+        $resultTok  = $m[2] ?? '';
+        $mnemonic   = $m[3];
+        $operands   = trim($m[4] ?? '');
 
         if (!array_key_exists($mnemonic, OPCODE_MAP)) {
-            fail("unsupported Zend opcode in MVP: $mnemonic at line $index");
+            fail("unsupported Zend opcode: $mnemonic at line $index");
         }
 
-        [$op1Type, $op1Val, $op2Type, $op2Val] = split_operands($operands, $literals, $litIndex);
+        // result (T\d+ / V\d+ only)
+        [$resultType, $resultVal] = $resultTok !== ''
+            ? parse_operand($resultTok, $literals, $litIndex)
+            : [IS_UNUSED, 0];
+
+        // op1, op2 をトークナイズ (string リテラル内の空白を守るため単純 split 不可)
+        $tokens = tokenize_operands($operands);
+        [$op1Type, $op1Val] = $tokens[0] ?? null
+            ? parse_operand($tokens[0], $literals, $litIndex)
+            : [IS_UNUSED, 0];
+        [$op2Type, $op2Val] = $tokens[1] ?? null
+            ? parse_operand($tokens[1], $literals, $litIndex)
+            : [IS_UNUSED, 0];
+
+        if (count($tokens) > 2) {
+            fail("too many operands ($mnemonic): $operands");
+        }
 
         $ops[$index] = [
             'opcode'         => OPCODE_MAP[$mnemonic],
@@ -173,10 +214,10 @@ function parse_opcache_dump(string $text): array
             'op1_type'       => $op1Type,
             'op2'            => $op2Val,
             'op2_type'       => $op2Type,
-            'result'         => 0,
-            'result_type'    => IS_UNUSED,
+            'result'         => $resultVal,
+            'result_type'    => $resultType,
             'extended_value' => 0,
-            'lineno'         => 1, // MVP では 1 固定
+            'lineno'         => 1, // MVP 段階では行番号は無視
         ];
     }
 
@@ -194,62 +235,100 @@ function parse_opcache_dump(string $text): array
 }
 
 /**
- * ECHO/RETURN の operand 部分 (1 個) をパースして (type, val) を返す。
- * MVP では 1 operand のみ対応。
+ * operand 列をトークン単位に分割。string("...") / int(...) / CVn($var) / Tn / Vn を認識。
+ * 空白は区切り。string 内部の空白 / カンマは尊重する。
  *
- * @param array<int, array{type: int, value: mixed}> $literals
- * @param array<string, int> $litIndex
- * @return array{0:int, 1:int, 2:int, 3:int}
+ * @return string[]
  */
-function split_operands(string $s, array &$literals, array &$litIndex): array
+function tokenize_operands(string $s): array
 {
-    if ($s === '') {
-        return [IS_UNUSED, 0, IS_UNUSED, 0];
+    $tokens = [];
+    $rest = ltrim($s);
+    // 優先度順にマッチさせる (string はエスケープ対応の最長マッチ)
+    $re = '/^('
+        . 'string\("(?:[^"\\\\]|\\\\.)*"\)'
+        . '|int\(-?\d+\)'
+        . '|bool\((?:true|false)\)'
+        . '|null'
+        . '|CV\d+\(\$[a-zA-Z_][a-zA-Z0-9_]*\)'
+        . '|[TV]\d+'
+        . '|\d+'                         // raw op_index (ジャンプ先)
+        . ')/';
+    while ($rest !== '') {
+        if (!preg_match($re, $rest, $m)) {
+            fail("cannot tokenize operand starting at: $rest");
+        }
+        $tokens[] = $m[1];
+        $rest = ltrim(substr($rest, strlen($m[1])));
     }
-
-    // MVP では ECHO も RETURN も 1 operand のみ (op1 = IS_CONST)
-    $op1 = parse_literal_operand($s, $literals, $litIndex);
-    return [IS_CONST, $op1, IS_UNUSED, 0];
+    return $tokens;
 }
 
 /**
- * `string("HELLO, NES!")` や `int(1)` を literal プールに登録し、バイトオフセットを返す。
+ * operand 文字列を (type, value) に変換。
+ * value は zend_op の op1/op2/result field (uint32) に詰める値。
+ *   IS_CONST: literals 配列のバイトオフセット (literal_index * 16)
+ *   IS_CV:    CV スロット番号 * sizeof(zval) = slot * 16 (Zend 慣習に近似)
+ *   IS_TMP_VAR / IS_VAR: 同上 (slot * 16)
  *
- * @param array<int, array{type: int, value: mixed}> $literals
- * @param array<string, int> $litIndex
+ * @return array{0:int, 1:int}
  */
-function parse_literal_operand(string $s, array &$literals, array &$litIndex): int
+function parse_operand(string $s, array &$literals, array &$litIndex): array
 {
+    // literal: string("...")
     if (preg_match('/^string\("((?:[^"\\\\]|\\\\.)*)"\)$/', $s, $m)) {
         $value = stripcslashes($m[1]);
         validate_ascii($value);
-        $key = "string:$value";
-    } elseif (preg_match('/^int\((-?\d+)\)$/', $s, $m)) {
+        $idx = intern_literal($literals, $litIndex, ['type' => TYPE_STRING, 'value' => $value], "string:$value");
+        return [IS_CONST, $idx * ZVAL_SIZE];
+    }
+    // literal: int(N)
+    if (preg_match('/^int\((-?\d+)\)$/', $s, $m)) {
         $value = (int)$m[1];
         if ($value < -32768 || $value > 32767) {
             fail("integer literal out of 16bit range: $value");
         }
-        $key = "int:$value";
-    } elseif ($s === 'null') {
-        $value = null;
-        $key = 'null';
-    } elseif ($s === 'bool(true)' || $s === 'true') {
-        $value = true;
-        $key = 'true';
-    } elseif ($s === 'bool(false)' || $s === 'false') {
-        $value = false;
-        $key = 'false';
-    } else {
-        fail("unsupported literal operand: $s");
+        $idx = intern_literal($literals, $litIndex, ['type' => TYPE_LONG, 'value' => $value], "int:$value");
+        return [IS_CONST, $idx * ZVAL_SIZE];
+    }
+    // literal: null
+    if ($s === 'null') {
+        $idx = intern_literal($literals, $litIndex, ['type' => TYPE_NULL, 'value' => null], 'null');
+        return [IS_CONST, $idx * ZVAL_SIZE];
+    }
+    // literal: bool(true/false)
+    if (preg_match('/^bool\((true|false)\)$/', $s, $m)) {
+        $type = $m[1] === 'true' ? TYPE_TRUE : TYPE_FALSE;
+        $idx = intern_literal($literals, $litIndex, ['type' => $type, 'value' => $m[1] === 'true'], "bool:$m[1]");
+        return [IS_CONST, $idx * ZVAL_SIZE];
+    }
+    // CV slot: CVn($name)
+    if (preg_match('/^CV(\d+)\(\$\w+\)$/', $s, $m)) {
+        return [IS_CV, ((int)$m[1]) * ZVAL_SIZE];
+    }
+    // TMP slot: Tn
+    if (preg_match('/^T(\d+)$/', $s, $m)) {
+        return [IS_TMP_VAR, ((int)$m[1]) * ZVAL_SIZE];
+    }
+    // VAR slot: Vn
+    if (preg_match('/^V(\d+)$/', $s, $m)) {
+        return [IS_VAR, ((int)$m[1]) * ZVAL_SIZE];
+    }
+    // raw jump target: 数値 (op_index)
+    if (preg_match('/^\d+$/', $s)) {
+        return [IS_UNUSED, (int)$s];
     }
 
+    fail("unsupported operand: $s");
+}
+
+function intern_literal(array &$literals, array &$litIndex, array $record, string $key): int
+{
     if (!array_key_exists($key, $litIndex)) {
-        $idx = count($literals);
-        $literals[] = literal_record($value);
-        $litIndex[$key] = $idx;
+        $literals[] = $record;
+        $litIndex[$key] = count($literals) - 1;
     }
-    // Zend は op1.constant にバイトオフセットを入れるので、index * 16 を返す
-    return $litIndex[$key] * ZVAL_SIZE;
+    return $litIndex[$key];
 }
 
 function validate_ascii(string $s): void
@@ -264,18 +343,6 @@ function validate_ascii(string $s): void
             ));
         }
     }
-}
-
-function literal_record(mixed $value): array
-{
-    return match (true) {
-        is_int($value)    => ['type' => TYPE_LONG,  'value' => $value],
-        is_string($value) => ['type' => TYPE_STRING,'value' => $value],
-        is_null($value)   => ['type' => TYPE_NULL,  'value' => null],
-        $value === true   => ['type' => TYPE_TRUE,  'value' => true],
-        $value === false  => ['type' => TYPE_FALSE, 'value' => false],
-        default           => fail('unreachable literal type'),
-    };
 }
 
 // =================================================================
