@@ -36,6 +36,8 @@ ZEND_ECHO             = 136
 NESPHP_FGETS      = $F0
 NESPHP_NES_PUT    = $F1
 NESPHP_NES_SPRITE = $F2
+NESPHP_NES_PUTS   = $F3
+NESPHP_NES_CLS    = $F4
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -293,6 +295,14 @@ main_loop:
     CMP #NESPHP_NES_SPRITE
     BNE :+
     JMP handle_nesphp_nes_sprite
+:
+    CMP #NESPHP_NES_PUTS
+    BNE :+
+    JMP handle_nesphp_nes_puts
+:
+    CMP #NESPHP_NES_CLS
+    BNE :+
+    JMP handle_nesphp_nes_cls
 :
     CMP #ZEND_ECHO
     BNE :+
@@ -1480,6 +1490,150 @@ np_addr:
     LDA TMP2
     STA PPUDATA
 
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_PUTS: nametable (x, y) から文字列リテラルを書く
+;
+; op1 = x (IS_CV / IS_CONST, IS_LONG 値)
+; op2 = y (IS_CV / IS_CONST, IS_LONG 値)
+; extended_value = 文字列 literal のバイトオフセット (IS_CONST, TYPE_STRING)
+;
+; 前提: nes_put と同様、PPUMASK = 0 (強制 blanking) 中に呼ぶこと。
+; 行折り返しは行わず、呼び出し側で (x, y) を与える。len は 8bit 有効 (max 255)。
+; =============================================================================
+handle_nesphp_nes_puts:
+    JSR resolve_op1        ; OP1_VAL = x
+    JSR resolve_op2        ; OP2_VAL = y
+
+    ; extended_value (offset 12) = zval (16B) のバイトオフセット
+    LDY #12
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    CLC
+    LDA VM_LITBASE
+    ADC TMP0
+    STA TMP0
+    LDA VM_LITBASE+1
+    ADC TMP0+1
+    STA TMP0+1
+    ; TMP0 = zval アドレス
+    LDY #8                 ; u1.type_info
+    LDA (TMP0), Y
+    CMP #TYPE_STRING
+    BNE nps_type_err
+
+    ; value.str (bytes 0-1) = ops.bin 内 zend_string への offset
+    LDY #0
+    LDA (TMP0), Y
+    STA TMP1
+    INY
+    LDA (TMP0), Y
+    STA TMP1+1
+    ; TMP1 += OPS_BASE
+    CLC
+    LDA TMP1
+    ADC #<OPS_BASE
+    STA TMP1
+    LDA TMP1+1
+    ADC #>OPS_BASE
+    STA TMP1+1
+    ; len @ zend_string + 16 (下位 1B)
+    LDY #16
+    LDA (TMP1), Y
+    STA TMP2               ; TMP2 = 書き込みバイト数 (8bit)
+    ; val @ zend_string + 24
+    CLC
+    LDA TMP1
+    ADC #24
+    STA TMP1
+    LDA TMP1+1
+    ADC #0
+    STA TMP1+1
+
+    ; nametable addr = $2000 + y*32 + x, store in TMP0
+    LDA OP2_VAL+1
+    STA TMP0
+    LDA #0
+    STA TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ; + x
+    CLC
+    LDA OP1_VAL+1
+    ADC TMP0
+    STA TMP0
+    LDA #0
+    ADC TMP0+1
+    STA TMP0+1
+    ; + $2000
+    LDA TMP0+1
+    CLC
+    ADC #$20
+    STA TMP0+1
+
+    ; PPUADDR = TMP0
+    BIT PPUSTATUS
+    LDA TMP0+1
+    STA PPUADDR
+    LDA TMP0
+    STA PPUADDR
+
+    ; 文字列バイト列 (TMP1) を TMP2 バイトぶん PPUDATA に書き出す
+    LDY #0
+nps_loop:
+    CPY TMP2
+    BEQ nps_done
+    LDA (TMP1), Y
+    STA PPUDATA
+    INY
+    BNE nps_loop
+nps_done:
+    JMP advance
+
+nps_type_err:
+    JMP handle_unimpl
+
+; =============================================================================
+; NESPHP_NES_CLS: nametable 0 ($2000-$23FF) を空白 ($20) で埋める
+;
+; 引数なし。PPU_CURSOR を NAMETABLE_START に戻す。
+; 前提: nes_put と同様、PPUMASK = 0 (強制 blanking) 中に呼ぶこと。
+; sprite_mode 中は呼び出し不可 (rendering on だと転送中に画面が壊れる)。
+; =============================================================================
+handle_nesphp_nes_cls:
+    BIT PPUSTATUS
+    LDA #$20
+    STA PPUADDR
+    LDA #$00
+    STA PPUADDR
+    LDA #$20               ; space タイル
+    LDX #4                 ; 4 ページ × 256B = 1024B ($2000-$23FF 全域)
+    LDY #0
+cls_outer:
+cls_inner:
+    STA PPUDATA
+    INY
+    BNE cls_inner
+    DEX
+    BNE cls_outer
+
+    ; PPU_CURSOR を既定位置に戻す
+    LDA #<NAMETABLE_START
+    STA PPU_CURSOR
+    LDA #>NAMETABLE_START
+    STA PPU_CURSOR+1
     JMP advance
 
 ; =============================================================================

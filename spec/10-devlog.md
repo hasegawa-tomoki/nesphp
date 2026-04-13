@@ -285,6 +285,61 @@ while (true) {
 
 ---
 
+---
+
+## Phase 5C: プレゼンテーション用途 (`slides.nes`)
+
+### ゴール
+
+```php
+<?php
+$p = 0;
+while (true) {
+    $k = fgets(STDIN);
+    $p = $p + 1;
+    if ($p === 7) { $p = 1; }
+    if ($p === 1) { nes_cls(); nes_puts(4, 4, "NESPHP PRESENTATION"); }
+    if ($p === 2) { nes_puts(4, 7, "1. PHP ON FAMICOM"); }
+    // ...
+}
+```
+
+ボタンを押すごとに行が追加表示され、最後まで行ったら次のボタン押下で画面クリアして先頭から。LT 向けプレゼン資料を NES 上で動かす。
+
+### 決定事項
+
+- **新 custom opcode 2 種**: `NESPHP_NES_PUTS = 0xF3`, `NESPHP_NES_CLS = 0xF4`
+  - `nes_puts($x, $y, "literal")`: nes_put と同じ 3 引数パターン。op1=x, op2=y, extended_value=string literal の zval offset。VM は `zend_string.len + val[]` を PPUDATA に一括流し込み。行折り返しは実装せず (呼び出し側で y を明示)
+  - `nes_cls()`: 引数 0、nametable 0 全域 ($2000-$23FF 1024B) を空白 ($20) で埋め、`PPU_CURSOR` を既定位置に戻す
+- **serializer の畳み込み拡張**: nes_put / nes_sprite の 3 引数ブランチを `$customMap` で配列化して nes_puts を追加。nes_cls は 0 引数なので DO_FCALL_BY_NAME 直後に別ブランチで畳み込み
+- **どちらも forced_blanking 前提**: nes_put と同じ制約。fgets 中に rendering が ON → nes_puts/nes_cls 実行時は rendering が OFF なので PPUDATA 書き込みが安全。sprite_mode 中は呼び出し不可 (ドキュメントに明記)
+
+### 設計上のトレードオフ
+
+| 選択肢 | 採否 | 理由 |
+|---|---|---|
+| echo を NMI 同期化して行追加 | ❌ | ロードマップ第 3 段階の大型改修、プレゼン用には過剰 |
+| 「全行ハードコード」で nes_put を文字数分呼ぶ | ❌ | 数百行の PHP になる、読めない |
+| **nes_puts + nes_cls の intrinsic 追加** | ✅ | Phase 5A と同じ畳み込みパターンの素直な拡張、実装 1-2h |
+| 行折り返しを VM 側で実装 | ❌ | コストに見合わない。プレゼンでは各行の (x,y) を明示する方が制御しやすい |
+
+### 成果
+
+`slides.nes`: 58 ops / 19 literals / 1988 バイトの ops.bin。ボタン押下で 5 行が順に表示され、6 回目で先頭に戻る。`xxd -g 1 build/slides.nes | grep f3` / `grep f4` で `NESPHP_NES_PUTS` / `NESPHP_NES_CLS` のバイトがヒット。
+
+### 発見: `nes_cls()` の opcache 出力は素直
+
+0 引数の internal-likeな関数呼び出しは:
+
+```
+INIT_FCALL_BY_NAME 0 string("nes_cls")
+DO_FCALL_BY_NAME
+```
+
+の 2 命令に落ちる (SEND_* なし)。畳み込みは `$pendingArgs === []` を確認するだけで済む。一方 `nes_puts` の string 3 引数は `SEND_VAL_EX string("...") 3` の形で出るので、既存の `parse_operand` がそのまま IS_CONST/TYPE_STRING として解決してくれる。serializer 側の変更量は最小。
+
+---
+
 ## 各フェーズ横断の学び
 
 ### 1. 「Zend に似せる」と「6502 で動く」の綱引き

@@ -51,6 +51,8 @@ const ZEND_ECHO               = 136;
 const NESPHP_FGETS            = 0xF0;  // fgets(STDIN) intrinsic
 const NESPHP_NES_PUT          = 0xF1;  // nes_put($x, $y, $char) intrinsic
 const NESPHP_NES_SPRITE       = 0xF2;  // nes_sprite($x, $y, $tile) intrinsic (sprite 0)
+const NESPHP_NES_PUTS         = 0xF3;  // nes_puts($x, $y, "literal") intrinsic
+const NESPHP_NES_CLS          = 0xF4;  // nes_cls() intrinsic
 
 // === Zend operand type (zend_compile.h) ===
 const IS_UNUSED        = 0;
@@ -258,15 +260,19 @@ function parse_opcache_dump(string $text): array
                 $pendingArgs = [];
                 continue;
             }
-            if ($pendingBuiltin === 'nes_put' || $pendingBuiltin === 'nes_sprite') {
+            if ($pendingBuiltin === 'nes_put' || $pendingBuiltin === 'nes_sprite' || $pendingBuiltin === 'nes_puts') {
                 if (count($pendingArgs) !== 3) {
                     fail("$pendingBuiltin requires 3 arguments at line $index (got " . count($pendingArgs) . ")");
                 }
                 if ($pendingArgs[2]['type'] !== IS_CONST) {
-                    fail("$pendingBuiltin: 3rd argument (char/tile) must be a compile-time literal at line $index");
+                    fail("$pendingBuiltin: 3rd argument must be a compile-time literal at line $index");
                 }
-                $customOpcode = $pendingBuiltin === 'nes_put' ? NESPHP_NES_PUT : NESPHP_NES_SPRITE;
-                $customName   = $pendingBuiltin === 'nes_put' ? 'NESPHP_NES_PUT' : 'NESPHP_NES_SPRITE';
+                $customMap = [
+                    'nes_put'    => [NESPHP_NES_PUT,    'NESPHP_NES_PUT'],
+                    'nes_puts'   => [NESPHP_NES_PUTS,   'NESPHP_NES_PUTS'],
+                    'nes_sprite' => [NESPHP_NES_SPRITE, 'NESPHP_NES_SPRITE'],
+                ];
+                [$customOpcode, $customName] = $customMap[$pendingBuiltin];
                 $ops[$index] = [
                     'opcode'         => $customOpcode,
                     'mnemonic'       => $customName,
@@ -277,6 +283,26 @@ function parse_opcache_dump(string $text): array
                     'result'         => 0,
                     'result_type'    => IS_UNUSED,
                     'extended_value' => $pendingArgs[2]['val'],
+                    'lineno'         => 1,
+                ];
+                $pendingBuiltin = null;
+                $pendingArgs = [];
+                continue;
+            }
+            if ($pendingBuiltin === 'nes_cls') {
+                if (count($pendingArgs) !== 0) {
+                    fail("nes_cls requires 0 arguments at line $index (got " . count($pendingArgs) . ")");
+                }
+                $ops[$index] = [
+                    'opcode'         => NESPHP_NES_CLS,
+                    'mnemonic'       => 'NESPHP_NES_CLS',
+                    'op1'            => 0,
+                    'op1_type'       => IS_UNUSED,
+                    'op2'            => 0,
+                    'op2_type'       => IS_UNUSED,
+                    'result'         => 0,
+                    'result_type'    => IS_UNUSED,
+                    'extended_value' => 0,
                     'lineno'         => 1,
                 ];
                 $pendingBuiltin = null;

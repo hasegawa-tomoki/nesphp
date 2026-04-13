@@ -43,7 +43,7 @@
          [forced_blanking]                       [sprite_mode]
          PPUMASK = 0                             PPUMASK = %00011110 (BG+sprite)
          NMI off                                 NMI on
-         nametable に直接書ける                    echo/nes_put は使えない
+         nametable に直接書ける                    echo/nes_put/nes_puts/nes_cls 不可
          sprite は表示されない                     OAM DMA が毎 VBlank で走る
                │                                        ▲
                │  ┌── fgets: 一時的に rendering on, 待機, off ──┐
@@ -58,7 +58,7 @@
 ### forced_blanking (初期状態 / sprite_mode に遷移前)
 
 - `PPUMASK = 0`、レンダリング停止 → 画面は黒
-- `echo` / `nes_put` は強制 blanking 中に `PPUADDR` / `PPUDATA` を直接叩ける
+- `echo` / `nes_put` / `nes_puts` / `nes_cls` は強制 blanking 中に `PPUADDR` / `PPUDATA` を直接叩ける
 - `fgets` は以下のサブフロー:
   1. `PPUSCROLL = 0,0` + `PPUMASK = %00001110` (rendering 一時 on)
   2. コントローラ全ボタン release 待ち → 新押下待ち
@@ -81,7 +81,7 @@
 
 - `nes_sprite` は OAM shadow `$0200-$0203` に (y, tile, attr, x) を書くだけ。NMI が毎 VBlank で DMA
 - `fgets` は rendering を切らずにボタン待ち (NMI が走り続けるので画面表示継続)
-- `echo` / `nes_put` は **使ってはいけない** (rendering 中の nametable 書き込みは PPU state を壊す)
+- `echo` / `nes_put` / `nes_puts` / `nes_cls` は **使ってはいけない** (rendering 中の nametable 書き込みは PPU state を壊す)
 
 ### 状態遷移の制約
 

@@ -12,6 +12,7 @@
 | 延長 第 4 段階: コントローラ入力 | `button.nes` | ✅ **完了** |
 | 延長 第 5A: ネームテーブル文字移動 | `move.nes` | ✅ **完了** |
 | 延長 第 5B: ハードウェアスプライト移動 | `sprite.nes` | ✅ **完了** |
+| 延長 第 5C: プレゼン用 `nes_puts` / `nes_cls` | `slides.nes` | ✅ **完了** |
 | 延長 第 3 段階: NMI 同期 echo | — | 未着手 (echo は sprite_mode 前まで制限) |
 | 第 2 段階: 自作 Zend 拡張 | `nesphp_dump.so` | 未着手 |
 | 多スプライト対応 | — | 未着手 (現在 sprite 0 固定) |

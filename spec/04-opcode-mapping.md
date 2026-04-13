@@ -40,6 +40,8 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 | `NESPHP_FGETS` | **0xF0** | コントローラ待ち → 押されたボタンの `button_str_X` を IS_STRING で result へ |
 | `NESPHP_NES_PUT` | **0xF1** | nametable の (x, y) に 1 文字書く。forced_blanking 前提 |
 | `NESPHP_NES_SPRITE` | **0xF2** | sprite 0 の OAM shadow を更新。初回呼び出しで sprite_mode に遷移 |
+| `NESPHP_NES_PUTS` | **0xF3** | nametable の (x, y) に文字列リテラルを書く。forced_blanking 前提、行折り返しなし |
+| `NESPHP_NES_CLS` | **0xF4** | nametable 0 ($2000-$23FF) を空白で埋めて `PPU_CURSOR` を既定位置に戻す。forced_blanking 前提 |
 
 ### serializer のパターン畳み込み
 
@@ -53,7 +55,7 @@ SEND_VAL T? ...                 →  ZEND_NOP
 DO_ICALL                        →  NESPHP_FGETS (result スロット継承)
 ```
 
-**`nes_put($x, $y, "X")` / `nes_sprite($x, $y, 65)` → `NESPHP_NES_PUT` / `NESPHP_NES_SPRITE`**
+**`nes_put($x, $y, "X")` / `nes_puts($x, $y, "str")` / `nes_sprite($x, $y, 65)` → `NESPHP_NES_PUT` / `NESPHP_NES_PUTS` / `NESPHP_NES_SPRITE`**
 ```
 INIT_FCALL_BY_NAME ... "nes_put" →  ZEND_NOP
 SEND_VAR_EX CV0 ... 1            →  ZEND_NOP  (引数を pendingArgs に記録)
@@ -63,7 +65,13 @@ DO_FCALL_BY_NAME                 →  NESPHP_NES_PUT
                                     op1 = $x, op2 = $y, extended_value = char literal
 ```
 
-第 3 引数 (char / tile) は **コンパイル時リテラル必須**。非リテラルで呼び出すと serializer がエラー。
+第 3 引数 (char / string / tile) は **コンパイル時リテラル必須**。非リテラルで呼び出すと serializer がエラー。`nes_puts` は第 3 引数が `TYPE_STRING` リテラルで、VM が `zend_string.len + val[]` を PPUDATA へ流し込む。
+
+**`nes_cls()` → `NESPHP_NES_CLS`**
+```
+INIT_FCALL_BY_NAME 0 "nes_cls"   →  ZEND_NOP
+DO_FCALL_BY_NAME                 →  NESPHP_NES_CLS  (引数 0)
+```
 
 ### ジャンプ先のエンコード
 

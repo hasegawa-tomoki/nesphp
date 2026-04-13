@@ -219,6 +219,32 @@ while (true) {
 - [x] `xxd -g 1 build/sprite.nes | grep 'f2 08 08 00'` で NESPHP_NES_SPRITE (0xF2) がヒット
 - [x] NMI ハンドラが毎 VBlank で OAM DMA ($4014) を実行
 
+### 延長第 5C 段階: プレゼン表示 (`slides.nes`) ✅
+
+`examples/slides.php`:
+```php
+<?php
+$p = 0;
+while (true) {
+    $k = fgets(STDIN);
+    $p = $p + 1;
+    if ($p === 7) { $p = 1; }
+    if ($p === 1) { nes_cls(); nes_puts(4, 4, "NESPHP PRESENTATION"); }
+    if ($p === 2) { nes_puts(4, 7, "1. PHP ON FAMICOM"); }
+    if ($p === 3) { nes_puts(4, 9, "2. ZEND OPCODE ON 6502"); }
+    if ($p === 4) { nes_puts(4, 11, "3. L3 ROM LAYOUT"); }
+    if ($p === 5) { nes_puts(4, 13, "4. ROMAN OVER UTILITY"); }
+    if ($p === 6) { nes_puts(4, 16, "PRESS ANY KEY TO RESET"); }
+}
+```
+
+- [x] 任意のボタン押下でスライドが 1 行ずつ追加表示される
+- [x] 6 回目の押下で画面がクリアされ、タイトルから再描画される
+- [x] `strings build/slides.nes` で全スライド文字列がヒット (`NESPHP PRESENTATION` 他)
+- [x] `xxd -g 1 build/slides.nes | grep 'f3 01 01 00'` で NESPHP_NES_PUTS (0xF3, op1/op2=IS_CONST) がヒット
+- [x] `xxd -g 1 build/slides.nes | grep 'f4 00 00 00'` で NESPHP_NES_CLS (0xF4, 引数なし) がヒット
+- [x] マッパー 0 (NROM-256) のまま (ROM サイズは 40976 バイト固定)
+
 ---
 
 ## 実機検証 (任意)
