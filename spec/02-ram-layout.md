@@ -33,25 +33,29 @@ $0700-$07FF  予備
 
 ---
 
-## ゼロページ VM レジスタ ($0000-$001F)
+## ゼロページ VM レジスタ (実装済み)
 
-ゼロページに置くと `LDA (zp),Y` の間接アドレッシングと `LDX zp` の即値が使えて、6502 で最速。
+ゼロページに置くと `LDA (zp),Y` の間接アドレッシングと `LDX zp` の即値が使えて、6502 で最速。ca65 `.segment "ZEROPAGE"` で `.res` 宣言し、ld65 が自動配置する。現在の配置:
 
-```
-$00-$01   VM_PC         現在の zend_op へのポインタ (PRG-ROM アドレス)
-$02-$03   VM_SP         VM データスタックのトップ (RAM アドレス)
-$04-$05   VM_LITBASE    literals 配列の先頭 ROM アドレス
-$06-$07   VM_ROMBASE    op_array 先頭 ROM アドレス (literals_off 解決に使う)
-$08-$09   VM_CVBASE     CV 配列の先頭 RAM アドレス (= $0400 固定)
-$0A-$0B   VM_TMPBASE    TMP 配列の先頭 RAM アドレス (= $0500 固定)
-$0C-$0D   PPU_CURSOR    現在 nametable 書き込み位置 ($2000 ベースのオフセット)
-$0E-$0F   TMP0          汎用 16bit 作業レジスタ
-$10-$11   TMP1          汎用 16bit 作業レジスタ
-$12-$13   TMP2          汎用 16bit 作業レジスタ
-$14-$17   OP1_VAL       現 opcode の op1 を解決した 4B tagged value
-$18-$1B   OP2_VAL       現 opcode の op2 を解決した 4B tagged value
-$1C-$1F   RESULT_VAL    結果書き戻し用 4B tagged value
-```
+| label | サイズ | 用途 |
+|---|---|---|
+| `VM_PC` | 2 | 現在の zend_op の ROM アドレス (fetch 元) |
+| `VM_LITBASE` | 2 | literals 配列の ROM アドレス (= OPS_BASE + literals_off) |
+| `VM_CVBASE` | 2 | CV スロット配列の RAM アドレス (= $0400) |
+| `VM_TMPBASE` | 2 | TMP スロット配列の RAM アドレス (= $0500) |
+| `PPU_CURSOR` | 2 | nametable 書き込み位置 ($2000 ベースの絶対 PPU アドレス) |
+| `OP1_VAL` | 4 | resolve_op1 が書き込む 4B tagged value |
+| `OP2_VAL` | 4 | resolve_op2 が書き込む 4B tagged value |
+| `RESULT_VAL` | 4 | handler が write_result で書き戻す 4B tagged value |
+| `TMP0` | 2 | 汎用 16bit 作業レジスタ |
+| `TMP1` | 2 | 汎用 16bit 作業レジスタ |
+| `TMP2` | 2 | 汎用 16bit 作業レジスタ |
+| `DIV_COUNTER` | 1 | (予約、未使用) |
+| `buttons` | 1 | コントローラ状態 (bit 7=A, 6=B, ..., 0=R) |
+| `pi_count` | 1 | `print_int16` が出力したバイト数 (echo_long で PPU_CURSOR 更新に使用) |
+| `sprite_mode_on` | 1 | `0 = forced_blanking` / `1 = sprite_mode` の状態フラグ |
+
+合計 ~34 バイト。ZP 予算 256B のうち 13% 程度しか使っていないので、今後も余裕あり。
 
 ---
 

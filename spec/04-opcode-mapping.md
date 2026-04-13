@@ -11,21 +11,59 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 - PHP のマイナーバージョンが変わったら、このファイルの表を更新し、serializer/VM 両方を再ビルド
 - op_array header の `php_version_major/minor` が 8.4 でなければ VM は即 halt
 
-## 対応 opcode (MVP + 延長 第 1・2 段階)
+## 対応 Zend opcode (実装済み)
 
-| Zend opcode | 番号 (PHP 8.4.6) | 段階 | nesphp での扱い |
-|-------------|------------------|------|----------------|
+| Zend opcode | 番号 | 段階 | nesphp での扱い |
+|-------------|------|------|----------------|
+| `ZEND_NOP` | **0 (0x00)** | 延長4 | 何もせず PC を進める (intrinsic 畳み込みのプレースホルダ) |
 | `ZEND_ADD` | **1 (0x01)** | 延長1 | op1+op2 (IS_LONG 前提) → result。16bit 符号付き加算 |
 | `ZEND_SUB` | **2 (0x02)** | 延長1 | op1-op2 → result。16bit 符号付き減算 |
-| `ZEND_IS_EQUAL` | **18 (0x12)** | 延長2 | 同じ型 + 同じ payload なら TYPE_TRUE、それ以外 TYPE_FALSE を result へ |
-| `ZEND_IS_SMALLER` | **20 (0x14)** | 延長2 | op1 < op2 (IS_LONG 符号付き 16bit) なら TYPE_TRUE を result へ |
+| `ZEND_IS_IDENTICAL` | **16 (0x10)** | 延長5A | 同じ型 + 同じ値。文字列は `values_equal_content` で len + val[] content 比較 |
+| `ZEND_IS_NOT_IDENTICAL` | **17 (0x11)** | 延長5A | 否定版 |
+| `ZEND_IS_EQUAL` | **18 (0x12)** | 延長2 | `IS_IDENTICAL` と同じ実装を共用 (PHP の type juggling は未対応) |
+| `ZEND_IS_NOT_EQUAL` | **19 (0x13)** | 延長5A | 否定版 |
+| `ZEND_IS_SMALLER` | **20 (0x14)** | 延長2 | op1 < op2 (IS_LONG 符号付き 16bit)。`BVC + EOR #$80 + BMI` の標準イディオム |
 | `ZEND_ASSIGN` | **22 (0x16)** | 延長1 | op1 (IS_CV) ← op2 の値。4B tagged value をそのままコピー |
 | `ZEND_QM_ASSIGN` | **31 (0x1F)** | 延長1 | op1 → result。値コピー |
-| `ZEND_JMP` | **42 (0x2A)** | 延長2 | op1.num (op_index) に無条件分岐。VM_PC = OPS_FIRST_OP + op_index*24 |
+| `ZEND_JMP` | **42 (0x2A)** | 延長2 | op1.num (op_index) に無条件分岐 |
 | `ZEND_JMPZ` | **43 (0x2B)** | 延長2 | op1 が falsy のとき op2.num に分岐 |
 | `ZEND_JMPNZ` | **44 (0x2C)** | 延長2 | op1 が truthy のとき op2.num に分岐 |
-| `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 → NMI 待ちの無限ループ |
-| `ZEND_ECHO` | **136 (0x88)** | MVP / 延長1 | op1 (IS_STRING / IS_LONG) を PPU nametable に出力。IS_LONG は decimal ASCII に変換 |
+| `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 (forced_blanking 時) → 無限ループ |
+| `ZEND_ECHO` | **136 (0x88)** | MVP / 延長1 | op1 (IS_STRING / IS_LONG) を PPU nametable に出力。IS_LONG は `print_int16` で decimal ASCII に変換 |
+
+## nesphp カスタム opcode (0xE0-0xFF 帯)
+
+Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領域として確保。すべて serializer のパターン畳み込みで生成される。
+
+| opcode | 番号 | 役割 |
+|---|---|---|
+| `NESPHP_FGETS` | **0xF0** | コントローラ待ち → 押されたボタンの `button_str_X` を IS_STRING で result へ |
+| `NESPHP_NES_PUT` | **0xF1** | nametable の (x, y) に 1 文字書く。forced_blanking 前提 |
+| `NESPHP_NES_SPRITE` | **0xF2** | sprite 0 の OAM shadow を更新。初回呼び出しで sprite_mode に遷移 |
+
+### serializer のパターン畳み込み
+
+以下の Zend opcode シーケンスを単一 custom opcode に畳み込む。`NOP` 置換で op_index は変わらないので後続 JMP ターゲットは壊れない。
+
+**`fgets(STDIN)` → `NESPHP_FGETS`**
+```
+INIT_FCALL ... "fgets"          →  ZEND_NOP
+FETCH_CONSTANT "STDIN"          →  ZEND_NOP
+SEND_VAL T? ...                 →  ZEND_NOP
+DO_ICALL                        →  NESPHP_FGETS (result スロット継承)
+```
+
+**`nes_put($x, $y, "X")` / `nes_sprite($x, $y, 65)` → `NESPHP_NES_PUT` / `NESPHP_NES_SPRITE`**
+```
+INIT_FCALL_BY_NAME ... "nes_put" →  ZEND_NOP
+SEND_VAR_EX CV0 ... 1            →  ZEND_NOP  (引数を pendingArgs に記録)
+SEND_VAR_EX CV1 ... 2            →  ZEND_NOP
+SEND_VAL_EX string("X") ... 3    →  ZEND_NOP
+DO_FCALL_BY_NAME                 →  NESPHP_NES_PUT
+                                    op1 = $x, op2 = $y, extended_value = char literal
+```
+
+第 3 引数 (char / tile) は **コンパイル時リテラル必須**。非リテラルで呼び出すと serializer がエラー。
 
 ### ジャンプ先のエンコード
 

@@ -122,9 +122,11 @@ strings build/hello.nes | grep -E 'HELLO|NESPHP'
 
 ---
 
-## 延長ゴールの段階別受け入れ基準
+## 実装済み demo の受け入れ基準
 
-### 第 1 段階: 整数 + ローカル変数
+全て `make build/NAME.nes` でビルド → Mesen で起動。
+
+### 延長第 1 段階: 整数 + ローカル変数 (`arith.nes`) ✅
 
 `examples/arith.php`:
 ```php
@@ -134,71 +136,88 @@ $a = $a + 2;
 echo $a;
 ```
 
-- [ ] Mesen で `3` が表示される
-- [ ] `xxd build/arith.nes | grep '01 01 08 08'` (ZEND_ADD 等の予想値) がヒット
+- [x] Mesen で `3` が表示される
+- [x] `xxd -g 1 build/arith.nes | grep '01 08 01 02'` で ZEND_ADD (0x01) + op1_type=IS_CV + op2_type=IS_CONST + result_type=IS_TMP_VAR がヒット
+- [x] `xxd -g 1 build/arith.nes | grep '16 08 01 00'` で ZEND_ASSIGN (0x16) がヒット
 
-### 第 2 段階: 制御フロー
+### 延長第 2 段階: 制御フロー (`loop.nes`) ✅
 
 `examples/loop.php`:
 ```php
 <?php
 $i = 0;
 while ($i < 5) {
-    echo "X";
+    echo $i;
     $i = $i + 1;
 }
 ```
 
-- [ ] Mesen で `XXXXX` が表示される
+- [x] Mesen で `01234` が表示される
+- [x] `xxd -g 1 build/loop.nes | grep '2a 00 00 00'` で ZEND_JMP (0x2A) がヒット
+- [x] `xxd -g 1 build/loop.nes | grep '2c 02 00 00'` で ZEND_JMPNZ (0x2C) + op2_type=IS_UNUSED がヒット
+- [x] `xxd -g 1 build/loop.nes | grep '14 08 01 02'` で ZEND_IS_SMALLER (0x14) がヒット
 
-### 第 3 段階: 動的 echo (NMI 同期)
+### 延長第 4 段階: コントローラ入力 (`button.nes`) ✅
 
-`examples/count.php`:
+`examples/button.php`:
 ```php
 <?php
-$i = 0;
-while ($i < 10) {
-    echo "*";
-    $i = $i + 1;
-}
+echo "Press: ";
+$k = fgets(STDIN);
+echo $k;
 ```
 
-- [ ] NMI 同期方式に切り替えた状態で、画面に `*` が順番に増えていく様子が見える (強制 blanking では全部描かれた後に一瞬で表示)
+- [x] Mesen で `Press: ` が表示される
+- [x] A/B/Start/Select/U/D/L/R の各ボタンを押すと対応する文字が続けて表示される
+- [x] `xxd -g 1 build/button.nes | grep 'f0 00 00 04'` で NESPHP_FGETS (0xF0) + result_type=IS_VAR がヒット
+- [x] fgets の `INIT_FCALL / FETCH_CONSTANT / SEND_VAL` が NOP (0x00) に畳み込まれている
 
-### 第 4 段階: コントローラ入力
+### 延長第 5A 段階: タイル文字移動 (`move.nes`) ✅
 
-`examples/input.php`:
+`examples/move.php`:
 ```php
 <?php
+$x = 16;
+$y = 14;
+nes_put($x, $y, "X");
 while (true) {
     $k = fgets(STDIN);
-    if ($k === "A") echo "A";
-    if ($k === "B") echo "B";
+    nes_put($x, $y, " ");
+    if ($k === "L") $x = $x - 1;
+    if ($k === "R") $x = $x + 1;
+    if ($k === "U") $y = $y - 1;
+    if ($k === "D") $y = $y + 1;
+    nes_put($x, $y, "X");
 }
 ```
 
-- [ ] Mesen でコントローラ A ボタンを押すと画面に `A` が追加される
-- [ ] B ボタンを押すと `B` が追加される
+- [x] 画面中央に `X` が表示される
+- [x] 十字キーで `X` が 1 タイルずつ動く (erase old + redraw new)
+- [x] `xxd -g 1 build/move.nes | grep 'f1 08 08 00'` で NESPHP_NES_PUT (0xF1) がヒット
+- [x] `xxd -g 1 build/move.nes | grep '10 08 01 02'` で ZEND_IS_IDENTICAL (0x10) がヒット
 
-### 第 5 段階: スプライト
+### 延長第 5B 段階: ハードウェアスプライト (`sprite.nes`) ✅
 
 `examples/sprite.php`:
 ```php
 <?php
 $x = 120;
 $y = 120;
+nes_sprite($x, $y, 65);
 while (true) {
     $k = fgets(STDIN);
-    if ($k === "L") $x = $x - 1;
-    if ($k === "R") $x = $x + 1;
-    if ($k === "U") $y = $y - 1;
-    if ($k === "D") $y = $y + 1;
-    nes_sprite_set(0, $x, $y, 0xA0);
+    if ($k === "L") $x = $x - 2;
+    if ($k === "R") $x = $x + 2;
+    if ($k === "U") $y = $y - 2;
+    if ($k === "D") $y = $y + 2;
+    nes_sprite($x, $y, 65);
 }
 ```
 
-- [ ] 画面中央にスプライトが表示される
-- [ ] 十字キーでスプライトが上下左右に動く
+- [x] 画面中央に `A` (tile 65) がスプライトで表示される
+- [x] 十字キーで 2 ピクセルずつ滑らかにスプライトが動く
+- [x] `xxd -g 1 build/sprite.nes | grep 'f2 08 08 00'` で NESPHP_NES_SPRITE (0xF2) がヒット
+- [x] NMI ハンドラが毎 VBlank で OAM DMA ($4014) を実行
 
 ---
 

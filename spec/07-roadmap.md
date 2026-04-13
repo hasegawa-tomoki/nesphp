@@ -2,6 +2,22 @@
 
 [← README](./README.md) | [← 06-display-io](./06-display-io.md) | [→ 08-risks](./08-risks.md)
 
+## 進捗サマリ
+
+| フェーズ | 成果物 | 状態 |
+|---|---|---|
+| MVP: echo のみ | `hello.nes` | ✅ **完了** |
+| 延長 第 1 段階: 整数 + 変数 | `arith.nes` | ✅ **完了** |
+| 延長 第 2 段階: 制御フロー | `loop.nes` | ✅ **完了** |
+| 延長 第 4 段階: コントローラ入力 | `button.nes` | ✅ **完了** |
+| 延長 第 5A: ネームテーブル文字移動 | `move.nes` | ✅ **完了** |
+| 延長 第 5B: ハードウェアスプライト移動 | `sprite.nes` | ✅ **完了** |
+| 延長 第 3 段階: NMI 同期 echo | — | 未着手 (echo は sprite_mode 前まで制限) |
+| 第 2 段階: 自作 Zend 拡張 | `nesphp_dump.so` | 未着手 |
+| 多スプライト対応 | — | 未着手 (現在 sprite 0 固定) |
+
+各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。
+
 ## MVP (`echo "HELLO, NES!";` を NES で表示する)
 
 ### ステップ 1: リポジトリ骨格

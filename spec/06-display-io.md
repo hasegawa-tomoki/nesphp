@@ -29,29 +29,101 @@
 3. `$4010 = 0` (DMC 無効化)
 4. 2 回の VBL 待ち (`BIT $2002` → `BPL $-3` を 2 回)
 5. RAM クリア
-6. パレット書き込み (`$3F00-$3F1F` に 32 バイト)
-7. nametable クリア (`$2000-$23FF` に 0x00 を 1024 バイト)
+6. **OAM shadow `$0200-$02FF` を y=$FF で初期化** (64 スプライトを画面外に隠す)
+7. パレット書き込み (`$3F00-$3F1F` に 32 バイト)
+8. nametable クリア (スペース `$20` で埋める 960 + attr 64 バイト)
+
+---
+
+## 実装済み表示モード state machine
+
+現行の nesphp VM は 2 つの PPU state を持つ。
+
+```
+         [forced_blanking]                       [sprite_mode]
+         PPUMASK = 0                             PPUMASK = %00011110 (BG+sprite)
+         NMI off                                 NMI on
+         nametable に直接書ける                    echo/nes_put は使えない
+         sprite は表示されない                     OAM DMA が毎 VBlank で走る
+               │                                        ▲
+               │  ┌── fgets: 一時的に rendering on, 待機, off ──┐
+               │  │                                            │
+               │  └────────────────────────────────────────────┘
+               │                                        │
+               │                                        │
+               │        最初の nes_sprite 呼び出し       │
+               └────────────────────────────────────────┘
+```
+
+### forced_blanking (初期状態 / sprite_mode に遷移前)
+
+- `PPUMASK = 0`、レンダリング停止 → 画面は黒
+- `echo` / `nes_put` は強制 blanking 中に `PPUADDR` / `PPUDATA` を直接叩ける
+- `fgets` は以下のサブフロー:
+  1. `PPUSCROLL = 0,0` + `PPUMASK = %00001110` (rendering 一時 on)
+  2. コントローラ全ボタン release 待ち → 新押下待ち
+  3. `PPUMASK = 0` (forced blanking 復帰) + `PPUADDR = PPU_CURSOR` 再セット
+  4. button 対応の `button_str_X` の ROM offset を result に書き戻し
+- ユーザから見ると「ボタン押してる間だけ画面が見える」体験
+
+### sprite_mode (初回 nes_sprite 後)
+
+初回 `nes_sprite` 呼び出しで `enable_sprite_mode` ルーチンが走る:
+
+1. VBlank 待ち (`BIT PPUSTATUS` / `BPL :-`)
+2. 初回 OAM DMA (`STA $4014`) で隠しスプライト (y=$FF) を反映
+3. `PPUSCROLL = 0,0` (スクロールリセット)
+4. `PPUCTRL = %10000000` (NMI enable、sprite/BG pattern table 0)
+5. `PPUMASK = %00011110` (BG + sprite rendering、左端 8 ピクセル表示)
+6. `sprite_mode_on = 1`
+
+以降:
+
+- `nes_sprite` は OAM shadow `$0200-$0203` に (y, tile, attr, x) を書くだけ。NMI が毎 VBlank で DMA
+- `fgets` は rendering を切らずにボタン待ち (NMI が走り続けるので画面表示継続)
+- `echo` / `nes_put` は **使ってはいけない** (rendering 中の nametable 書き込みは PPU state を壊す)
+
+### 状態遷移の制約
+
+- **一度 sprite_mode に入ったら forced_blanking に戻れない** (MVP では意図的に単方向)
+- `echo` は sprite_mode 前にしか期待通り動かない。ユーザコードは「初期表示の echo → `nes_sprite` 開始 → loop」というパターンを守る必要
+- 将来、NMI 同期 echo (下記) を実装すれば両モードで echo が動くようになる
+
+### NMI ハンドラ (現行実装)
+
+```asm
+nmi:
+    PHA : TXA : PHA : TYA : PHA    ; A/X/Y 保存
+    LDA #>OAM_SHADOW               ; $02
+    STA OAM_DMA                    ; $4014: OAM DMA 512+ cycle 停止
+    BIT PPUSTATUS                  ; latch reset
+    LDA #0
+    STA PPUSCROLL : STA PPUSCROLL  ; scroll 0, 0
+    PLA : TAY : PLA : TAX : PLA
+    RTI
+```
+
+単純に OAM DMA + scroll reset するだけ。nametable 転送 / 任意の VBlank 処理は現段階では未実装。
 
 ---
 
 ## パレット
 
-MVP では白地に黒文字で十分。
+黒背景に白文字で統一。BG / sprite ともに同じパターンテーブル (pattern table 0) のフォントを参照する。
 
 ```asm
-palette:
-    ; 背景パレット 0 (BG 用)
-    .byte $0F, $30, $10, $00    ; 黒, 白, 灰, 黒
-    ; 残り BG パレット 1-3
+palette_data:
+    .byte $0F, $30, $10, $00   ; BG palette 0  (背景=黒, 文字=白)
+    .byte $0F, $30, $10, $00   ; BG palette 1-3 (同上)
     .byte $0F, $30, $10, $00
     .byte $0F, $30, $10, $00
+    .byte $0F, $30, $10, $00   ; sprite palette 0
+    .byte $0F, $30, $10, $00   ; sprite palette 1-3
     .byte $0F, $30, $10, $00
-    ; スプライトパレット 0-3 (延長用)
-    .byte $0F, $16, $27, $18
-    .byte $0F, $1A, $30, $27
-    .byte $0F, $16, $30, $27
-    .byte $0F, $2D, $10, $30
+    .byte $0F, $30, $10, $00
 ```
+
+sprite はフォントの 1bit glyph を使うので色 1 (白) が見え、色 0 は透明。
 
 ---
 

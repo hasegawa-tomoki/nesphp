@@ -23,6 +23,7 @@
 | 7 | [07-roadmap](./07-roadmap.md) | MVP / 延長ゴール実装ステップ |
 | 8 | [08-risks](./08-risks.md) | 主要リスクと緩和策 |
 | 9 | [09-verification](./09-verification.md) | 受け入れ基準とロマン検証 |
+| 10 | [10-devlog](./10-devlog.md) | 各フェーズの設計判断の経緯と躓き (時系列) |
 
 ## 最短読み方
 
