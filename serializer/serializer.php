@@ -25,18 +25,27 @@ const PHP_VERSION_REQUIRED_MAJOR = 8;
 const PHP_VERSION_REQUIRED_MINOR = 4;
 
 // === Zend 定数 (PHP 8.4.6 Zend/zend_vm_opcodes.h より確定) ===
-const ZEND_NOP         = 0;
-const ZEND_ADD         = 1;
-const ZEND_SUB         = 2;
-const ZEND_IS_EQUAL    = 18;
-const ZEND_IS_SMALLER  = 20;
-const ZEND_ASSIGN      = 22;
-const ZEND_QM_ASSIGN   = 31;
-const ZEND_JMP         = 42;
-const ZEND_JMPZ        = 43;
-const ZEND_JMPNZ       = 44;
-const ZEND_RETURN      = 62;
-const ZEND_ECHO        = 136;
+const ZEND_NOP             = 0;
+const ZEND_ADD             = 1;
+const ZEND_SUB             = 2;
+const ZEND_IS_EQUAL        = 18;
+const ZEND_IS_SMALLER      = 20;
+const ZEND_ASSIGN          = 22;
+const ZEND_QM_ASSIGN       = 31;
+const ZEND_JMP             = 42;
+const ZEND_JMPZ            = 43;
+const ZEND_JMPNZ           = 44;
+const ZEND_DO_FCALL        = 60;
+const ZEND_INIT_FCALL      = 61;
+const ZEND_RETURN          = 62;
+const ZEND_SEND_VAL        = 65;
+const ZEND_FETCH_CONSTANT  = 99;
+const ZEND_SEND_VAR        = 117;
+const ZEND_DO_ICALL        = 129;
+const ZEND_ECHO            = 136;
+
+// === nesphp カスタム opcode (Zend は 0-209 を使用、210-255 を我々が使う) ===
+const NESPHP_FGETS         = 0xF0;  // fgets(STDIN) intrinsic
 
 // === Zend operand type (zend_compile.h) ===
 const IS_UNUSED        = 0;
@@ -165,9 +174,13 @@ function parse_opcache_dump(string $text): array
     ];
 
     // 行の構造:
-    //   NNNN [Tn = ] MNEMONIC [op1 [op2]]
+    //   NNNN [Tn = ] MNEMONIC [operands]
     // result の候補は T\d+ (IS_TMP_VAR) または V\d+ (IS_VAR)
     $lineRe = '/^(\d{4})\s+(?:([TV]\d+)\s*=\s*)?([A-Z_]+)(?:\s+(.*))?$/';
+
+    // 組み込み関数呼び出しパターンの state:
+    //   INIT_FCALL の関数名を覚えておき、DO_ICALL/DO_FCALL で builtin に畳み込む
+    $pendingBuiltin = null;
 
     foreach (preg_split('/\R/', $text) as $line) {
         if (preg_match('/^\s*;\s*\(lines=(\d+),\s*args=\d+,\s*vars=(\d+),\s*tmps=(\d+)\)/', $line, $m)) {
@@ -184,6 +197,52 @@ function parse_opcache_dump(string $text): array
         $resultTok  = $m[2] ?? '';
         $mnemonic   = $m[3];
         $operands   = trim($m[4] ?? '');
+
+        // --- 組み込み呼び出しの畳み込み ---
+        // INIT_FCALL: 関数名を記憶して NOP に置換
+        if ($mnemonic === 'INIT_FCALL') {
+            if (preg_match('/string\("([^"]+)"\)/', $operands, $fm)) {
+                $pendingBuiltin = $fm[1];
+            } else {
+                $pendingBuiltin = null;
+            }
+            $ops[$index] = make_nop_op();
+            continue;
+        }
+        // FETCH_CONSTANT "STDIN": fgets の引数取得、ただし我々は無視
+        if ($mnemonic === 'FETCH_CONSTANT' && $pendingBuiltin === 'fgets') {
+            $ops[$index] = make_nop_op();
+            continue;
+        }
+        // SEND_VAL / SEND_VAR: fgets 待ち中なら NOP
+        if (($mnemonic === 'SEND_VAL' || $mnemonic === 'SEND_VAR') && $pendingBuiltin !== null) {
+            $ops[$index] = make_nop_op();
+            continue;
+        }
+        // DO_ICALL / DO_FCALL: pending を畳み込む
+        if ($mnemonic === 'DO_ICALL' || $mnemonic === 'DO_FCALL') {
+            if ($pendingBuiltin === 'fgets') {
+                // BUILTIN_FGETS として emit。result は元の DO_ICALL の result slot
+                [$rt, $rv] = $resultTok !== ''
+                    ? parse_operand($resultTok, $literals, $litIndex)
+                    : [IS_UNUSED, 0];
+                $ops[$index] = [
+                    'opcode'         => NESPHP_FGETS,
+                    'mnemonic'       => 'NESPHP_FGETS',
+                    'op1'            => 0,
+                    'op1_type'       => IS_UNUSED,
+                    'op2'            => 0,
+                    'op2_type'       => IS_UNUSED,
+                    'result'         => $rv,
+                    'result_type'    => $rt,
+                    'extended_value' => 0,
+                    'lineno'         => 1,
+                ];
+                $pendingBuiltin = null;
+                continue;
+            }
+            fail("unsupported function call: " . ($pendingBuiltin ?? '?') . " at line $index");
+        }
 
         if (!array_key_exists($mnemonic, OPCODE_MAP)) {
             fail("unsupported Zend opcode: $mnemonic at line $index");
@@ -329,6 +388,22 @@ function intern_literal(array &$literals, array &$litIndex, array $record, strin
         $litIndex[$key] = count($literals) - 1;
     }
     return $litIndex[$key];
+}
+
+function make_nop_op(): array
+{
+    return [
+        'opcode'         => ZEND_NOP,
+        'mnemonic'       => 'NOP',
+        'op1'            => 0,
+        'op1_type'       => IS_UNUSED,
+        'op2'            => 0,
+        'op2_type'       => IS_UNUSED,
+        'result'         => 0,
+        'result_type'    => IS_UNUSED,
+        'extended_value' => 0,
+        'lineno'         => 1,
+    ];
 }
 
 function validate_ascii(string $s): void

@@ -16,6 +16,7 @@
 ; =============================================================================
 
 ; --- Zend opcode 番号 (PHP 8.4.6 Zend/zend_vm_opcodes.h) ---
+ZEND_NOP        = 0
 ZEND_ADD        = 1
 ZEND_SUB        = 2
 ZEND_IS_EQUAL   = 18
@@ -27,6 +28,9 @@ ZEND_JMPZ       = 43
 ZEND_JMPNZ      = 44
 ZEND_RETURN     = 62
 ZEND_ECHO       = 136
+
+; --- nesphp カスタム opcode (0xE0-0xFF は Zend 未使用領域) ---
+NESPHP_FGETS    = $F0
 
 ; --- Operand type (Zend/zend_compile.h) ---
 IS_UNUSED       = 0
@@ -93,6 +97,10 @@ TMP0:        .res 2
 TMP1:        .res 2
 TMP2:        .res 2
 DIV_COUNTER: .res 1    ; int16→ASCII 用
+
+; コントローラ入力
+buttons:     .res 1    ; 現在のボタン状態 (bit 7=A, 6=B, 5=Sel, 4=Start, 3=U, 2=D, 1=L, 0=R)
+pi_count:    .res 1    ; print_int16 が書いたバイト数
 
 ; =============================================================================
 ; iNES ヘッダ
@@ -245,6 +253,14 @@ main_loop:
     LDY #20                ; zend_op.opcode オフセット
     LDA (VM_PC), Y
 
+    CMP #ZEND_NOP
+    BNE :+
+    JMP advance            ; NOP: そのまま次命令へ
+:
+    CMP #NESPHP_FGETS
+    BNE :+
+    JMP handle_nesphp_fgets
+:
     CMP #ZEND_ECHO
     BNE :+
     JMP handle_zend_echo
@@ -595,9 +611,21 @@ wr_store:
 
 ; -----------------------------------------------------------------------------
 ; ZEND_ECHO: op1 (IS_STRING / IS_LONG) を PPU nametable へ
+;
+; 毎回 PPUADDR = PPU_CURSOR をセットし直す (fgets で rendering を ON/OFF する際
+; に PPU 内部 latch 状態が壊れるため)。書き終わったら PPU_CURSOR を書いたバイト
+; 数だけ進める。PPUMASK=0 (強制 blanking) 中にのみ呼ぶこと。
 ; -----------------------------------------------------------------------------
 handle_zend_echo:
     JSR resolve_op1
+
+    ; PPUADDR = PPU_CURSOR
+    BIT PPUSTATUS
+    LDA PPU_CURSOR+1
+    STA PPUADDR
+    LDA PPU_CURSOR
+    STA PPUADDR
+
     LDA OP1_VAL            ; type
     CMP #TYPE_STRING
     BEQ echo_string
@@ -636,6 +664,14 @@ echo_str_loop:
     INY
     BNE echo_str_loop
 echo_str_done:
+    ; PPU_CURSOR += TMP1
+    CLC
+    LDA PPU_CURSOR
+    ADC TMP1
+    STA PPU_CURSOR
+    LDA PPU_CURSOR+1
+    ADC #0
+    STA PPU_CURSOR+1
     JMP advance
 
 echo_long:
@@ -645,6 +681,14 @@ echo_long:
     LDA OP1_VAL+2
     STA TMP0+1
     JSR print_int16
+    ; pi_count = 書いたバイト数
+    CLC
+    LDA PPU_CURSOR
+    ADC pi_count
+    STA PPU_CURSOR
+    LDA PPU_CURSOR+1
+    ADC #0
+    STA PPU_CURSOR+1
     JMP advance
 
 ; -----------------------------------------------------------------------------
@@ -987,20 +1031,19 @@ version_halt:
 ; =============================================================================
 ; print_int16: TMP0 (16bit signed) を decimal ASCII に変換して PPUDATA に書く
 ;
-; 使い方:
-;   TMP0 に値をセットして JSR print_int16
-;   負数は '-' の後に絶対値を書き出す
-;   実装: 絶対値 → divmod10 ループで下位桁から 6502 スタックに push → 逆順で出力
-;
+; 書いたバイト数を pi_count に返す (echo_long から PPU_CURSOR 更新に使用)
 ; 注意: この関数は PPUMASK=0 (強制 blanking) 中にのみ呼んでよい
 ; =============================================================================
 print_int16:
+    LDA #0
+    STA pi_count
     ; 符号判定
     LDA TMP0+1
     BPL pi_positive
     ; 負: '-' を出して絶対値化
     LDA #'-'
     STA PPUDATA
+    INC pi_count
     SEC
     LDA #0
     SBC TMP0
@@ -1019,7 +1062,13 @@ pi_div_loop:
     ORA TMP0+1
     BNE pi_div_loop
 
-    ; Y = 桁数。スタックを逆順に pop して '0'+digit を PPUDATA へ
+    ; Y = 桁数を pi_count に加算
+    TYA
+    CLC
+    ADC pi_count
+    STA pi_count
+
+    ; スタックを逆順に pop して '0'+digit を PPUDATA へ
 pi_pop_loop:
     PLA
     CLC
@@ -1049,6 +1098,166 @@ div10_skip:
     DEX
     BNE div10_loop
     RTS
+
+; =============================================================================
+; NESPHP_FGETS: fgets(STDIN) 相当 → コントローラ読み取り
+;
+; 動作:
+;   1. rendering を有効化 (プレーヤーが画面を見られるように)
+;   2. 全ボタンが離されるまで待機 (直前の押下が残っていたら取り直し)
+;   3. いずれかのボタンが押されるまで待機
+;   4. 優先度順 (A > B > Select > Start > U > D > L > R) で 1 ボタンを決定
+;   5. rendering を無効化 (続く echo が強制 blanking 中に書けるように)
+;   6. 対応する button_str_X の ROM オフセットを RESULT_VAL (IS_STRING) に入れ、
+;      write_result で result スロットに書き戻す
+; =============================================================================
+handle_nesphp_fgets:
+    JSR enable_rendering
+
+    ; Wait all buttons released
+fgets_wait_release:
+    JSR read_controller
+    LDA buttons
+    BNE fgets_wait_release
+
+    ; Wait for a press
+fgets_wait_press:
+    JSR read_controller
+    LDA buttons
+    BEQ fgets_wait_press
+
+    ; Map pressed button to button_str_X (優先度順)
+    LDA buttons
+    AND #$80
+    BEQ :+
+    LDA #<(button_str_a - OPS_BASE)
+    LDX #>(button_str_a - OPS_BASE)
+    JMP fgets_got_str
+:
+    LDA buttons
+    AND #$40
+    BEQ :+
+    LDA #<(button_str_b - OPS_BASE)
+    LDX #>(button_str_b - OPS_BASE)
+    JMP fgets_got_str
+:
+    LDA buttons
+    AND #$20
+    BEQ :+
+    LDA #<(button_str_sel - OPS_BASE)
+    LDX #>(button_str_sel - OPS_BASE)
+    JMP fgets_got_str
+:
+    LDA buttons
+    AND #$10
+    BEQ :+
+    LDA #<(button_str_start - OPS_BASE)
+    LDX #>(button_str_start - OPS_BASE)
+    JMP fgets_got_str
+:
+    LDA buttons
+    AND #$08
+    BEQ :+
+    LDA #<(button_str_u - OPS_BASE)
+    LDX #>(button_str_u - OPS_BASE)
+    JMP fgets_got_str
+:
+    LDA buttons
+    AND #$04
+    BEQ :+
+    LDA #<(button_str_d - OPS_BASE)
+    LDX #>(button_str_d - OPS_BASE)
+    JMP fgets_got_str
+:
+    LDA buttons
+    AND #$02
+    BEQ :+
+    LDA #<(button_str_l - OPS_BASE)
+    LDX #>(button_str_l - OPS_BASE)
+    JMP fgets_got_str
+:
+    LDA #<(button_str_r - OPS_BASE)
+    LDX #>(button_str_r - OPS_BASE)
+    ; fall through
+
+fgets_got_str:
+    STA RESULT_VAL+1
+    STX RESULT_VAL+2
+    LDA #TYPE_STRING
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+3
+
+    JSR disable_rendering_restore
+    JSR write_result
+    JMP advance
+
+; -----------------------------------------------------------------------------
+; read_controller: 1 コントローラの状態を buttons に読み込む
+;   buttons = bit7..bit0 = A B Select Start Up Down Left Right
+; -----------------------------------------------------------------------------
+read_controller:
+    LDA #$01
+    STA $4016
+    LDA #$00
+    STA $4016
+    LDX #8
+read_ctrl_loop:
+    LDA $4016
+    LSR A                  ; bit 0 → C
+    ROL buttons            ; C → buttons bit 0
+    DEX
+    BNE read_ctrl_loop
+    RTS
+
+; -----------------------------------------------------------------------------
+; enable_rendering / disable_rendering_restore
+;
+; enable_rendering: PPUSCROLL を (0,0) にして PPUMASK を有効化
+; disable_rendering_restore: PPUMASK=0 にして PPUADDR を PPU_CURSOR に戻す
+; -----------------------------------------------------------------------------
+enable_rendering:
+    BIT PPUSTATUS
+    LDA #0
+    STA PPUSCROLL
+    STA PPUSCROLL
+    LDA #%00001110
+    STA PPUMASK
+    RTS
+
+disable_rendering_restore:
+    LDA #0
+    STA PPUMASK
+    BIT PPUSTATUS
+    LDA PPU_CURSOR+1
+    STA PPUADDR
+    LDA PPU_CURSOR
+    STA PPUADDR
+    RTS
+
+; =============================================================================
+; Pre-baked 1 文字 zend_string (ボタン対応)
+;
+; 各ブロックは spec/01-rom-format.md の zend_string 24B ヘッダ + content + null
+; のレイアウトに準拠 (fgets が返す IS_STRING の参照先として)。
+; =============================================================================
+.macro ONE_CHAR_ZSTR ch
+    .byte 0, 0, 0, 0                       ; gc.refcount
+    .byte $40, 0, 0, 0                     ; gc.type_info (IMMUTABLE)
+    .byte 0, 0, 0, 0, 0, 0, 0, 0           ; hash
+    .byte 1, 0, 0, 0, 0, 0, 0, 0           ; len = 1
+    .byte ch, 0                            ; val + null
+    .byte 0, 0                             ; 4B アラインのパディング
+.endmacro
+
+button_str_a:     ONE_CHAR_ZSTR 'A'
+button_str_b:     ONE_CHAR_ZSTR 'B'
+button_str_sel:   ONE_CHAR_ZSTR 'S'
+button_str_start: ONE_CHAR_ZSTR 'T'
+button_str_u:     ONE_CHAR_ZSTR 'U'
+button_str_d:     ONE_CHAR_ZSTR 'D'
+button_str_l:     ONE_CHAR_ZSTR 'L'
+button_str_r:     ONE_CHAR_ZSTR 'R'
 
 ; -----------------------------------------------------------------------------
 ; NMI / IRQ (MVP 未使用)
