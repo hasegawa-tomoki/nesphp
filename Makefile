@@ -36,12 +36,14 @@ $(BUILD_DIR):
 # --- (1) opcache dump: examples/NAME.php → build/NAME.ops.txt ---
 # file_update_protection=0: 直前に touch されたファイルでも opcache にキャッシュ
 # させる (デフォルト 2 秒のプロテクションだと optimizer が走らず dump が出ない)
+# `|| true`: nes_put など未定義関数を呼ぶと runtime error で非 0 終了するが、
+# opcache dump は error 出力より先に stderr に書かれているので継続させる
 $(BUILD_DIR)/%.ops.txt: examples/%.php | $(BUILD_DIR)
 	@echo "[make] (1) extract   $< → $@"
 	@$(PHP) -d opcache.enable_cli=1 \
 	        -d opcache.file_update_protection=0 \
 	        -d opcache.opt_debug_level=0x10000 \
-	        $< 2> $@ > /dev/null
+	        $< 2> $@ > /dev/null || true
 
 # --- (2) シリアライズ: ops.txt → ops.bin ---
 $(BUILD_DIR)/%.ops.bin: $(BUILD_DIR)/%.ops.txt $(SERIALIZER)

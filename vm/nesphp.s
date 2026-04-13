@@ -16,21 +16,25 @@
 ; =============================================================================
 
 ; --- Zend opcode 番号 (PHP 8.4.6 Zend/zend_vm_opcodes.h) ---
-ZEND_NOP        = 0
-ZEND_ADD        = 1
-ZEND_SUB        = 2
-ZEND_IS_EQUAL   = 18
-ZEND_IS_SMALLER = 20
-ZEND_ASSIGN     = 22
-ZEND_QM_ASSIGN  = 31
-ZEND_JMP        = 42
-ZEND_JMPZ       = 43
-ZEND_JMPNZ      = 44
-ZEND_RETURN     = 62
-ZEND_ECHO       = 136
+ZEND_NOP              = 0
+ZEND_ADD              = 1
+ZEND_SUB              = 2
+ZEND_IS_IDENTICAL     = 16
+ZEND_IS_NOT_IDENTICAL = 17
+ZEND_IS_EQUAL         = 18
+ZEND_IS_NOT_EQUAL     = 19
+ZEND_IS_SMALLER       = 20
+ZEND_ASSIGN           = 22
+ZEND_QM_ASSIGN        = 31
+ZEND_JMP              = 42
+ZEND_JMPZ             = 43
+ZEND_JMPNZ            = 44
+ZEND_RETURN           = 62
+ZEND_ECHO             = 136
 
 ; --- nesphp カスタム opcode (0xE0-0xFF は Zend 未使用領域) ---
 NESPHP_FGETS    = $F0
+NESPHP_NES_PUT  = $F1
 
 ; --- Operand type (Zend/zend_compile.h) ---
 IS_UNUSED       = 0
@@ -261,6 +265,10 @@ main_loop:
     BNE :+
     JMP handle_nesphp_fgets
 :
+    CMP #NESPHP_NES_PUT
+    BNE :+
+    JMP handle_nesphp_nes_put
+:
     CMP #ZEND_ECHO
     BNE :+
     JMP handle_zend_echo
@@ -304,6 +312,18 @@ main_loop:
     CMP #ZEND_IS_EQUAL
     BNE :+
     JMP handle_zend_is_equal
+:
+    CMP #ZEND_IS_IDENTICAL
+    BNE :+
+    JMP handle_zend_is_equal       ; 簡略化: === と == を同じ実装で
+:
+    CMP #ZEND_IS_NOT_EQUAL
+    BNE :+
+    JMP handle_zend_is_not_equal
+:
+    CMP #ZEND_IS_NOT_IDENTICAL
+    BNE :+
+    JMP handle_zend_is_not_equal
 :
     JMP handle_unimpl
 
@@ -902,25 +922,20 @@ is_smaller_err:
     JMP handle_unimpl
 
 ; -----------------------------------------------------------------------------
-; ZEND_IS_EQUAL: 同じ型 + 同じ payload なら TYPE_TRUE、それ以外 TYPE_FALSE
+; ZEND_IS_EQUAL / ZEND_IS_IDENTICAL: 同じ型 + 同じ値なら TYPE_TRUE。文字列は
+; zend_string の content 比較 (len + val[] のバイト比較) を行う。
+; =, === の違い (PHP の type juggling) は未対応。
 ; -----------------------------------------------------------------------------
 handle_zend_is_equal:
     JSR resolve_op1
     JSR resolve_op2
-    LDA OP1_VAL
-    CMP OP2_VAL
-    BNE is_equal_false
-    LDA OP1_VAL+1
-    CMP OP2_VAL+1
-    BNE is_equal_false
-    LDA OP1_VAL+2
-    CMP OP2_VAL+2
-    BNE is_equal_false
+    JSR values_equal_content
+    BEQ iseq_false
     LDA #TYPE_TRUE
-    JMP is_equal_store
-is_equal_false:
+    JMP iseq_store
+iseq_false:
     LDA #TYPE_FALSE
-is_equal_store:
+iseq_store:
     STA RESULT_VAL
     LDA #0
     STA RESULT_VAL+1
@@ -928,6 +943,91 @@ is_equal_store:
     STA RESULT_VAL+3
     JSR write_result
     JMP advance
+
+; -----------------------------------------------------------------------------
+; ZEND_IS_NOT_EQUAL / ZEND_IS_NOT_IDENTICAL
+; -----------------------------------------------------------------------------
+handle_zend_is_not_equal:
+    JSR resolve_op1
+    JSR resolve_op2
+    JSR values_equal_content
+    BNE isne_false
+    LDA #TYPE_TRUE
+    JMP isne_store
+isne_false:
+    LDA #TYPE_FALSE
+isne_store:
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+1
+    STA RESULT_VAL+2
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+; -----------------------------------------------------------------------------
+; values_equal_content: OP1_VAL と OP2_VAL を比較
+;   出力: A = 1 (equal) / 0 (not equal)、Z フラグも同期
+;   - 型が違えば不一致
+;   - TYPE_STRING なら zend_string の len + val[] を比較
+;   - それ以外は payload バイト (1-2) を比較
+; -----------------------------------------------------------------------------
+values_equal_content:
+    LDA OP1_VAL
+    CMP OP2_VAL
+    BEQ vec_type_ok
+    LDA #0                 ; 型違い
+    RTS
+vec_type_ok:
+    CMP #TYPE_STRING
+    BEQ vec_string
+    ; 非文字列: payload lo/hi を比較
+    LDA OP1_VAL+1
+    CMP OP2_VAL+1
+    BNE vec_false
+    LDA OP1_VAL+2
+    CMP OP2_VAL+2
+    BNE vec_false
+    LDA #1
+    RTS
+vec_false:
+    LDA #0
+    RTS
+
+vec_string:
+    ; 両方の zend_string の絶対アドレスを TMP0 / TMP1 に
+    CLC
+    LDA OP1_VAL+1
+    ADC #<OPS_BASE
+    STA TMP0
+    LDA OP1_VAL+2
+    ADC #>OPS_BASE
+    STA TMP0+1
+    CLC
+    LDA OP2_VAL+1
+    ADC #<OPS_BASE
+    STA TMP1
+    LDA OP2_VAL+2
+    ADC #>OPS_BASE
+    STA TMP1+1
+    ; 長さ比較 (offset 16 の 1 バイトだけ見る。MVP は短い文字列のみ)
+    LDY #16
+    LDA (TMP0), Y
+    CMP (TMP1), Y
+    BNE vec_false
+    TAX                    ; X = 残りバイト数
+    BEQ vec_eq             ; 長さ 0 → 等しい
+    LDY #24                ; val[] 先頭
+vec_loop:
+    LDA (TMP0), Y
+    CMP (TMP1), Y
+    BNE vec_false
+    INY
+    DEX
+    BNE vec_loop
+vec_eq:
+    LDA #1
+    RTS
 
 ; -----------------------------------------------------------------------------
 ; is_truthy: OP1_VAL の真偽を A に返す (truthy=1 / falsy=0)
@@ -1234,6 +1334,120 @@ disable_rendering_restore:
     LDA PPU_CURSOR
     STA PPUADDR
     RTS
+
+; =============================================================================
+; NESPHP_NES_PUT: nametable (x, y) に 1 文字を書く
+;
+; op1 = x (IS_CV / IS_CONST, IS_LONG 値)
+; op2 = y (IS_CV / IS_CONST, IS_LONG 値)
+; extended_value = 文字 literal のバイトオフセット (IS_CONST, TYPE_STRING or TYPE_LONG)
+;
+; 前提: PPUMASK = 0 (強制 blanking) 中に呼ぶこと。fgets 以外は常に forced blanking
+; なので OK。PPU 内部アドレスは書き換わるので、次の echo が再 set する想定。
+; =============================================================================
+handle_nesphp_nes_put:
+    JSR resolve_op1        ; OP1_VAL = x
+    JSR resolve_op2        ; OP2_VAL = y
+
+    ; extended_value (offset 12) = 文字 literal のバイトオフセット
+    LDY #12
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    ; TMP0 += VM_LITBASE
+    CLC
+    LDA VM_LITBASE
+    ADC TMP0
+    STA TMP0
+    LDA VM_LITBASE+1
+    ADC TMP0+1
+    STA TMP0+1
+    ; TMP0 = zval (16B) アドレス
+    LDY #8                 ; u1.type_info
+    LDA (TMP0), Y
+    CMP #TYPE_STRING
+    BEQ np_from_string
+    CMP #TYPE_LONG
+    BEQ np_from_long
+    JMP handle_unimpl
+
+np_from_string:
+    ; value.str (bytes 0-1) = zend_string への offset
+    LDY #0
+    LDA (TMP0), Y
+    STA TMP1
+    INY
+    LDA (TMP0), Y
+    STA TMP1+1
+    ; TMP1 + OPS_BASE = zend_string 絶対アドレス
+    CLC
+    LDA TMP1
+    ADC #<OPS_BASE
+    STA TMP1
+    LDA TMP1+1
+    ADC #>OPS_BASE
+    STA TMP1+1
+    ; val[0] @ offset 24
+    LDY #24
+    LDA (TMP1), Y
+    STA TMP2
+    JMP np_addr
+
+np_from_long:
+    ; value.lval 下位 1 バイト = 文字コード
+    LDY #0
+    LDA (TMP0), Y
+    STA TMP2
+
+np_addr:
+    ; nametable アドレス = $2000 + y*32 + x
+    ; y (OP2_VAL+1) を 16bit に拡張して 5 回左シフト
+    LDA OP2_VAL+1
+    STA TMP0
+    LDA #0
+    STA TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ; TMP0 = y*32
+    ; + x
+    CLC
+    LDA OP1_VAL+1
+    ADC TMP0
+    STA TMP0
+    LDA #0
+    ADC TMP0+1
+    STA TMP0+1
+    ; + $2000
+    CLC
+    LDA TMP0
+    ADC #$00
+    STA TMP0
+    LDA TMP0+1
+    ADC #$20
+    STA TMP0+1
+
+    ; PPUADDR に TMP0 をセット
+    BIT PPUSTATUS
+    LDA TMP0+1
+    STA PPUADDR
+    LDA TMP0
+    STA PPUADDR
+
+    ; 文字を書く
+    LDA TMP2
+    STA PPUDATA
+
+    JMP advance
 
 ; =============================================================================
 ; Pre-baked 1 文字 zend_string (ボタン対応)

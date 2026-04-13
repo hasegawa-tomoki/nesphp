@@ -25,27 +25,31 @@ const PHP_VERSION_REQUIRED_MAJOR = 8;
 const PHP_VERSION_REQUIRED_MINOR = 4;
 
 // === Zend 定数 (PHP 8.4.6 Zend/zend_vm_opcodes.h より確定) ===
-const ZEND_NOP             = 0;
-const ZEND_ADD             = 1;
-const ZEND_SUB             = 2;
-const ZEND_IS_EQUAL        = 18;
-const ZEND_IS_SMALLER      = 20;
-const ZEND_ASSIGN          = 22;
-const ZEND_QM_ASSIGN       = 31;
-const ZEND_JMP             = 42;
-const ZEND_JMPZ            = 43;
-const ZEND_JMPNZ           = 44;
-const ZEND_DO_FCALL        = 60;
-const ZEND_INIT_FCALL      = 61;
-const ZEND_RETURN          = 62;
-const ZEND_SEND_VAL        = 65;
-const ZEND_FETCH_CONSTANT  = 99;
-const ZEND_SEND_VAR        = 117;
-const ZEND_DO_ICALL        = 129;
-const ZEND_ECHO            = 136;
+const ZEND_NOP                = 0;
+const ZEND_ADD                = 1;
+const ZEND_SUB                = 2;
+const ZEND_IS_IDENTICAL       = 16;
+const ZEND_IS_NOT_IDENTICAL   = 17;
+const ZEND_IS_EQUAL           = 18;
+const ZEND_IS_NOT_EQUAL       = 19;
+const ZEND_IS_SMALLER         = 20;
+const ZEND_ASSIGN             = 22;
+const ZEND_QM_ASSIGN          = 31;
+const ZEND_JMP                = 42;
+const ZEND_JMPZ               = 43;
+const ZEND_JMPNZ              = 44;
+const ZEND_DO_FCALL           = 60;
+const ZEND_INIT_FCALL         = 61;
+const ZEND_RETURN             = 62;
+const ZEND_SEND_VAL           = 65;
+const ZEND_FETCH_CONSTANT     = 99;
+const ZEND_SEND_VAR           = 117;
+const ZEND_DO_ICALL           = 129;
+const ZEND_ECHO               = 136;
 
 // === nesphp カスタム opcode (Zend は 0-209 を使用、210-255 を我々が使う) ===
-const NESPHP_FGETS         = 0xF0;  // fgets(STDIN) intrinsic
+const NESPHP_FGETS            = 0xF0;  // fgets(STDIN) intrinsic
+const NESPHP_NES_PUT          = 0xF1;  // nes_put($x, $y, $char) intrinsic
 
 // === Zend operand type (zend_compile.h) ===
 const IS_UNUSED        = 0;
@@ -73,18 +77,21 @@ const ZSTR_HEADER_SIZE = 24;
 
 // === ニーモニック → opcode 番号 ===
 const OPCODE_MAP = [
-    'NOP'        => ZEND_NOP,
-    'ADD'        => ZEND_ADD,
-    'SUB'        => ZEND_SUB,
-    'IS_EQUAL'   => ZEND_IS_EQUAL,
-    'IS_SMALLER' => ZEND_IS_SMALLER,
-    'ASSIGN'     => ZEND_ASSIGN,
-    'QM_ASSIGN'  => ZEND_QM_ASSIGN,
-    'JMP'        => ZEND_JMP,
-    'JMPZ'       => ZEND_JMPZ,
-    'JMPNZ'      => ZEND_JMPNZ,
-    'ECHO'       => ZEND_ECHO,
-    'RETURN'     => ZEND_RETURN,
+    'NOP'              => ZEND_NOP,
+    'ADD'              => ZEND_ADD,
+    'SUB'              => ZEND_SUB,
+    'IS_IDENTICAL'     => ZEND_IS_IDENTICAL,
+    'IS_NOT_IDENTICAL' => ZEND_IS_NOT_IDENTICAL,
+    'IS_EQUAL'         => ZEND_IS_EQUAL,
+    'IS_NOT_EQUAL'     => ZEND_IS_NOT_EQUAL,
+    'IS_SMALLER'       => ZEND_IS_SMALLER,
+    'ASSIGN'           => ZEND_ASSIGN,
+    'QM_ASSIGN'        => ZEND_QM_ASSIGN,
+    'JMP'              => ZEND_JMP,
+    'JMPZ'             => ZEND_JMPZ,
+    'JMPNZ'            => ZEND_JMPNZ,
+    'ECHO'             => ZEND_ECHO,
+    'RETURN'           => ZEND_RETURN,
 ];
 
 // =================================================================
@@ -179,8 +186,10 @@ function parse_opcache_dump(string $text): array
     $lineRe = '/^(\d{4})\s+(?:([TV]\d+)\s*=\s*)?([A-Z_]+)(?:\s+(.*))?$/';
 
     // 組み込み関数呼び出しパターンの state:
-    //   INIT_FCALL の関数名を覚えておき、DO_ICALL/DO_FCALL で builtin に畳み込む
+    //   INIT_FCALL の関数名と SEND_VAR/SEND_VAL の引数を覚えておき、
+    //   DO_ICALL / DO_FCALL / DO_FCALL_BY_NAME で builtin に畳み込む
     $pendingBuiltin = null;
+    $pendingArgs    = [];  // list of ['type' => int, 'val' => int]
 
     foreach (preg_split('/\R/', $text) as $line) {
         if (preg_match('/^\s*;\s*\(lines=(\d+),\s*args=\d+,\s*vars=(\d+),\s*tmps=(\d+)\)/', $line, $m)) {
@@ -199,28 +208,34 @@ function parse_opcache_dump(string $text): array
         $operands   = trim($m[4] ?? '');
 
         // --- 組み込み呼び出しの畳み込み ---
-        // INIT_FCALL: 関数名を記憶して NOP に置換
-        if ($mnemonic === 'INIT_FCALL') {
+        // INIT_FCALL / INIT_FCALL_BY_NAME: 関数名を記憶して NOP に置換
+        if ($mnemonic === 'INIT_FCALL' || $mnemonic === 'INIT_FCALL_BY_NAME') {
             if (preg_match('/string\("([^"]+)"\)/', $operands, $fm)) {
                 $pendingBuiltin = $fm[1];
             } else {
                 $pendingBuiltin = null;
             }
+            $pendingArgs = [];
             $ops[$index] = make_nop_op();
             continue;
         }
-        // FETCH_CONSTANT "STDIN": fgets の引数取得、ただし我々は無視
+        // FETCH_CONSTANT "STDIN": fgets の引数取得、我々は無視
         if ($mnemonic === 'FETCH_CONSTANT' && $pendingBuiltin === 'fgets') {
             $ops[$index] = make_nop_op();
             continue;
         }
-        // SEND_VAL / SEND_VAR: fgets 待ち中なら NOP
-        if (($mnemonic === 'SEND_VAL' || $mnemonic === 'SEND_VAR') && $pendingBuiltin !== null) {
+        // SEND_VAL / SEND_VAR / *_EX / SEND_VAR_NO_REF_EX: pending 中なら引数記録 + NOP
+        if ($pendingBuiltin !== null && preg_match('/^SEND_(VAL|VAR)(_EX|_NO_REF(_EX)?)?$/', $mnemonic)) {
+            $tokens = tokenize_operands($operands);
+            if (count($tokens) >= 1) {
+                [$at, $av] = parse_operand($tokens[0], $literals, $litIndex);
+                $pendingArgs[] = ['type' => $at, 'val' => $av];
+            }
             $ops[$index] = make_nop_op();
             continue;
         }
-        // DO_ICALL / DO_FCALL: pending を畳み込む
-        if ($mnemonic === 'DO_ICALL' || $mnemonic === 'DO_FCALL') {
+        // DO_ICALL / DO_FCALL / DO_FCALL_BY_NAME: pending を畳み込む
+        if ($mnemonic === 'DO_ICALL' || $mnemonic === 'DO_FCALL' || $mnemonic === 'DO_FCALL_BY_NAME') {
             if ($pendingBuiltin === 'fgets') {
                 // BUILTIN_FGETS として emit。result は元の DO_ICALL の result slot
                 [$rt, $rv] = $resultTok !== ''
@@ -239,6 +254,30 @@ function parse_opcache_dump(string $text): array
                     'lineno'         => 1,
                 ];
                 $pendingBuiltin = null;
+                $pendingArgs = [];
+                continue;
+            }
+            if ($pendingBuiltin === 'nes_put') {
+                if (count($pendingArgs) !== 3) {
+                    fail("nes_put requires 3 arguments at line $index (got " . count($pendingArgs) . ")");
+                }
+                if ($pendingArgs[2]['type'] !== IS_CONST) {
+                    fail("nes_put: 3rd argument (char) must be a compile-time literal at line $index");
+                }
+                $ops[$index] = [
+                    'opcode'         => NESPHP_NES_PUT,
+                    'mnemonic'       => 'NESPHP_NES_PUT',
+                    'op1'            => $pendingArgs[0]['val'],
+                    'op1_type'       => $pendingArgs[0]['type'],
+                    'op2'            => $pendingArgs[1]['val'],
+                    'op2_type'       => $pendingArgs[1]['type'],
+                    'result'         => 0,
+                    'result_type'    => IS_UNUSED,
+                    'extended_value' => $pendingArgs[2]['val'],
+                    'lineno'         => 1,
+                ];
+                $pendingBuiltin = null;
+                $pendingArgs = [];
                 continue;
             }
             fail("unsupported function call: " . ($pendingBuiltin ?? '?') . " at line $index");
