@@ -50,6 +50,7 @@ const ZEND_ECHO               = 136;
 // === nesphp カスタム opcode (Zend は 0-209 を使用、210-255 を我々が使う) ===
 const NESPHP_FGETS            = 0xF0;  // fgets(STDIN) intrinsic
 const NESPHP_NES_PUT          = 0xF1;  // nes_put($x, $y, $char) intrinsic
+const NESPHP_NES_SPRITE       = 0xF2;  // nes_sprite($x, $y, $tile) intrinsic (sprite 0)
 
 // === Zend operand type (zend_compile.h) ===
 const IS_UNUSED        = 0;
@@ -257,16 +258,18 @@ function parse_opcache_dump(string $text): array
                 $pendingArgs = [];
                 continue;
             }
-            if ($pendingBuiltin === 'nes_put') {
+            if ($pendingBuiltin === 'nes_put' || $pendingBuiltin === 'nes_sprite') {
                 if (count($pendingArgs) !== 3) {
-                    fail("nes_put requires 3 arguments at line $index (got " . count($pendingArgs) . ")");
+                    fail("$pendingBuiltin requires 3 arguments at line $index (got " . count($pendingArgs) . ")");
                 }
                 if ($pendingArgs[2]['type'] !== IS_CONST) {
-                    fail("nes_put: 3rd argument (char) must be a compile-time literal at line $index");
+                    fail("$pendingBuiltin: 3rd argument (char/tile) must be a compile-time literal at line $index");
                 }
+                $customOpcode = $pendingBuiltin === 'nes_put' ? NESPHP_NES_PUT : NESPHP_NES_SPRITE;
+                $customName   = $pendingBuiltin === 'nes_put' ? 'NESPHP_NES_PUT' : 'NESPHP_NES_SPRITE';
                 $ops[$index] = [
-                    'opcode'         => NESPHP_NES_PUT,
-                    'mnemonic'       => 'NESPHP_NES_PUT',
+                    'opcode'         => $customOpcode,
+                    'mnemonic'       => $customName,
                     'op1'            => $pendingArgs[0]['val'],
                     'op1_type'       => $pendingArgs[0]['type'],
                     'op2'            => $pendingArgs[1]['val'],

@@ -33,8 +33,13 @@ ZEND_RETURN           = 62
 ZEND_ECHO             = 136
 
 ; --- nesphp カスタム opcode (0xE0-0xFF は Zend 未使用領域) ---
-NESPHP_FGETS    = $F0
-NESPHP_NES_PUT  = $F1
+NESPHP_FGETS      = $F0
+NESPHP_NES_PUT    = $F1
+NESPHP_NES_SPRITE = $F2
+
+; --- OAM DMA レジスタ ---
+OAM_DMA           = $4014
+OAM_SHADOW        = $0200
 
 ; --- Operand type (Zend/zend_compile.h) ---
 IS_UNUSED       = 0
@@ -103,8 +108,12 @@ TMP2:        .res 2
 DIV_COUNTER: .res 1    ; int16→ASCII 用
 
 ; コントローラ入力
-buttons:     .res 1    ; 現在のボタン状態 (bit 7=A, 6=B, 5=Sel, 4=Start, 3=U, 2=D, 1=L, 0=R)
-pi_count:    .res 1    ; print_int16 が書いたバイト数
+buttons:        .res 1    ; 現在のボタン状態 (bit 7=A, 6=B, 5=Sel, 4=Start, 3=U, 2=D, 1=L, 0=R)
+pi_count:       .res 1    ; print_int16 が書いたバイト数
+
+; スプライトモード (0 = forced blanking, 1 = rendering + NMI on)
+; 初回 nes_sprite で 1 に遷移、以降 echo/nes_put は使えない
+sprite_mode_on: .res 1
 
 ; =============================================================================
 ; iNES ヘッダ
@@ -160,6 +169,18 @@ clear_wram_loop:
     STA $0700, X
     INX
     BNE clear_wram_loop
+
+    ; OAM shadow ($0200-$02FF) の y を全て $FF にして全スプライトを画面外に隠す
+    ; 1 スプライト 4 バイト × 64 個 = 256B、X は y オフセットだけをたどる
+    LDX #0
+    LDA #$FF
+hide_oam_loop:
+    STA OAM_SHADOW, X
+    INX
+    INX
+    INX
+    INX
+    BNE hide_oam_loop
 
     ; 2 回目の VBL 待ち
 :   BIT PPUSTATUS
@@ -268,6 +289,10 @@ main_loop:
     CMP #NESPHP_NES_PUT
     BNE :+
     JMP handle_nesphp_nes_put
+:
+    CMP #NESPHP_NES_SPRITE
+    BNE :+
+    JMP handle_nesphp_nes_sprite
 :
     CMP #ZEND_ECHO
     BNE :+
@@ -1212,7 +1237,11 @@ div10_skip:
 ;      write_result で result スロットに書き戻す
 ; =============================================================================
 handle_nesphp_fgets:
+    ; sprite_mode_on == 0 のときだけ rendering を一時 ON にする
+    LDA sprite_mode_on
+    BNE fgets_skip_enable
     JSR enable_rendering
+fgets_skip_enable:
 
     ; Wait all buttons released
 fgets_wait_release:
@@ -1288,7 +1317,11 @@ fgets_got_str:
     LDA #0
     STA RESULT_VAL+3
 
+    ; sprite_mode_on なら rendering を維持 (スプライト表示継続)
+    LDA sprite_mode_on
+    BNE fgets_skip_disable
     JSR disable_rendering_restore
+fgets_skip_disable:
     JSR write_result
     JMP advance
 
@@ -1473,10 +1506,126 @@ button_str_d:     ONE_CHAR_ZSTR 'D'
 button_str_l:     ONE_CHAR_ZSTR 'L'
 button_str_r:     ONE_CHAR_ZSTR 'R'
 
+; =============================================================================
+; NESPHP_NES_SPRITE: sprite 0 の OAM shadow を更新
+;
+; op1            = x (IS_CV / IS_CONST、IS_LONG 値)
+; op2            = y (IS_CV / IS_CONST、IS_LONG 値)
+; extended_value = tile literal の byte offset (IS_CONST、IS_LONG 想定)
+;
+; 初回呼び出し時に rendering + NMI を有効化し、以降は OAM shadow 書き込みだけ。
+; NMI ハンドラが毎 VBlank で OAM DMA を実行するので、書き換えは即座に反映される。
+; =============================================================================
+handle_nesphp_nes_sprite:
+    LDA sprite_mode_on
+    BNE nss_mode_ready
+    JSR enable_sprite_mode
+nss_mode_ready:
+    JSR resolve_op1        ; OP1_VAL = x
+    JSR resolve_op2        ; OP2_VAL = y
+
+    ; extended_value から tile を decode
+    LDY #12
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    CLC
+    LDA VM_LITBASE
+    ADC TMP0
+    STA TMP0
+    LDA VM_LITBASE+1
+    ADC TMP0+1
+    STA TMP0+1
+    ; TMP0 = zval 絶対アドレス
+    LDY #8
+    LDA (TMP0), Y          ; type
+    CMP #TYPE_LONG
+    BNE nss_type_err       ; tile は IS_LONG (整数リテラル) 前提
+    LDY #0
+    LDA (TMP0), Y
+    STA TMP2               ; TMP2 = tile
+
+    ; OAM shadow (sprite 0) を更新
+    ;   $0200 = y, $0201 = tile, $0202 = attr=0, $0203 = x
+    LDA OP2_VAL+1
+    STA OAM_SHADOW + 0     ; y
+    LDA TMP2
+    STA OAM_SHADOW + 1     ; tile
+    LDA #0
+    STA OAM_SHADOW + 2     ; attr (palette 0, front, no flip)
+    LDA OP1_VAL+1
+    STA OAM_SHADOW + 3     ; x
+
+    JMP advance
+
+nss_type_err:
+    JMP handle_unimpl
+
 ; -----------------------------------------------------------------------------
-; NMI / IRQ (MVP 未使用)
+; enable_sprite_mode: 初回 nes_sprite から呼ばれる遷移処理
+;
+;   1. VBlank 待ち
+;   2. 初回 OAM DMA (非表示スプライト 64 個を反映)
+;   3. PPUSCROLL をリセット
+;   4. PPUCTRL 経由で NMI を enable
+;   5. PPUMASK で BG + sprite レンダリング
+;   6. sprite_mode_on = 1
 ; -----------------------------------------------------------------------------
+enable_sprite_mode:
+    ; VBlank 待ち
+    BIT PPUSTATUS
+:   BIT PPUSTATUS
+    BPL :-
+
+    ; 初回 OAM DMA
+    LDA #>OAM_SHADOW       ; $02
+    STA OAM_DMA
+
+    ; scroll (0, 0)
+    BIT PPUSTATUS
+    LDA #0
+    STA PPUSCROLL
+    STA PPUSCROLL
+
+    ; PPUCTRL: NMI enable、sprite pattern table = 0、BG pattern table = 0
+    LDA #%10000000
+    STA PPUCTRL
+
+    ; PPUMASK: BG + sprite 有効、左端 8 ピクセルも表示
+    LDA #%00011110
+    STA PPUMASK
+
+    LDA #1
+    STA sprite_mode_on
+    RTS
+
+; =============================================================================
+; NMI ハンドラ: OAM DMA + スクロールリセット
+; =============================================================================
 nmi:
+    PHA
+    TXA
+    PHA
+    TYA
+    PHA
+
+    ; OAM DMA: $0200-$02FF → PPU OAM
+    LDA #>OAM_SHADOW
+    STA OAM_DMA
+
+    ; scroll をリセット (PPUADDR 書き込みで v レジスタが汚染される可能性への対策)
+    BIT PPUSTATUS
+    LDA #0
+    STA PPUSCROLL
+    STA PPUSCROLL
+
+    PLA
+    TAY
+    PLA
+    TAX
+    PLA
     RTI
 
 irq:
