@@ -8,6 +8,8 @@
 
 Zend 内部の `zend_op` (32B) を `handler` ポインタ (8B) だけ抜いて **24B 構造体** として PRG-ROM に焼く。literals も Zend の 16B `zval` レイアウトをそのまま保持。6502 VM は Zend のフィールドオフセットを直接読む。
 
+「なぜこの形なのか」「Zend 原本からの改変点 9 項目」は [12-zend-diff](./12-zend-diff.md) を参照。本ファイルは**現行の byte レベルの厳密仕様**にフォーカスする。
+
 参考 (上流の定義):
 - [php-src Zend/zend_compile.h](https://github.com/php/php-src/blob/master/Zend/zend_compile.h) — `struct _zend_op` `union znode_op` `IS_CONST` 等
 - [php-src Zend/zend_types.h](https://github.com/php/php-src/blob/master/Zend/zend_types.h) — `struct _zval_struct` `struct _zend_string`

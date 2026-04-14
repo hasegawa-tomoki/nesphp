@@ -26,6 +26,7 @@
 | 9 | [09-verification](./09-verification.md) | 受け入れ基準とロマン検証 |
 | 10 | [10-devlog](./10-devlog.md) | 各フェーズの設計判断の経緯と躓き (時系列) |
 | 11 | [11-chr-banks](./11-chr-banks.md) | CNROM CHR バンク + PPUCTRL bit 4 による pattern table 切替 |
+| 12 | [12-zend-diff](./12-zend-diff.md) | Zend 原本の構造体 (`zend_op` / `zval` / `zend_string` / `zend_op_array`) と nesphp の改変点 9 項目 |
 
 ## 最短読み方
 
