@@ -214,21 +214,56 @@ $font5x7 = [
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
 ];
 
-// CHR バイナリを組み立てる
-$chr = str_repeat("\x00", 8192); // 8KB
+// CHR 1 バンク (8KB) を組み立てる
+//   pattern table 0 ($0000-$0FFF): 通常のフォント
+//   pattern table 1 ($1000-$1FFF): インバース (solid 5-wide 背景にグリフが punch out)
+//     PPUCTRL bit 4 で BG 側が切替わり、nes_chr_bg(1) で全テキストが "ハイライト" される
+function build_bank(array $font5x7): string
+{
+    $bank = str_repeat("\x00", 8192);
 
-// タイル番号 = ASCII コードに配置 (0x20-0x7F をフォント、その他は 0 埋めのまま)
-foreach ($font5x7 as $i => $rows) {
-    $ascii = 0x20 + $i;
-    $tileOffset = $ascii * 16;
+    foreach ($font5x7 as $i => $rows) {
+        $ascii = 0x20 + $i;
 
-    // bitplane 0 (bytes 0-7): glyph ピクセル
-    for ($y = 0; $y < 8; $y++) {
-        $chr[$tileOffset + $y] = chr($rows[$y]);
+        // --- table 0 (通常) ---
+        $t0 = $ascii * 16;
+        for ($y = 0; $y < 8; $y++) {
+            $bank[$t0 + $y] = chr($rows[$y]);
+        }
+
+        // --- table 1 (インバース) ---
+        // space (0x20) は空のままにして、nes_chr_bg(1) 時に未使用セルが埋まらないように
+        if ($ascii === 0x20) {
+            continue;
+        }
+        $t1 = 0x1000 + $ascii * 16;
+        for ($y = 0; $y < 8; $y++) {
+            // 5 列幅 ($F8) でインバース (グリフ部分が 0、背景が 1)
+            $bank[$t1 + $y] = chr($rows[$y] ^ 0xF8);
+        }
     }
-    // bitplane 1 (bytes 8-15): 0 のまま (色 1 で表示)
+
+    return $bank;
 }
+
+// CNROM (マッパー 3) 前提で 4 × 8KB = 32KB CHR-ROM
+//   Bank 0: 標準フォント + インバース (上記 build_bank)
+//   Bank 1-3: bank 0 のコピー (プレゼン用に自分で差し替える)
+// bank 1-3 に独自タイルを詰めたい場合は $banks を書き換える
+$bank0 = build_bank($font5x7);
+$banks = [
+    0 => $bank0,
+    1 => $bank0,
+    2 => $bank0,
+    3 => $bank0,
+];
+
+$chr = '';
+for ($i = 0; $i < 4; $i++) {
+    $chr .= $banks[$i];
+}
+assert(strlen($chr) === 32768);
 
 $outPath = __DIR__ . '/font.chr';
 file_put_contents($outPath, $chr);
-fprintf(STDERR, "[make_font] wrote %s (%d bytes)\n", $outPath, strlen($chr));
+fprintf(STDERR, "[make_font] wrote %s (%d bytes, 4 × 8KB banks)\n", $outPath, strlen($chr));

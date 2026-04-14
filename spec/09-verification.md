@@ -243,7 +243,19 @@ while (true) {
 - [x] `strings build/slides.nes` で全スライド文字列がヒット (`NESPHP PRESENTATION` 他)
 - [x] `xxd -g 1 build/slides.nes | grep 'f3 01 01 00'` で NESPHP_NES_PUTS (0xF3, op1/op2=IS_CONST) がヒット
 - [x] `xxd -g 1 build/slides.nes | grep 'f4 00 00 00'` で NESPHP_NES_CLS (0xF4, 引数なし) がヒット
-- [x] マッパー 0 (NROM-256) のまま (ROM サイズは 40976 バイト固定)
+
+### 延長第 5D 段階: CHR バンク + pattern table 切替 (`chrdemo.nes`) ✅
+
+`examples/chrdemo.php`: ボタン押下で `nes_chr_bg(0/1)` と `nes_chr_bank(0/1)` を
+順に呼び、同じテキストが通常 → インバース → バンク切替と変化するデモ。
+
+- [x] ビルド成功、ROM サイズ 65552 バイト (16 + 32KB PRG + 32KB CHR)
+- [x] `xxd -g 1 -l 16 build/chrdemo.nes` で `02 04 30 00` (PRG=2, CHR=4, Flags6=0x30=mapper 3) が確認できる
+- [x] `xxd -g 1 build/chrdemo.nes | grep 'f5 01 00 00'` で NESPHP_NES_CHR_BANK (0xF5) がヒット
+- [x] `xxd -g 1 build/chrdemo.nes | grep 'f6 01 00 00'` で NESPHP_NES_CHR_BG (0xF6) がヒット
+- [x] Mesen の PPU viewer で pattern table 0/1 の両方にフォントタイルが存在する
+- [x] Mesen の mapper viewer で bank 0-3 が参照できる (初期状態は全て bank 0 のコピー)
+- [x] 既存 example (hello/arith/loop/button/move/sprite/slides) が CNROM 昇格後も全てビルド成功・動作
 
 ---
 

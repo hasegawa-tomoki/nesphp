@@ -5,6 +5,7 @@
 ## 動作確認バージョン
 
 - **PHP: 8.4.x** (version lock 必須、根拠は [05-toolchain](./05-toolchain.md))
+- **マッパー: CNROM (mapper 3)**、PRG 32KB + CHR 32KB (4 × 8KB バンク)、詳細は [11-chr-banks](./11-chr-banks.md)
 - cc65: `brew install cc65`
 - 開発ホスト: macOS (NTS x64 PHP ビルド前提)
 - エミュレータ: Mesen (PPU/CPU 精度優先)
@@ -24,6 +25,7 @@
 | 8 | [08-risks](./08-risks.md) | 主要リスクと緩和策 |
 | 9 | [09-verification](./09-verification.md) | 受け入れ基準とロマン検証 |
 | 10 | [10-devlog](./10-devlog.md) | 各フェーズの設計判断の経緯と躓き (時系列) |
+| 11 | [11-chr-banks](./11-chr-banks.md) | CNROM CHR バンク + PPUCTRL bit 4 による pattern table 切替 |
 
 ## 最短読み方
 

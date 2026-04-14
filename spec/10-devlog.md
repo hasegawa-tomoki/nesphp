@@ -340,6 +340,103 @@ DO_FCALL_BY_NAME
 
 ---
 
+## Phase 5D: パターンテーブル切替 (`chrdemo.nes`)
+
+### ゴール
+
+プレゼンを「カッコイイ」方向に振るため、スライド毎にフォントやタイルセットを
+差し替えたい。最低でも 2 系統、できれば 4-8 系統。
+
+### 決定事項: (A) PPUCTRL bit 4 と (B) CNROM の併用
+
+検討した 4 案:
+
+| 案 | 粒度 | コスト | 採否 |
+|---|---|---|---|
+| (A) PPUCTRL bit 4 のみ | 同一 CHR 内 2 面 | 最小 (マッパー変更なし) | ✅ |
+| (B) CNROM (mapper 3) のみ | 4 × 8KB バンク | マッパー昇格 | ✅ |
+| (C) UxROM + CHR-RAM | 無限、スライド毎に任意タイル | マッパー実装 + RAM 転送ルーチン | ❌ (過剰) |
+| (D) MMC3 + scanline IRQ | mid-frame 切替 | IRQ 処理、タイミング敏感 | ❌ (プレゼンには不要) |
+
+(A) と (B) を**両方** 採用。組み合わせで **4 × 2 = 8 面の pattern table** を
+取れる。(A) だけでは 2 面で物足りない、(B) だけではバンク内切替の細かさが
+出ない、という補完関係。
+
+### マッパー昇格: NROM-256 → CNROM (mapper 3)
+
+- iNES ヘッダ: CHR 容量を 1 → 4 (4 × 8KB)、Flags 6 = `%00110000` (mapper LSB
+  nibble = 3)
+- `vm/nesphp.cfg`: CHR MEMORY 領域を `size = $2000` → `size = $8000`
+- `chr/make_font.php`: 8KB 単位で `build_bank()` し、4 バンクぶんを連結して
+  32KB の `font.chr` を出力
+
+serializer には影響なし (ops.bin レイアウトは不変)。
+
+### 躓き: バス衝突 (bus conflict)
+
+CNROM は「CPU が $8000-$FFFF のどこかに STA した瞬間に mapper がバンク番号を
+ラッチする」動作。ここで一部の実機では、書き込み先 ROM セルの値と書き込む値が
+違うと挙動が壊れる (data bus に両者が同時に出力されるため)。
+
+対策: ROM 内に「index 自身が入った LUT」を置き、`STA cnrom_bank_lut, X` で
+書き込む。例えば bank 2 に切替えたいときは X=2, A=2 で書き込み、ROM の
+`cnrom_bank_lut[2]` も `$02` なので衝突しない。
+
+```asm
+cnrom_bank_lut:
+    .byte $00, $01, $02, $03
+```
+
+Mesen は bus conflict を無視しても動くが、実機互換性のためこのパターンを採用。
+
+### `ppu_ctrl_shadow` の導入
+
+`PPUCTRL` ($2000) は write-only なので、bit 4 だけ切り替えたい (= 他の bit を
+保存したい) ときに現在値を知る手段がない。`ppu_ctrl_shadow` を zero page に
+1 バイト確保して、書き込みの度に shadow と実レジスタを同期させる。
+
+これで `nes_chr_bg` は sprite_mode で既にセットされた NMI enable bit (bit 7)
+を壊さずに BG pattern table を切り替えられる。将来的に sprite pattern table
+(bit 3) 切替 intrinsic `nes_chr_spr` を足すときもこの shadow に乗る。
+
+### インバースフォントの自動生成
+
+(A) をすぐ体感できるように、`make_font.php` が pattern table 1 に
+「インバース字体」を自動生成するようにした:
+
+```php
+$bank[$t1 + $y] = chr($rows[$y] ^ 0xF8);  // 5 列幅でビット反転
+```
+
+space (0x20) だけは 0 のまま残して、nametable の未使用セルが埋まらないように。
+`nes_chr_bg(1)` を呼ぶと、以降のテキストは「5 ピクセル幅の solid 背景にグリフ
+形にくり抜かれた」ハイライト表示になる。タイトル強調用途にそのまま使える。
+
+### バンク 1-3 の中身
+
+初期状態では bank 1-3 は bank 0 のコピー。`chr/make_font.php` の `$banks`
+配列を書き換えれば各バンクに独自タイルを入れられる。
+
+「差し替え前提」のスタンスにした理由: デモ段階で想定できる絵柄 (ロゴ / 装飾
+フォント) をコミットすると将来のプレゼン内容と合わない。使う人が自分のスライド
+に合わせて生成するのが正しい。
+
+### 成果
+
+`chrdemo.nes`: 5 状態を遷移するサンプル。押すたびに NORMAL → INVERSE → NORMAL
+→ BANK1 → BANK0 → ... と `nes_chr_bg` / `nes_chr_bank` が呼ばれる。xxd で
+`f5 01 00 00` (NES_CHR_BANK with IS_CONST op1) と `f6 01 00 00` (NES_CHR_BG)
+のバイト列が見える。ROM サイズは 16 + 32KB PRG + 32KB CHR = 65552 バイト。
+
+### 既存 example への影響
+
+マッパー昇格でビルド成果物のサイズは倍増するが、hello.nes / arith.nes /
+loop.nes / button.nes / move.nes / sprite.nes / slides.nes は全て再ビルド
+成功、`make verify` も通る。serializer と op_array レイアウトは無変更なので
+ゾーンとしては隔離されている。
+
+---
+
 ## 各フェーズ横断の学び
 
 ### 1. 「Zend に似せる」と「6502 で動く」の綱引き

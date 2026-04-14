@@ -53,6 +53,8 @@ const NESPHP_NES_PUT          = 0xF1;  // nes_put($x, $y, $char) intrinsic
 const NESPHP_NES_SPRITE       = 0xF2;  // nes_sprite($x, $y, $tile) intrinsic (sprite 0)
 const NESPHP_NES_PUTS         = 0xF3;  // nes_puts($x, $y, "literal") intrinsic
 const NESPHP_NES_CLS          = 0xF4;  // nes_cls() intrinsic
+const NESPHP_NES_CHR_BANK     = 0xF5;  // nes_chr_bank(N) CNROM CHR bank 切替
+const NESPHP_NES_CHR_BG       = 0xF6;  // nes_chr_bg(N) PPUCTRL bit4 切替
 
 // === Zend operand type (zend_compile.h) ===
 const IS_UNUSED        = 0;
@@ -298,6 +300,31 @@ function parse_opcache_dump(string $text): array
                     'mnemonic'       => 'NESPHP_NES_CLS',
                     'op1'            => 0,
                     'op1_type'       => IS_UNUSED,
+                    'op2'            => 0,
+                    'op2_type'       => IS_UNUSED,
+                    'result'         => 0,
+                    'result_type'    => IS_UNUSED,
+                    'extended_value' => 0,
+                    'lineno'         => 1,
+                ];
+                $pendingBuiltin = null;
+                $pendingArgs = [];
+                continue;
+            }
+            if ($pendingBuiltin === 'nes_chr_bank' || $pendingBuiltin === 'nes_chr_bg') {
+                if (count($pendingArgs) !== 1) {
+                    fail("$pendingBuiltin requires 1 argument at line $index (got " . count($pendingArgs) . ")");
+                }
+                if ($pendingArgs[0]['type'] !== IS_CONST) {
+                    fail("$pendingBuiltin: argument must be a compile-time integer literal at line $index");
+                }
+                $customOpcode = $pendingBuiltin === 'nes_chr_bank' ? NESPHP_NES_CHR_BANK : NESPHP_NES_CHR_BG;
+                $customName   = $pendingBuiltin === 'nes_chr_bank' ? 'NESPHP_NES_CHR_BANK' : 'NESPHP_NES_CHR_BG';
+                $ops[$index] = [
+                    'opcode'         => $customOpcode,
+                    'mnemonic'       => $customName,
+                    'op1'            => $pendingArgs[0]['val'],
+                    'op1_type'       => $pendingArgs[0]['type'],
                     'op2'            => 0,
                     'op2_type'       => IS_UNUSED,
                     'result'         => 0,

@@ -111,6 +111,10 @@ nmi:
 
 黒背景に白文字で統一。BG / sprite ともに同じパターンテーブル (pattern table 0) のフォントを参照する。
 
+`nes_chr_bg($n)` で BG 側の pattern table を切り替えることができる (`PPUCTRL`
+bit 4)。`nes_chr_bank($n)` で CHR バンク自体を 0-3 から選択できる (CNROM)。
+詳細は [11-chr-banks](./11-chr-banks.md)。
+
 ```asm
 palette_data:
     .byte $0F, $30, $10, $00   ; BG palette 0  (背景=黒, 文字=白)

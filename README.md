@@ -1,21 +1,124 @@
-# 基本仕様
+# nesphp
 
-* 6502でPHP opcodeを実行するPHP VM。
-* フル機能は不要。別マシンでphpコマンドからopcodeを吐き出し、それを実行する
-* opcodeは一部の実装で良い
-  * mvpではechoのみ実装
-  * その後の延長ゴールで以下を実装
-    * 制御構造(if, loop系）
-    * 標準入力からの入力
-    * ファミコンのコントローラーボタンを標準入力からの文字列として取り扱う
-    * スプライトの実装
-      * PHPからどのようにスプライト関連の命令のopcodeを出すか要検討
-      * PHP拡張を作って命令を増やす？
-* 最終的にはファミコン上で実行する
-  * ファミコンで実行できる .nes ファイルを作る
-* 延長ゴール:
-  * echoで画面に文字を吐き出し、コントローラ入力で文字を上下左右に動かしたりボタンで文字を変更したりするところをひとまずのゴールにする
-  * 同様にスプライトを動かす
+実 `php` コマンドが吐いた Zend opcode を 6502 (ファミコン) でそのまま実行する PHP VM。実用ではなくロマン重視。
+
+- **L3 レイアウト**: `zend_op` / `zval` / `zend_string` を handler ポインタだけ抜いて ROM に byte-for-byte 焼き、6502 側は Zend のフィールドオフセットを直接読む
+- **マッパー**: CNROM (mapper 3)、PRG 32KB + CHR 4 × 8KB
+- **動作確認**: PHP 8.4 (version lock) + cc65 + Mesen
+
+詳細な設計は [`spec/`](./spec/) ディレクトリ (目次は [`spec/README.md`](./spec/README.md))。
+
+---
+
+## クイックスタート
+
+```bash
+# 依存: PHP 8.4, cc65 (brew install cc65), Mesen
+make                      # デフォルト: build/hello.nes
+make build/slides.nes     # 任意の examples/NAME.php → build/NAME.nes
+make verify               # hello.nes に対する L3 ロマン検証
+make clean
+```
+
+ビルドした `.nes` を Mesen で開くと動きます。
+
+### 3 層ビルドパイプライン
+
+```
+examples/foo.php
+      │
+      ▼  opcache.opt_debug_level=0x10000
+ build/foo.ops.txt  (Zend opcode ダンプ)
+      │
+      ▼  serializer/serializer.php
+ build/foo.ops.bin  (L3 ROM バイナリ)
+      │
+      ▼  ca65 + ld65 (.incbin "build/ops.bin")
+ build/foo.nes
+```
+
+詳細: [`spec/05-toolchain.md`](./spec/05-toolchain.md)
+
+---
+
+## PHP で書けること
+
+### サポートされている PHP サブセット
+
+| カテゴリ | 対応 |
+|---|---|
+| 整数 | 16bit 符号付き narrow (`-32768..32767`、範囲外は serializer エラー) |
+| 文字列 | **ROM 内イミュータブル**のみ (リテラルまたは `fgets` 戻り値)。連結 (`.`) は未対応 |
+| 変数 | CV / TMP / VAR スロット、`$a = ...` / `$a = $b + 1` |
+| 比較 | `===` / `!==` / `==` / `!=` / `<` (`===` と `==` は同じ実装) |
+| 制御 | `if` / `while` / `while(true)` 無限ループ |
+| 出力 | `echo` (forced_blanking 中のみ、`nes_sprite` 呼び出し後は不可) |
+| 入力 | `fgets(STDIN)` → 押されたボタン 1 文字の文字列 |
+| 関数 | **intrinsic のみ** (下表)、ユーザ定義関数は未対応 |
+
+### できないこと (明示的に諦めたもの)
+
+配列 / オブジェクト / 例外 / generator / closure / double / 64bit int / 文字列連結 / 動的文字列生成。 詳細は [`spec/00-overview.md`](./spec/00-overview.md) の「やらないこと」。
+
+---
+
+## Intrinsic 一覧
+
+PHP から呼ぶと、serializer が自動的に専用 custom opcode に畳み込みます (`INIT_FCALL + SEND_* + DO_*` シーケンスを単一命令化)。**非リテラル引数を渡すとビルドエラー**になる項目あり。
+
+| 関数 | 引数 | 説明 | opcode |
+|---|---|---|---|
+| `echo $v` | IS_STRING / IS_LONG | nametable の現在カーソル位置に出力 (forced_blanking 必須) | `ZEND_ECHO` 0x88 |
+| `fgets(STDIN)` | — | コントローラの 1 ボタン押下を 1 文字の文字列で返す (`"A"/"B"/"S"/"T"/"U"/"D"/"L"/"R"`) | 0xF0 |
+| `nes_put($x, $y, "c")` | int, int, **char リテラル** | nametable (x, y) に 1 文字 | 0xF1 |
+| `nes_puts($x, $y, "str")` | int, int, **文字列リテラル** | nametable (x, y) から文字列を書く (行折り返しなし、len ≤255) | 0xF3 |
+| `nes_cls()` | — | nametable 0 全域 ($2000-$23FF) をスペースで埋めカーソル既定位置へ | 0xF4 |
+| `nes_sprite($x, $y, $tile)` | int, int, **int リテラル** | sprite 0 の OAM shadow 更新 (初回呼び出しで rendering + NMI を有効化) | 0xF2 |
+| `nes_chr_bank($n)` | **int リテラル 0-3** | CNROM CHR バンク切替 (同時に BG と sprite の両方が切り替わる) | 0xF5 |
+| `nes_chr_bg($n)` | **int リテラル 0/1** | PPUCTRL bit 4 で BG 側 pattern table を同一バンク内で切替 | 0xF6 |
+
+opcode 番号の根拠と折り畳みパターンは [`spec/04-opcode-mapping.md`](./spec/04-opcode-mapping.md)、`nes_chr_*` の詳細は [`spec/11-chr-banks.md`](./spec/11-chr-banks.md)。
+
+### レンダリング状態の制約
+
+表示系 intrinsic には 2 つのモードがあります:
+
+- **forced_blanking** (初期状態): `echo` / `nes_put` / `nes_puts` / `nes_cls` が nametable を直接叩ける。`fgets` 中だけ一時的に rendering ON でボタンを待つ
+- **sprite_mode** (初回 `nes_sprite` 以降): rendering 常時 ON、NMI ハンドラが毎 VBlank で OAM DMA を実行。この状態では `echo` / `nes_put` / `nes_puts` / `nes_cls` は**使ってはいけない**
+
+一度 sprite_mode に入ると戻れません。典型パターンは「初期 echo で説明 → `nes_sprite` でゲームループに突入」。詳細は [`spec/06-display-io.md`](./spec/06-display-io.md)。
+
+---
+
+## 同梱サンプル
+
+| ファイル | できること | 主な使用機能 |
+|---|---|---|
+| [`examples/hello.php`](./examples/hello.php) | `HELLO, NES!` を表示 | `echo` |
+| [`examples/arith.php`](./examples/arith.php) | `1 + 2 = 3` を表示 | 16bit 整数演算、CV/TMP |
+| [`examples/loop.php`](./examples/loop.php) | `01234` を順に出力 | `while`, `<`, 16bit 比較 |
+| [`examples/button.php`](./examples/button.php) | 押したボタン文字を表示 | `fgets(STDIN)` |
+| [`examples/move.php`](./examples/move.php) | 十字キーで `X` をタイル単位移動 | `nes_put`, `===` |
+| [`examples/sprite.php`](./examples/sprite.php) | 十字キーで `A` をピクセル単位移動 | `nes_sprite`, NMI |
+| [`examples/slides.php`](./examples/slides.php) | ボタンで 1 行ずつ進むプレゼン | `nes_puts`, `nes_cls` |
+| [`examples/chrdemo.php`](./examples/chrdemo.php) | BG pattern table / CHR バンク切替 | `nes_chr_bg`, `nes_chr_bank` |
+
+各サンプルの受け入れ基準と xxd 検証パターンは [`spec/09-verification.md`](./spec/09-verification.md)。
+
+---
+
+## カスタム CHR で絵を差し替える
+
+`chr/font.chr` は 32KB = 4 × 8KB の CNROM バンクです。`chr/make_font.php` が生成しているので、そこを書き換えて `php chr/make_font.php` で再生成 → `make` で再ビルド。
+
+標準の内容:
+- **Bank 0 / pattern table 0**: 5×7 のシンプル ASCII フォント
+- **Bank 0 / pattern table 1**: 上記の **インバース** (`nes_chr_bg(1)` で白抜き風)
+- **Bank 1-3**: Bank 0 のコピー (プレゼン用に差し替える想定)
+
+全バンク・全 pattern table の中身を自由に編集する手順は [`spec/11-chr-banks.md`](./spec/11-chr-banks.md#カスタム-chr-の作り方) に詳細。
+
+---
 
 ## License
 

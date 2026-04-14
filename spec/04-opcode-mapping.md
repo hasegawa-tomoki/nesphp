@@ -42,6 +42,8 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 | `NESPHP_NES_SPRITE` | **0xF2** | sprite 0 の OAM shadow を更新。初回呼び出しで sprite_mode に遷移 |
 | `NESPHP_NES_PUTS` | **0xF3** | nametable の (x, y) に文字列リテラルを書く。forced_blanking 前提、行折り返しなし |
 | `NESPHP_NES_CLS` | **0xF4** | nametable 0 ($2000-$23FF) を空白で埋めて `PPU_CURSOR` を既定位置に戻す。forced_blanking 前提 |
+| `NESPHP_NES_CHR_BANK` | **0xF5** | CNROM CHR バンク切替 (0-3)。bus-conflict-safe LUT 経由。詳細は [11-chr-banks](./11-chr-banks.md) |
+| `NESPHP_NES_CHR_BG` | **0xF6** | PPUCTRL bit 4 を書き換えて BG 側 pattern table を同一バンク内で切替 (0/1)。`ppu_ctrl_shadow` 保持 |
 
 ### serializer のパターン畳み込み
 
@@ -72,6 +74,16 @@ DO_FCALL_BY_NAME                 →  NESPHP_NES_PUT
 INIT_FCALL_BY_NAME 0 "nes_cls"   →  ZEND_NOP
 DO_FCALL_BY_NAME                 →  NESPHP_NES_CLS  (引数 0)
 ```
+
+**`nes_chr_bank(N)` / `nes_chr_bg(N)` → `NESPHP_NES_CHR_BANK` / `NESPHP_NES_CHR_BG`**
+```
+INIT_FCALL_BY_NAME 1 "nes_chr_bank" →  ZEND_NOP
+SEND_VAL_EX int(N) 1                →  ZEND_NOP
+DO_FCALL_BY_NAME                    →  NESPHP_NES_CHR_BANK
+                                       op1 = int literal (IS_CONST)
+```
+
+引数はコンパイル時の整数リテラル必須。
 
 ### ジャンプ先のエンコード
 

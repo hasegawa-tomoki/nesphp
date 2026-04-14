@@ -33,11 +33,13 @@ ZEND_RETURN           = 62
 ZEND_ECHO             = 136
 
 ; --- nesphp カスタム opcode (0xE0-0xFF は Zend 未使用領域) ---
-NESPHP_FGETS      = $F0
-NESPHP_NES_PUT    = $F1
-NESPHP_NES_SPRITE = $F2
-NESPHP_NES_PUTS   = $F3
-NESPHP_NES_CLS    = $F4
+NESPHP_FGETS        = $F0
+NESPHP_NES_PUT      = $F1
+NESPHP_NES_SPRITE   = $F2
+NESPHP_NES_PUTS     = $F3
+NESPHP_NES_CLS      = $F4
+NESPHP_NES_CHR_BANK = $F5
+NESPHP_NES_CHR_BG   = $F6
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -117,15 +119,19 @@ pi_count:       .res 1    ; print_int16 が書いたバイト数
 ; 初回 nes_sprite で 1 に遷移、以降 echo/nes_put は使えない
 sprite_mode_on: .res 1
 
+; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
+;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT
+ppu_ctrl_shadow: .res 1
+
 ; =============================================================================
-; iNES ヘッダ
+; iNES ヘッダ  (CNROM / mapper 3)
 ; =============================================================================
 .segment "HEADER"
     .byte "NES", $1A
-    .byte 2                ; PRG-ROM = 2 * 16KB = 32KB (NROM-256)
-    .byte 1                ; CHR-ROM = 1 * 8KB
-    .byte %00000000        ; Flags 6
-    .byte %00000000        ; Flags 7
+    .byte 2                ; PRG-ROM = 2 * 16KB = 32KB
+    .byte 4                ; CHR-ROM = 4 * 8KB = 32KB (CNROM 4 バンク)
+    .byte %00110000        ; Flags 6: mapper LSB = 3 (上位 nibble), mirroring = horizontal(0)
+    .byte %00000000        ; Flags 7: mapper MSB = 0
     .byte 0, 0, 0, 0, 0, 0, 0, 0
 
 ; =============================================================================
@@ -149,8 +155,12 @@ reset:
     TXS
     INX                    ; X = 0
     STX PPUCTRL
+    STX ppu_ctrl_shadow    ; shadow もクリア
     STX PPUMASK            ; 強制 blanking
     STX DMC_FREQ
+
+    ; CNROM CHR bank = 0 を明示。LUT に index 自身が入っているので bus-conflict 無し
+    STX cnrom_bank_lut     ; X = 0: bank 0
 
     ; 1 回目の VBL 待ち
     BIT PPUSTATUS
@@ -303,6 +313,14 @@ main_loop:
     CMP #NESPHP_NES_CLS
     BNE :+
     JMP handle_nesphp_nes_cls
+:
+    CMP #NESPHP_NES_CHR_BANK
+    BNE :+
+    JMP handle_nesphp_nes_chr_bank
+:
+    CMP #NESPHP_NES_CHR_BG
+    BNE :+
+    JMP handle_nesphp_nes_chr_bg
 :
     CMP #ZEND_ECHO
     BNE :+
@@ -1637,6 +1655,75 @@ cls_inner:
     JMP advance
 
 ; =============================================================================
+; NESPHP_NES_CHR_BANK: CNROM (mapper 3) の CHR バンクを切り替える
+;
+; 引数: op1 = 切り替え先バンク番号 (int literal 0-3, IS_CONST)
+;
+; CNROM はマッパ内の bank register に値を書くために、$8000-$FFFF 空間へ
+; 任意アドレスで STA する。本来の CNROM にはバス衝突 (bus conflict) があり、
+; 「書き込みデータが読み出しデータと一致していないと壊れる」挙動をする
+; ハードがあるので、ROM 内の `cnrom_bank_lut` テーブル (中身が各 index 自身)
+; を介して書き込む。
+; =============================================================================
+handle_nesphp_nes_chr_bank:
+    JSR resolve_op1
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE chr_bank_err
+    LDA OP1_VAL+1          ; bank 番号 (下位 8bit)
+    AND #$03               ; 0-3 にクランプ (CNROM は 4 banks)
+    TAX
+    ; cnrom_bank_lut[X] は X 自身が入っているので STA 時の read = write で
+    ; bus conflict を回避できる
+    STA cnrom_bank_lut, X
+    JMP advance
+
+chr_bank_err:
+    JMP handle_unimpl
+
+; -----------------------------------------------------------------------------
+; CNROM bank 切り替え用の LUT (bus-conflict-safe)
+;   アドレスは $8000-$FFFF 空間にある ROM、各セルの値 = index 自身
+;   → LDA / STA の read-write サイクルで同じ値が見え、バス衝突が起きない
+; -----------------------------------------------------------------------------
+cnrom_bank_lut:
+    .byte $00, $01, $02, $03
+
+; =============================================================================
+; NESPHP_NES_CHR_BG: PPUCTRL bit 4 を書き換えて BG 側 pattern table を切り替え
+;
+; 引数: op1 = 0 or 1 (int literal, IS_CONST)
+;   0 → BG は pattern table 0 ($0000-$0FFF, 通常フォント)
+;   1 → BG は pattern table 1 ($1000-$1FFF, インバース / 装飾フォント)
+;
+; ppu_ctrl_shadow を更新してから PPUCTRL に書き戻す。NMI enable など他ビットは
+; 保存される。rendering 中でも PPUCTRL 書き換えは安全 (scroll を汚さない)。
+; =============================================================================
+handle_nesphp_nes_chr_bg:
+    JSR resolve_op1
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE chr_bg_err
+    LDA OP1_VAL+1
+    AND #$01               ; 0 or 1 に丸める
+    BEQ chr_bg_clear
+    ; bit 4 セット
+    LDA ppu_ctrl_shadow
+    ORA #$10
+    JMP chr_bg_store
+chr_bg_clear:
+    ; bit 4 クリア
+    LDA ppu_ctrl_shadow
+    AND #$EF
+chr_bg_store:
+    STA ppu_ctrl_shadow
+    STA PPUCTRL
+    JMP advance
+
+chr_bg_err:
+    JMP handle_unimpl
+
+; =============================================================================
 ; Pre-baked 1 文字 zend_string (ボタン対応)
 ;
 ; 各ブロックは spec/01-rom-format.md の zend_string 24B ヘッダ + content + null
@@ -1743,8 +1830,10 @@ enable_sprite_mode:
     STA PPUSCROLL
     STA PPUSCROLL
 
-    ; PPUCTRL: NMI enable、sprite pattern table = 0、BG pattern table = 0
-    LDA #%10000000
+    ; PPUCTRL: NMI enable。BG pattern table bit は shadow の現在値を継承する
+    LDA ppu_ctrl_shadow
+    ORA #%10000000
+    STA ppu_ctrl_shadow
     STA PPUCTRL
 
     ; PPUMASK: BG + sprite 有効、左端 8 ピクセルも表示
