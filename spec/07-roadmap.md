@@ -14,7 +14,8 @@
 | 延長 第 5B: ハードウェアスプライト移動 | `sprite.nes` | ✅ **完了** |
 | 延長 第 5C: プレゼン用 `nes_puts` / `nes_cls` | `slides.nes` | ✅ **完了** |
 | 延長 第 5D: CNROM + PPUCTRL bit 4 で CHR 切替 | `chrdemo.nes` | ✅ **完了** |
-| 延長 第 3 段階: NMI 同期 echo | — | 未着手 (echo は sprite_mode 前まで制限) |
+| 延長 第 3 段階: NMI 同期 echo / nes_put / nes_puts | `livetext.nes` | ✅ **完了** |
+| 延長 第 3.1 段階: sprite_mode での nes_cls (brief force-blanking) | `livereset.nes` | ✅ **完了** |
 | 第 2 段階: 自作 Zend 拡張 | `nesphp_dump.so` | 未着手 |
 | 多スプライト対応 | — | 未着手 (現在 sprite 0 固定) |
 
@@ -170,9 +171,22 @@ while ($i < 10) {
 
 が動くことを目指す。`ZEND_JMP` の `op1.jmp_offset` を serializer で NES ROM 内 op index に解決する実装を追加。
 
-### 第 3 段階: 動的 echo (NMI 同期)
+### 第 3 段階: 動的 echo (NMI 同期) ✅ 完了
 
-ステップ 2 の時点で `echo` は強制 blanking 中のみ有効だが、ここでテキスト行バッファ + NMI 転送に昇格 ([06-display-io](./06-display-io.md))。while ループ内の echo が実行時に見えるようになる。
+ステップ 2 の時点で `echo` は強制 blanking 中のみ有効だったが、NMI 同期書き込みキュー (`$0300-$03FF` 256B のリングバッファ) を実装して sprite_mode 中でも `echo` / `nes_put` / `nes_puts` が透過的に動くように昇格した。
+
+実装詳細は [06-display-io](./06-display-io.md) の「NMI 同期書き込みキュー」節、設計経緯は [10-devlog](./10-devlog.md) の Phase 3 参照。`examples/livetext.php` がスプライト操作中の動的テキスト描画デモ。
+
+残課題: `nes_chr_bank` / `nes_chr_bg` は tearing する (将来 NMI キューに CHR 切替コマンドを追加する予定)。
+
+### 第 3.1 段階: sprite_mode 中の nes_cls ✅ 完了
+
+nes_cls は 1024B が 1 VBlank 予算に入らず NMI 同期キューでは無理なので、
+**brief force-blanking** 方式を採用: sprite_mode 中に nes_cls を呼ぶと、
+一時的に `PPUMASK = 0` + NMI 無効化で rendering を止め、clear し、次 VBlank で
+rendering を再開する。可視効果は 1-2 フレームの黒フラッシュでスライド遷移の
+トランジションとして自然。`examples/livereset.php` が sprite 表示中の
+スライドクリア + 再描画を実演。
 
 ### 第 4 段階: 標準入力 = コントローラ
 

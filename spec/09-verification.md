@@ -244,6 +244,32 @@ while (true) {
 - [x] `xxd -g 1 build/slides.nes | grep 'f3 01 01 00'` で NESPHP_NES_PUTS (0xF3, op1/op2=IS_CONST) がヒット
 - [x] `xxd -g 1 build/slides.nes | grep 'f4 00 00 00'` で NESPHP_NES_CLS (0xF4, 引数なし) がヒット
 
+### 延長第 3 段階: NMI 同期書き込み (`livetext.nes`) ✅
+
+`examples/livetext.php`: sprite_mode 中に nes_puts / nes_put を呼ぶデモ。
+スプライトが十字キーで動く中、A ボタン押下で "HIT!" が行を 1 つずつずらして
+表示される。
+
+- [x] ビルド成功、ROM サイズ 65552 バイト
+- [x] sprite_mode 中に呼ばれた `nes_puts(3, $row, "HIT!")` が A 押下で画面に反映される
+- [x] スプライト 'X' が十字キーで動き続ける (NMI が毎フレーム OAM DMA を実行している)
+- [x] sprite 移動と HIT! 追加を並行操作しても画面崩れが発生しない
+- [x] `xxd -g 1 build/livetext.nes | grep 'f3 01 08 00'` で NESPHP_NES_PUTS (op1=IS_CONST x=3, op2=IS_CV $row) がヒット
+- [x] Mesen の PPU viewer で `$0300-$03FF` に NMI キューエントリが確認できる (A 押下直後の短時間)
+
+### 延長第 3.1 段階: sprite_mode での nes_cls (`livereset.nes`) ✅
+
+`examples/livereset.php`: sprite_mode 中に `nes_cls()` でスライド遷移するデモ。
+A 押下で画面クリア + 次スライドの `nes_puts` が走り、3 スライドを循環する。
+
+- [x] ビルド成功、ROM サイズ 65552 バイト
+- [x] 初期表示 "PHASE 3.1: CLS DEMO" + sprite 'X' が出る
+- [x] 十字キーで sprite が動く (sprite_mode のまま)
+- [x] A 押下で 1-2 フレームの黒フラッシュ → 新しいスライドが表示される
+- [x] A 連打で sprite 位置を保ったままスライドが循環する
+- [x] 画面崩壊しない (brief force-blanking 経由)
+- [x] `xxd -g 1 build/livereset.nes | grep 'f4 00 00 00'` で NESPHP_NES_CLS がヒット
+
 ### 延長第 5D 段階: CHR バンク + pattern table 切替 (`chrdemo.nes`) ✅
 
 `examples/chrdemo.php`: ボタン押下で `nes_chr_bg(0/1)` と `nes_chr_bank(0/1)` を

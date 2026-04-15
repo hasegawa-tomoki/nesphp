@@ -43,7 +43,9 @@
          [forced_blanking]                       [sprite_mode]
          PPUMASK = 0                             PPUMASK = %00011110 (BG+sprite)
          NMI off                                 NMI on
-         nametable に直接書ける                    echo/nes_put/nes_puts/nes_cls 不可
+         nametable に直接書ける                    echo/nes_put/nes_puts は NMI キュー経由
+                                                  nes_cls は brief force-blanking
+                                                   (~1-2 フレーム黒フラッシュ)
          sprite は表示されない                     OAM DMA が毎 VBlank で走る
                │                                        ▲
                │  ┌── fgets: 一時的に rendering on, 待機, off ──┐
@@ -81,13 +83,61 @@
 
 - `nes_sprite` は OAM shadow `$0200-$0203` に (y, tile, attr, x) を書くだけ。NMI が毎 VBlank で DMA
 - `fgets` は rendering を切らずにボタン待ち (NMI が走り続けるので画面表示継続)
-- `echo` / `nes_put` / `nes_puts` / `nes_cls` は **使ってはいけない** (rendering 中の nametable 書き込みは PPU state を壊す)
+- `echo` / `nes_put` / `nes_puts` は **Phase 3 (NMI 同期書き込みキュー) により動く**。実際の PPU 書き込みは NMI ハンドラが VBlank 中に行う (下記参照)
+- `nes_cls` は **Phase 3.1 (brief force-blanking) により動く**。1024 バイトは 1 VBlank 予算 (~2273 cycle) に入らないため NMI キュー経由ではなく、呼び出し時に一時的に `PPUMASK = 0` で rendering を止めて clear し、次 VBlank 同期で rendering を再開する方式。可視効果は 1-2 フレームの黒フラッシュで、スライド遷移のトランジションとして自然
 
 ### 状態遷移の制約
 
-- **一度 sprite_mode に入ったら forced_blanking に戻れない** (MVP では意図的に単方向)
-- `echo` は sprite_mode 前にしか期待通り動かない。ユーザコードは「初期表示の echo → `nes_sprite` 開始 → loop」というパターンを守る必要
-- 将来、NMI 同期 echo (下記) を実装すれば両モードで echo が動くようになる
+- **一度 sprite_mode に入ったら forced_blanking に戻れない** (MVP では意図的に単方向、`sprite_mode_on` フラグは一度 1 になったら 0 に戻らない)
+- `echo` / `nes_put` / `nes_puts` は **Phase 3 以降、両モードで動く** (sprite_mode では NMI 同期書き込みキュー経由)
+- `nes_cls` は **Phase 3.1 以降、両モードで動く** (sprite_mode では brief force-blanking、rendering を一時的に切って clear、次 VBlank で再開)
+
+### NMI 同期書き込みキュー (Phase 3)
+
+sprite_mode 中の nametable 書き込みを「呼んだ瞬間にキューへ積む → 次 VBlank で実際に PPU に流し込む」モデルで実現する。これにより rendering を止めずに nametable 更新ができる。
+
+キュー実体: `NMI_QUEUE_ADDR = $0300`、256 バイトのリングバッファ。フォーマット:
+
+```
+[addr_hi addr_lo len data_0 ... data_{len-1}]  ← 1 エントリ
+[addr_hi addr_lo len data_0 ... data_{len-1}]  ← 次エントリ
+...
+```
+
+- **`nmi_queue_write`** (zero page, 1B): main CPU が次に append するオフセット (producer)
+- **`nmi_queue_read`** (zero page, 1B): NMI が次に処理するオフセット (consumer)
+- **両方ともモノトニック増加**する uint8 で、256 で自然 wrap。`read == write` で空、`(write - read - 1) & $FF` が使用中バイト数
+- **page 境界整列 ($0300)** にしてあるので、`LDA NMI_QUEUE_ADDR, X` の X 自動 wrap で終端をまたぐエントリも透過アクセス
+
+Race-free 設計:
+
+- `write` は main のみ、`read` は NMI のみが更新する
+- main は空き容量を `(read - write - 1) & $FF` で計算して、3 + len 以上あれば append
+- append 中に NMI が fire しても、NMI は commit 前の `write` を見るので新エントリ領域には触れず、old entries を flush して `read` を `write` に追いつかせるだけ
+- main が X レジスタに cache した write_head は NMI に影響されない (NMI は reset をしない設計)
+
+`flush_nmi_queue` は NMI ハンドラ内から呼ばれ、`read..write-1` のエントリを順に PPUADDR/PPUDATA へ流し込む。1 VBlank で 256 バイト全部を flush しても ~1300 cycle で予算内。
+
+`enqueue_ppu_nt` は producer 側のヘルパで、TMP0/TMP1/TMP2 に (addr, src ptr, len) を入れて JSR する。空きが足りない場合は NMI drain を busy-wait。
+
+ハンドラは `ppu_write_bytes` に集約されていて、`sprite_mode_on` を見て「forced_blanking なら PPUADDR/PPUDATA 直書き、sprite_mode なら enqueue」に分岐する。
+
+### nes_cls の brief force-blanking (Phase 3.1)
+
+`nes_cls` は nametable 0 全域 (1024B) を空白で埋めるため、1 VBlank 予算 (~2273 cycle) には収まらず NMI キュー方式を使えない。代わりに sprite_mode 中の `nes_cls` 呼び出しでは以下を行う:
+
+1. `ppu_ctrl_shadow` を 6502 スタックに退避
+2. `PPUCTRL` bit 7 クリア (NMI 一時無効化)。clear 中に NMI が発火して `flush_nmi_queue` が PPUADDR を上書きしないようにする
+3. `PPUMASK = 0` で rendering OFF → PPU は強制 blanking 状態へ
+4. 既存の 1024B clear ループを実行
+5. `BIT PPUSTATUS` / `BPL` で次 VBlank 開始まで wait (NMI 無効化済みなので flag が勝手にクリアされない)
+6. `STA $4014` で OAM DMA を手動実行 (NMI 無効化期間中の OAM 更新の補償、1 回だけ)
+7. `PPUSCROLL = 0, 0` で scroll 復帰
+8. `PPUMASK = %00011110` で rendering 再開
+9. `ppu_ctrl_shadow` をスタックから復元、`PPUCTRL` に書き戻す (NMI 再有効化)
+10. `PPU_CURSOR` を `NAMETABLE_START` に戻して `JMP advance`
+
+可視効果は「呼び出した瞬間から次 VBlank までの ~1-2 フレーム間、画面が真っ黒になる」。スライド遷移のトランジションとしては自然なフラッシュで、sprite 表示中に清潔にスライドを切り替えられる。forced_blanking パスは完全に無変更で、`sprite_mode_on == 0` のときは従来通りの高速直書き。
 
 ### NMI ハンドラ (現行実装)
 

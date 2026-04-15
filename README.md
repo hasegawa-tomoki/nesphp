@@ -84,9 +84,9 @@ opcode 番号の根拠と折り畳みパターンは [`spec/04-opcode-mapping.md
 表示系 intrinsic には 2 つのモードがあります:
 
 - **forced_blanking** (初期状態): `echo` / `nes_put` / `nes_puts` / `nes_cls` が nametable を直接叩ける。`fgets` 中だけ一時的に rendering ON でボタンを待つ
-- **sprite_mode** (初回 `nes_sprite` 以降): rendering 常時 ON、NMI ハンドラが毎 VBlank で OAM DMA を実行。この状態では `echo` / `nes_put` / `nes_puts` / `nes_cls` は**使ってはいけない**
+- **sprite_mode** (初回 `nes_sprite` 以降): rendering 常時 ON、NMI ハンドラが毎 VBlank で OAM DMA を実行。**Phase 3 の NMI 同期書き込みキュー**により、`echo` / `nes_put` / `nes_puts` は透過的に動く (実際の PPU 書き込みは次 VBlank に遅延)。`nes_cls` は **Phase 3.1 の brief force-blanking** 方式で動く (1-2 フレームの黒フラッシュを伴うトランジション)
 
-一度 sprite_mode に入ると戻れません。典型パターンは「初期 echo で説明 → `nes_sprite` でゲームループに突入」。詳細は [`spec/06-display-io.md`](./spec/06-display-io.md)。
+一度 sprite_mode に入ると戻れません。典型パターンは「初期 echo で説明 → `nes_sprite` でゲームループに突入 (sprite + 動的テキスト + スライド遷移 すべて共存可能)」。詳細は [`spec/06-display-io.md`](./spec/06-display-io.md)、sprite_mode 同居サンプルは `examples/livetext.php` と `examples/livereset.php`。
 
 ---
 
@@ -102,6 +102,8 @@ opcode 番号の根拠と折り畳みパターンは [`spec/04-opcode-mapping.md
 | [`examples/sprite.php`](./examples/sprite.php) | 十字キーで `A` をピクセル単位移動 | `nes_sprite`, NMI |
 | [`examples/slides.php`](./examples/slides.php) | ボタンで 1 行ずつ進むプレゼン | `nes_puts`, `nes_cls` |
 | [`examples/chrdemo.php`](./examples/chrdemo.php) | BG pattern table / CHR バンク切替 | `nes_chr_bg`, `nes_chr_bank` |
+| [`examples/livetext.php`](./examples/livetext.php) | スプライト移動中にテキストを動的描画 (Phase 3) | `nes_sprite` + `nes_puts` 同居 |
+| [`examples/livereset.php`](./examples/livereset.php) | スプライト表示中にスライドをクリア+切替 (Phase 3.1) | `nes_sprite` + `nes_cls` 同居 |
 
 各サンプルの受け入れ基準と xxd 検証パターンは [`spec/09-verification.md`](./spec/09-verification.md)。
 

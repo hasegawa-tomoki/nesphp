@@ -340,6 +340,246 @@ DO_FCALL_BY_NAME
 
 ---
 
+## Phase 3: NMI 同期書き込み (`livetext.nes`)
+
+> ロードマップ的には第 3 段階として以前から残っていた課題。Phase 5B (sprite_mode) の
+> 副作用で「sprite_mode 中は echo / nes_put / nes_puts / nes_cls 不可」という制約が
+> 発生して以来、この解決はずっと保留だった。プレゼン用途で sprite と動的テキストを
+> 併用したくなった契機で実装した。
+
+### ゴール
+
+sprite_mode 中 (rendering 常時 ON) でも `echo` / `nes_put` / `nes_puts` を動かす。
+呼び出し側は今まで通りに書けて、VM 側が透過的に「直書き」と「NMI 同期書き込み」を
+切り替える。
+
+### 決定事項
+
+**NMI 同期書き込みキュー方式**を採用。メインループでは `nmi_queue_write` に
+エントリを積むだけで、実際の PPU 書き込みは NMI ハンドラが VBlank 中に
+`flush_nmi_queue` で実行する。
+
+- **キュー実体**: RAM `$0300-$03FF` 256 バイトのリングバッファ
+- **フォーマット**: `[addr_hi, addr_lo, len, data[len]]` のエントリ列
+- **head 方式**: `nmi_queue_write` (producer = main) と `nmi_queue_read` (consumer = NMI) が独立、両方ともモノトニック増加の uint8
+- **ハンドラ共有**: `ppu_write_bytes` ヘルパに (TMP0=addr, TMP1=src ptr, TMP2=len) を渡して `sprite_mode_on` で直書き/queue に分岐。3 個のハンドラ (echo/nes_put/nes_puts) が同じヘルパを使う
+
+### 検討した代替案
+
+| 案 | 採否 | 理由 |
+|---|---|---|
+| rendering を一時 OFF → 書いて → 再度 ON | ❌ | 1 フレーム画面が消えてちらつく。sprite_mode の体験を壊す |
+| CHR-RAM で nametable を PRG に複製 | ❌ | マッパー変更と複雑度増。割に合わない |
+| **VBlank 同期書き込みキュー** | ✅ | 標準的な NES パターン、実装 150 行程度、既存 API を壊さない |
+| double buffer (シャドウ nametable を VM 側に持つ) | ❌ | 2KB RAM を使い切る、nesphp の tagged value RAM と衝突 |
+
+### 躓き 1: `nes_cls` が 1 VBlank で終わらない
+
+最初は「nes_cls も NMI 同期化する」方向で設計していたが、nes_cls は
+nametable 0 全域 = 960 バイト (+ 属性 64B = 1024B) を空白で埋める動作。
+
+- 1 PPUDATA 書き込み = `LDA abs; STA abs` で最低 4 サイクル (データをあらかじめ
+  A に持っていれば 4)
+- 1024 バイト × 4 cycle = 4096 cycle
+- VBlank 予算 ~2273 cycle では 1 フレームに収まらない
+
+選択肢:
+1. chunked clear (4 フレーム = 67ms に分散)
+2. sprite_mode では nes_cls を未対応のままにする
+
+2 を選択。nes_cls はスライド遷移にしか使わないので、forced_blanking 限定で
+十分 (プレゼンは「初期 echo で intro → nes_sprite に入って interactive」という
+構造)。chunked clear は実装と NMI ハンドラの状態機械が複雑化するので見送り。
+
+### 躓き 2: head リセットの race condition
+
+初版では NMI が flush の末尾で `nmi_queue_read = nmi_queue_write = 0` にして
+バッファを先頭から再利用する設計にしていた。しかしこれには race がある:
+
+```
+main:  LDX nmi_queue_write   ; X = W_old
+       (NMI fires here)
+NMI:   flushes 0..W_old-1
+       sets read = write = 0
+main:  (resumes) writes bytes at positions X, X+1, ..., X+N-1
+                 using the STALE X = W_old
+       STX nmi_queue_write   ; write = W_old + N
+```
+
+これにより `read=0, write=W_old + N` という不整合になり、次 NMI は 0..W_old+N-1
+を flush → 既に flushed 済みの 0..W_old-1 を**再度 PPU に出力**してしまい
+画面破壊。
+
+**修正**: head をリセットせず、**両方ともモノトニック増加**させる。256 で
+自然 wrap するので、バッファは ring buffer になる。`NMI_QUEUE_ADDR = $0300`
+をページ境界に揃えると、`LDA NMI_QUEUE_ADDR, X` の X 自動 wrap でエントリが
+終端をまたいでも透過アクセスできる。
+
+この変更で:
+- main は `write` のみ更新、NMI は `read` のみ更新 → writer / reader 排他
+- main の X cache が NMI の影響を受けない (NMI は reset しないので)
+- 空き容量は `(read - write - 1) & $FF` で計算 (ring buffer の標準式)
+- main が free を計算中に NMI が read を進めると free は過小評価されるが、
+  安全側に傾くだけで corruption にはならない
+
+トータル 60 行程度の書き直しで race-free になった。
+
+### 躓き 3: `print_int16` が PPUDATA 直書き
+
+Phase 2 以来、`print_int16` は divmod で桁を出しながら直接 PPUDATA に
+書き込んでいた。これは forced_blanking 中前提で、sprite_mode では当然動かない。
+
+**修正**: `print_int16` を「`INT_PRINT_BUFFER = $0600` に出力」にリファクタ。
+`pi_count` に長さを返すのは従来通り。呼び出し側 (echo_long) は buffer を
+`ppu_write_bytes` に渡す。これで forced_blanking / sprite_mode 両対応。
+
+副作用として echo_long のコード構造が echo_string と対称になり、2 つの分岐が
+共通の `echo_write` ラベルに合流できるようになった (クリーンアップ)。
+
+### 躓き 4: ハンドラ間での TMP0/TMP1/TMP2 の意味の衝突
+
+既存の `handle_nesphp_nes_put` は TMP2 に 1 文字ぶんの char コードを持って
+いたが、`enqueue_ppu_nt` では TMP2 = len (バイト長)。同じ zero page を違う
+意味で使っていた。
+
+**修正**: nes_put ハンドラ内で char を `INT_PRINT_BUFFER[0]` に移し、TMP1 =
+INT_PRINT_BUFFER, TMP2 = 1 の形で統一。これで echo / nes_put / nes_puts 全て
+同じ「TMP0=addr, TMP1=src ptr, TMP2=len」契約で `ppu_write_bytes` に委譲できる。
+
+### 解けた連鎖的な制限
+
+Phase 3 実装の副産物として、以下も同時に解決:
+
+1. **sprite_mode で動的テキスト表示**: プレゼン用途のゲーム化 (sprite + スライド)
+2. **sprite_mode でのスコア/ステータス更新**: echo による整数表示も動く
+3. **sprite と静的テキストの共存**: livetext.nes で demo
+
+ただし以下は Phase 3 スコープ外として残る:
+- nes_cls (1 VBlank で終わらない)
+- nes_chr_bank / nes_chr_bg の tearing (CHR 切替は即時反映で VBlank 同期しない。
+  これらの NMI 同期化は別途必要だが、プレゼン用途ではスライド遷移時のみの使用
+  なので優先度低)
+
+### 成果
+
+`build/livetext.nes`: sprite が画面中央でユーザ操作により動く中、A ボタン押下で
+「HIT!」テキストが 1 行ずつ下に追加される。従来は sprite_mode 中に nes_puts を
+呼ぶと PPU latch 汚染で画面全体が崩れていたが、Phase 3 では NMI 経由の書き込み
+なのでスプライトも背景も無傷。
+
+既存 example (hello/arith/loop/button/move/sprite/slides/chrdemo) は全て
+無変更で引き続き動作。forced_blanking パスが echo_string / echo_long / nes_put /
+nes_puts いずれもリファクタ前と等価な直書きを維持しているため。
+
+---
+
+## Phase 3.1: sprite_mode での nes_cls (`livereset.nes`)
+
+> Phase 3 直後に発覚した未解決の footgun。`nes_cls` は NMI キュー方式を使えない
+> (1024B / VBlank 予算 ~2273 cycle) ので別アプローチが必要だった。プレゼン用途
+> でスライド遷移に nes_cls を使いたいという要求から、Phase 3 の直後に実装した。
+
+### 発覚した問題
+
+Phase 3 でハンドラ dual-path 化を進めたが `handle_nesphp_nes_cls` は対象外
+だったため、sprite_mode 中に nes_cls を呼ぶと無条件で PPUADDR / PPUDATA 直書き
+していた。実際に発生する破壊:
+
+1. `STA PPUADDR` × 2: rendering 中の PPUADDR 書き込みは PPU 内部 v register
+   ($2000 に直接上書き) を汚染 → scroll と現在 scanline の nametable 参照
+   位置がいきなり飛ぶ
+2. `STA PPUDATA` × 1024: rendering 中の PPUDATA は undefined behavior。
+   CPU の v 自動インクリメントと PPU render pipeline の v 更新がバッティング
+   し、1024 バイトの $20 が nametable にランダム散布
+3. 所要 ~5000 cycle ≈ 18 scanline で可視領域が汚染される
+4. スプライトは OAM shadow 別系統で無傷、背景だけ穴だらけ
+
+### 選択肢検討
+
+| 案 | コスト | 副作用 | 採否 |
+|---|---|---|---|
+| (A) runtime no-op guard | 極小 | クリアできない | ❌ 機能喪失 |
+| (B) handle_unimpl で halt | 極小 | プレゼン中に止まる | ❌ UX 悪 |
+| (C) compile-time エラー | 小 | nes_sprite → nes_cls フロー不可 | ❌ 過剰 |
+| **(D) brief force-blanking** | 中 | 1-2 フレームの黒フラッシュ | ✅ **採用** |
+| (E) chunked clear via NMI queue | 大 | tearing なし、flash なし | ❌ 実装肥大化、NMI 状態機械追加 |
+
+(D) を採用した理由: プレゼン用途では「スライド遷移 = ぱっと切り替わる」が期待
+動作で、1-2 フレームの黒フラッシュはむしろトランジションとして機能する。
+実装コストが低く、既存の Phase 3 設計を壊さない。
+
+### 実装: brief force-blanking
+
+`handle_nesphp_nes_cls` の先頭で `sprite_mode_on` をチェックし、sprite_mode
+中は以下を実行:
+
+```
+1. ppu_ctrl_shadow をスタックに退避
+2. PPUCTRL bit 7 クリア (NMI 無効化)
+3. PPUMASK = 0 (rendering 停止)
+4. 1024B clear loop (既存コード)
+5. BIT PPUSTATUS → BPL で次 VBlank 待ち
+6. STA $4014 で OAM DMA 手動実行 (NMI 無効化期間の補償)
+7. PPUSCROLL = 0, 0
+8. PPUMASK = %00011110 (rendering 再開)
+9. PPUCTRL を shadow から復元 (NMI 再有効化)
+10. PPU_CURSOR 戻し、JMP advance
+```
+
+forced_blanking パスは完全に無変更。`sprite_mode_on == 0` のときは従来どおり
+最高速の直書き (初期表示の hello.nes や slides.nes に影響なし)。
+
+### 躓き 1: NMI 無効化が必須だった
+
+最初は「rendering を一時オフにするだけで clear できるだろう」と考えていたが、
+sprite_mode 中は NMI が自動発火していて、NMI ハンドラは `flush_nmi_queue` で
+PPUADDR を触る。これが clear 途中に割り込むと PPUADDR 状態が壊れて clear が
+意図しない位置に書かれる。
+
+PPUCTRL bit 7 を一時クリアして NMI 自体を発生させないようにすることで解決。
+`ppu_ctrl_shadow` を 6502 スタックに PHA → 終わったら PLA で原子的に復元。
+
+### 躓き 2: OAM DMA を補償しないとスプライトが古いままになる
+
+NMI 無効化期間中は自動 OAM DMA が止まる。~1-2 フレームの間、スプライトが
+前フレームの位置のまま表示される (気付きにくいが、移動中だと visual hitch)。
+
+clear 末尾の VBlank 内で手動 `STA $4014` を 1 回発行することで、最低限の
+OAM 更新を補う。完全な補償ではないが (1 フレームぶんは遅れる)、連続的な
+スプライト移動が「ちょっとだけ止まる」程度で済む。
+
+### 躓き 3: VBlank 待ちループが NMI 有効だと取りこぼす
+
+`BIT PPUSTATUS; BPL` で VBlank flag を待つが、NMI が有効だと VBlank 発生時に
+NMI ハンドラが割り込んで先に PPUSTATUS を読んでしまい (`BIT PPUSTATUS`)、flag
+が消費される。その後のメインループの `BIT PPUSTATUS` は flag がクリアされた
+状態を見てさらに 1 フレーム待つ → 挙動が不安定になる。
+
+躓き 1 の NMI 無効化によりこれも解決 (NMI が割り込まないので flag を他の
+コードが読まない)。
+
+### 成果
+
+`build/livereset.nes`: 初期スライド表示 → sprite_mode → A 押下で画面クリア
++ 次スライド描画が循環。sprite 位置はそのまま維持され、黒フラッシュは 1-2
+フレーム (体感 ~30ms) で視覚的には「次スライドへのトランジション」として
+違和感なし。
+
+既存 example (hello/arith/loop/button/move/sprite/slides/chrdemo/livetext) は
+全て無変更で動作。forced_blanking パスを `sprite_mode_on == 0` ブランチで
+保護しているため、従来の高速直書き動作は完全に保たれる。
+
+### 残課題 (Phase 3.1 スコープ外)
+
+- `nes_chr_bank` / `nes_chr_bg` は sprite_mode 中に依然 tearing する。
+  これらも NMI キューに「CHR 切替コマンド」として載せる方式で解決可能だが、
+  VBlank 予算の配分と、切替直後に nametable を描き直す連鎖処理 (バンク切替
+  だけで絵が化けるため) が絡むので、単純な queue 拡張では済まない
+- MMC3 昇格は sprite と BG で別 CHR bank を持てるので、そもそも「切替で
+  sprite が化ける」問題自体がなくなる。ただし mapper 実装コストは大きい
+
+---
+
 ## Phase 5D: パターンテーブル切替 (`chrdemo.nes`)
 
 ### ゴール

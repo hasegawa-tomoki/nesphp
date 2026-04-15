@@ -89,6 +89,14 @@ NAMETABLE_START = $21EA          ; row 14, col 10
 CV_BASE_ADDR    = $0400
 TMP_BASE_ADDR   = $0500
 
+; --- NMI PPU 書き込みキュー (Phase 3: NMI 同期書き込み) ---
+; 256 バイト、length-prefix 形式で sprite_mode 中の nametable 書き込みを溜める。
+; フォーマット: [addr_hi addr_lo len data[len]] の繰り返し。
+NMI_QUEUE_ADDR    = $0300
+
+; --- print_int16 用の digit バッファ (最長 "-32768" = 6 文字) ---
+INT_PRINT_BUFFER  = $0600
+
 ; =============================================================================
 ; ゼロページ VM レジスタ
 ; =============================================================================
@@ -116,12 +124,22 @@ buttons:        .res 1    ; 現在のボタン状態 (bit 7=A, 6=B, 5=Sel, 4=Sta
 pi_count:       .res 1    ; print_int16 が書いたバイト数
 
 ; スプライトモード (0 = forced blanking, 1 = rendering + NMI on)
-; 初回 nes_sprite で 1 に遷移、以降 echo/nes_put は使えない
+; 初回 nes_sprite で 1 に遷移。
+; Phase 3 (NMI 同期書き込み) により、sprite_mode 中でも echo / nes_put /
+; nes_puts は動く (NMI キュー経由)。nes_cls だけは依然として forced_blanking
+; 専用 (1024B を 1 VBlank 予算 ~2273 cycle に収められないため)。
 sprite_mode_on: .res 1
 
 ; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
 ;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT
 ppu_ctrl_shadow: .res 1
+
+; NMI 書き込みキューの head (Phase 3)
+;   nmi_queue_write: main CPU が append するオフセット (producer)
+;   nmi_queue_read:  NMI が次に読むオフセット (consumer)
+;   write == read で empty。両方 0 に戻ったらバッファ先頭から再利用できる。
+nmi_queue_write: .res 1
+nmi_queue_read:  .res 1
 
 ; =============================================================================
 ; iNES ヘッダ  (CNROM / mapper 3)
@@ -685,19 +703,18 @@ wr_store:
 ; -----------------------------------------------------------------------------
 ; ZEND_ECHO: op1 (IS_STRING / IS_LONG) を PPU nametable へ
 ;
-; 毎回 PPUADDR = PPU_CURSOR をセットし直す (fgets で rendering を ON/OFF する際
-; に PPU 内部 latch 状態が壊れるため)。書き終わったら PPU_CURSOR を書いたバイト
-; 数だけ進める。PPUMASK=0 (強制 blanking) 中にのみ呼ぶこと。
+; Phase 3 以降:
+;   sprite_mode_on = 0: forced_blanking 中の直接書き込み (従来動作)
+;   sprite_mode_on = 1: NMI キューに積む → 次 VBlank で反映
+;
+; どちらのパスも ppu_write_bytes ヘルパに集約。エントリ時の入力:
+;   TMP0  = PPU 書き込みアドレス (TMP0 = lo, TMP0+1 = hi)
+;   TMP1  = 6502 側ソースポインタ
+;   TMP2  = バイト長
+; を揃えて JSR する。
 ; -----------------------------------------------------------------------------
 handle_zend_echo:
     JSR resolve_op1
-
-    ; PPUADDR = PPU_CURSOR
-    BIT PPUSTATUS
-    LDA PPU_CURSOR+1
-    STA PPUADDR
-    LDA PPU_CURSOR
-    STA PPUADDR
 
     LDA OP1_VAL            ; type
     CMP #TYPE_STRING
@@ -707,62 +724,91 @@ handle_zend_echo:
     JMP handle_unimpl
 
 echo_string:
-    ; OP1_VAL+1/+2 = ops.bin 内の zend_string へのオフセット
+    ; OP1_VAL+1/+2 = ops.bin 内 zend_string へのオフセット
+    ; TMP1 を zend_string 絶対アドレスにセット
     CLC
     LDA OP1_VAL+1
     ADC #<OPS_BASE
-    STA TMP0
+    STA TMP1
     LDA OP1_VAL+2
     ADC #>OPS_BASE
-    STA TMP0+1
-    ; len @ zend_string + 16 (下位 1B)
+    STA TMP1+1
+    ; len @ zend_string + 16 (下位 1B) → TMP2
     LDY #16
-    LDA (TMP0), Y
-    STA TMP1
-    ; val @ zend_string + 24
+    LDA (TMP1), Y
+    STA TMP2
+    ; TMP1 += 24 で val[] 先頭へ進める
     CLC
-    LDA TMP0
+    LDA TMP1
     ADC #24
-    STA TMP0
-    LDA TMP0+1
+    STA TMP1
+    LDA TMP1+1
     ADC #0
+    STA TMP1+1
+    JMP echo_write
+
+echo_long:
+    ; OP1_VAL+1/+2 = 16bit signed int を print_int16 でバッファに展開
+    LDA OP1_VAL+1
+    STA TMP0
+    LDA OP1_VAL+2
     STA TMP0+1
-    ; TMP1 バイトを PPUDATA に書く
-    LDY #0
-echo_str_loop:
-    CPY TMP1
-    BEQ echo_str_done
-    LDA (TMP0), Y
-    STA PPUDATA
-    INY
-    BNE echo_str_loop
-echo_str_done:
-    ; PPU_CURSOR += TMP1
+    JSR print_int16
+    ; TMP1 = INT_PRINT_BUFFER, TMP2 = pi_count
+    LDA #<INT_PRINT_BUFFER
+    STA TMP1
+    LDA #>INT_PRINT_BUFFER
+    STA TMP1+1
+    LDA pi_count
+    STA TMP2
+    ; fall through
+
+echo_write:
+    ; TMP0 を PPU_CURSOR (書き込み先アドレス) にセット
+    LDA PPU_CURSOR
+    STA TMP0
+    LDA PPU_CURSOR+1
+    STA TMP0+1
+    JSR ppu_write_bytes
+    ; PPU_CURSOR += TMP2
     CLC
     LDA PPU_CURSOR
-    ADC TMP1
+    ADC TMP2
     STA PPU_CURSOR
     LDA PPU_CURSOR+1
     ADC #0
     STA PPU_CURSOR+1
     JMP advance
 
-echo_long:
-    ; OP1_VAL+1/+2 = 16bit signed int
-    LDA OP1_VAL+1
-    STA TMP0
-    LDA OP1_VAL+2
-    STA TMP0+1
-    JSR print_int16
-    ; pi_count = 書いたバイト数
-    CLC
-    LDA PPU_CURSOR
-    ADC pi_count
-    STA PPU_CURSOR
-    LDA PPU_CURSOR+1
-    ADC #0
-    STA PPU_CURSOR+1
-    JMP advance
+; -----------------------------------------------------------------------------
+; ppu_write_bytes: TMP0 (addr) / TMP1 (src ptr) / TMP2 (len) を PPU に書く
+;
+; sprite_mode_on = 0: PPUADDR/PPUDATA 直書き (forced_blanking 想定)
+; sprite_mode_on = 1: enqueue_ppu_nt で NMI キューに積む
+;
+; 使用レジスタ: A / X / Y 破壊 (RTS で戻る)
+; TMP0-2 の内容は保持する (enqueue 経由時は enqueue_ppu_nt が TMP0 を保持)
+; -----------------------------------------------------------------------------
+ppu_write_bytes:
+    LDA sprite_mode_on
+    BEQ pwb_direct
+    JMP enqueue_ppu_nt     ; tail call (RTS で上位に戻る)
+pwb_direct:
+    BIT PPUSTATUS
+    LDA TMP0+1
+    STA PPUADDR
+    LDA TMP0
+    STA PPUADDR
+    LDY #0
+pwb_loop:
+    CPY TMP2
+    BEQ pwb_done
+    LDA (TMP1), Y
+    STA PPUDATA
+    INY
+    BNE pwb_loop
+pwb_done:
+    RTS
 
 ; -----------------------------------------------------------------------------
 ; ZEND_RETURN: PPUMASK 有効化 → halt
@@ -1182,20 +1228,24 @@ version_halt:
     JMP version_halt
 
 ; =============================================================================
-; print_int16: TMP0 (16bit signed) を decimal ASCII に変換して PPUDATA に書く
+; print_int16: TMP0 (16bit signed) を decimal ASCII に変換して
+;              INT_PRINT_BUFFER ($0600-) に書き出す
 ;
-; 書いたバイト数を pi_count に返す (echo_long から PPU_CURSOR 更新に使用)
-; 注意: この関数は PPUMASK=0 (強制 blanking) 中にのみ呼んでよい
+; 出力バイト数を pi_count に返す (呼び出し元が PPU 直書き or NMI キューに
+; 流し込む)。最長 6 バイト ("-32768")。Phase 3 以前はここで直接 PPUDATA を
+; 叩いていたが、sprite_mode でも使えるようにバッファ出力に切り替えた。
 ; =============================================================================
 print_int16:
     LDA #0
     STA pi_count
+    LDX #0                 ; X = INT_PRINT_BUFFER 内のオフセット
     ; 符号判定
     LDA TMP0+1
     BPL pi_positive
-    ; 負: '-' を出して絶対値化
+    ; 負: '-' を先頭に出して絶対値化
     LDA #'-'
-    STA PPUDATA
+    STA INT_PRINT_BUFFER, X
+    INX
     INC pi_count
     SEC
     LDA #0
@@ -1221,12 +1271,13 @@ pi_div_loop:
     ADC pi_count
     STA pi_count
 
-    ; スタックを逆順に pop して '0'+digit を PPUDATA へ
+    ; スタックを逆順に pop して '0'+digit を INT_PRINT_BUFFER へ
 pi_pop_loop:
     PLA
     CLC
     ADC #'0'
-    STA PPUDATA
+    STA INT_PRINT_BUFFER, X
+    INX
     DEY
     BNE pi_pop_loop
     RTS
@@ -1410,14 +1461,13 @@ handle_nesphp_nes_put:
     JSR resolve_op1        ; OP1_VAL = x
     JSR resolve_op2        ; OP2_VAL = y
 
-    ; extended_value (offset 12) = 文字 literal のバイトオフセット
+    ; extended_value (offset 12) → zval アドレスを TMP0 に
     LDY #12
     LDA (VM_PC), Y
     STA TMP0
     INY
     LDA (VM_PC), Y
     STA TMP0+1
-    ; TMP0 += VM_LITBASE
     CLC
     LDA VM_LITBASE
     ADC TMP0
@@ -1425,7 +1475,6 @@ handle_nesphp_nes_put:
     LDA VM_LITBASE+1
     ADC TMP0+1
     STA TMP0+1
-    ; TMP0 = zval (16B) アドレス
     LDY #8                 ; u1.type_info
     LDA (TMP0), Y
     CMP #TYPE_STRING
@@ -1435,14 +1484,13 @@ handle_nesphp_nes_put:
     JMP handle_unimpl
 
 np_from_string:
-    ; value.str (bytes 0-1) = zend_string への offset
+    ; value.str = zend_string への offset (TMP1 に展開)
     LDY #0
     LDA (TMP0), Y
     STA TMP1
     INY
     LDA (TMP0), Y
     STA TMP1+1
-    ; TMP1 + OPS_BASE = zend_string 絶対アドレス
     CLC
     LDA TMP1
     ADC #<OPS_BASE
@@ -1450,21 +1498,20 @@ np_from_string:
     LDA TMP1+1
     ADC #>OPS_BASE
     STA TMP1+1
-    ; val[0] @ offset 24
+    ; val[0] @ offset 24 を INT_PRINT_BUFFER[0] に保存
     LDY #24
     LDA (TMP1), Y
-    STA TMP2
+    STA INT_PRINT_BUFFER
     JMP np_addr
 
 np_from_long:
     ; value.lval 下位 1 バイト = 文字コード
     LDY #0
     LDA (TMP0), Y
-    STA TMP2
+    STA INT_PRINT_BUFFER
 
 np_addr:
-    ; nametable アドレス = $2000 + y*32 + x
-    ; y (OP2_VAL+1) を 16bit に拡張して 5 回左シフト
+    ; nametable アドレス = $2000 + y*32 + x → TMP0
     LDA OP2_VAL+1
     STA TMP0
     LDA #0
@@ -1479,8 +1526,6 @@ np_addr:
     ROL TMP0+1
     ASL TMP0
     ROL TMP0+1
-    ; TMP0 = y*32
-    ; + x
     CLC
     LDA OP1_VAL+1
     ADC TMP0
@@ -1488,7 +1533,6 @@ np_addr:
     LDA #0
     ADC TMP0+1
     STA TMP0+1
-    ; + $2000
     CLC
     LDA TMP0
     ADC #$00
@@ -1497,17 +1541,14 @@ np_addr:
     ADC #$20
     STA TMP0+1
 
-    ; PPUADDR に TMP0 をセット
-    BIT PPUSTATUS
-    LDA TMP0+1
-    STA PPUADDR
-    LDA TMP0
-    STA PPUADDR
-
-    ; 文字を書く
-    LDA TMP2
-    STA PPUDATA
-
+    ; TMP1 = INT_PRINT_BUFFER, TMP2 = 1 で ppu_write_bytes に委譲
+    LDA #<INT_PRINT_BUFFER
+    STA TMP1
+    LDA #>INT_PRINT_BUFFER
+    STA TMP1+1
+    LDA #1
+    STA TMP2
+    JSR ppu_write_bytes
     JMP advance
 
 ; =============================================================================
@@ -1601,23 +1642,9 @@ handle_nesphp_nes_puts:
     ADC #$20
     STA TMP0+1
 
-    ; PPUADDR = TMP0
-    BIT PPUSTATUS
-    LDA TMP0+1
-    STA PPUADDR
-    LDA TMP0
-    STA PPUADDR
-
-    ; 文字列バイト列 (TMP1) を TMP2 バイトぶん PPUDATA に書き出す
-    LDY #0
-nps_loop:
-    CPY TMP2
-    BEQ nps_done
-    LDA (TMP1), Y
-    STA PPUDATA
-    INY
-    BNE nps_loop
-nps_done:
+    ; TMP0=addr, TMP1=src ptr, TMP2=len で ppu_write_bytes に委譲
+    ; (forced_blanking は直書き、sprite_mode は NMI キューに積む)
+    JSR ppu_write_bytes
     JMP advance
 
 nps_type_err:
@@ -1627,10 +1654,25 @@ nps_type_err:
 ; NESPHP_NES_CLS: nametable 0 ($2000-$23FF) を空白 ($20) で埋める
 ;
 ; 引数なし。PPU_CURSOR を NAMETABLE_START に戻す。
-; 前提: nes_put と同様、PPUMASK = 0 (強制 blanking) 中に呼ぶこと。
-; sprite_mode 中は呼び出し不可 (rendering on だと転送中に画面が壊れる)。
+;
+; sprite_mode_on == 0 (forced_blanking):
+;   PPUMASK は既に 0 なのでそのまま PPUADDR / PPUDATA で 1024 バイト直書き
+;
+; sprite_mode_on == 1 (Phase 3.1: brief force-blanking):
+;   1 回だけ rendering を OFF にして clear、次 VBlank で rendering を再 ON。
+;   1024 バイト (~5000 cycle) は 1 VBlank (~2273 cycle) 予算を超えるため、
+;   NMI 同期キューではなく「一時的に画面を消して強制 blanking 化」する方式。
+;   可視効果は 1-2 フレームの黒フラッシュ (スライド遷移の自然なトランジション)。
+;
+;   clear 中に NMI が発火して flush_nmi_queue が PPUADDR を上書きすると困る
+;   ので、PPUCTRL bit 7 を一時クリアして NMI を無効化。終わったら元に戻す。
+;   無効化期間中に OAM DMA が止まるので、復帰直前に手動で 1 回補う。
 ; =============================================================================
 handle_nesphp_nes_cls:
+    LDA sprite_mode_on
+    BNE cls_sprite_mode    ; sprite_mode → brief force-blanking パス
+
+; --- forced_blanking パス (従来どおり) ---
     BIT PPUSTATUS
     LDA #$20
     STA PPUADDR
@@ -1648,6 +1690,70 @@ cls_inner:
     BNE cls_outer
 
     ; PPU_CURSOR を既定位置に戻す
+    LDA #<NAMETABLE_START
+    STA PPU_CURSOR
+    LDA #>NAMETABLE_START
+    STA PPU_CURSOR+1
+    JMP advance
+
+; --- sprite_mode パス: brief force-blanking (Phase 3.1) ---
+cls_sprite_mode:
+    ; 1. ppu_ctrl_shadow を 6502 スタックに退避 (後で bit 7 を復元するため)
+    LDA ppu_ctrl_shadow
+    PHA
+
+    ; 2. NMI 無効化: bit 7 クリアして PPUCTRL と shadow を更新
+    AND #$7F
+    STA ppu_ctrl_shadow
+    STA PPUCTRL
+
+    ; 3. rendering 無効化 (PPU を強制 blanking 状態に)
+    LDA #0
+    STA PPUMASK
+
+    ; 4. 1024 バイトの clear ループ (forced_blanking パスと同じ)
+    BIT PPUSTATUS
+    LDA #$20
+    STA PPUADDR
+    LDA #$00
+    STA PPUADDR
+    LDA #$20
+    LDX #4
+    LDY #0
+cls_sb_outer:
+cls_sb_inner:
+    STA PPUDATA
+    INY
+    BNE cls_sb_inner
+    DEX
+    BNE cls_sb_outer
+
+    ; 5. 次 VBlank 開始を待つ (NMI 無効化済みなので VBlank flag が勝手に
+    ;    クリアされない)
+    BIT PPUSTATUS          ; まず latch & flag を一度読んで捨てる
+cls_wait_vb:
+    BIT PPUSTATUS
+    BPL cls_wait_vb        ; bit 7 が立つまでループ
+
+    ; 6. OAM DMA を手動実行 (NMI 無効化中の OAM 更新を補う)
+    LDA #>OAM_SHADOW
+    STA OAM_DMA
+
+    ; 7. scroll をリセット
+    LDA #0
+    STA PPUSCROLL
+    STA PPUSCROLL
+
+    ; 8. rendering 再有効化 (BG + sprite)
+    LDA #%00011110
+    STA PPUMASK
+
+    ; 9. ppu_ctrl_shadow を復元、PPUCTRL に書き戻す (bit 7 復帰で NMI 再有効)
+    PLA
+    STA ppu_ctrl_shadow
+    STA PPUCTRL
+
+    ; 10. PPU_CURSOR を既定位置に戻す
     LDA #<NAMETABLE_START
     STA PPU_CURSOR
     LDA #>NAMETABLE_START
@@ -1845,7 +1951,13 @@ enable_sprite_mode:
     RTS
 
 ; =============================================================================
-; NMI ハンドラ: OAM DMA + スクロールリセット
+; NMI ハンドラ: OAM DMA + NMI キュー flush + スクロールリセット
+;
+; Phase 3 で `flush_nmi_queue` が追加され、sprite_mode 中の nametable 書き込み
+; がここで実行されるようになった。メインループは「キューに積む → 何もしない」
+; で済み、実際の PPU 書き込みは次の VBlank まで遅延される。
+;
+; TMP0-TMP2 は flush_nmi_queue が使うので save/restore する。
 ; =============================================================================
 nmi:
     PHA
@@ -1853,10 +1965,23 @@ nmi:
     PHA
     TYA
     PHA
+    LDA TMP0
+    PHA
+    LDA TMP0+1
+    PHA
+    LDA TMP1
+    PHA
+    LDA TMP1+1
+    PHA
+    LDA TMP2
+    PHA
 
     ; OAM DMA: $0200-$02FF → PPU OAM
     LDA #>OAM_SHADOW
     STA OAM_DMA
+
+    ; sprite_mode 中に積まれた nametable 書き込みを VBlank 中に反映
+    JSR flush_nmi_queue
 
     ; scroll をリセット (PPUADDR 書き込みで v レジスタが汚染される可能性への対策)
     BIT PPUSTATUS
@@ -1865,11 +1990,135 @@ nmi:
     STA PPUSCROLL
 
     PLA
+    STA TMP2
+    PLA
+    STA TMP1+1
+    PLA
+    STA TMP1
+    PLA
+    STA TMP0+1
+    PLA
+    STA TMP0
+    PLA
     TAY
     PLA
     TAX
     PLA
     RTI
+
+; =============================================================================
+; flush_nmi_queue: NMI_QUEUE に積まれた nametable 書き込みを PPU に流し込む
+;
+; キューフォーマット (byte stream):
+;   [addr_hi] [addr_lo] [len] [data_0 ... data_{len-1}]  ← 1 エントリ
+;   ... 次のエントリ ...
+;
+; read/write は uint8 でモノトニックに増加 (256 の自然 wrap)。read == write で
+; 空。read は NMI が、write は main CPU が排他的に更新し、リセットは行わない。
+; NMI_QUEUE_ADDR = $0300 のページ境界整列で X レジスタの wrap と一致するので、
+; エントリがバッファ終端をまたいでも透過的に参照できる。
+;
+; この関数は NMI ハンドラ内から呼ばれる前提。flush 中は main は suspended で
+; あり race はない。VBlank 予算 (~2273 cycles) を超えないよう、1 エントリは
+; 最大 3 + 253 = 256 バイトまで (= キュー全体)。
+; =============================================================================
+flush_nmi_queue:
+    LDX nmi_queue_read
+    CPX nmi_queue_write
+    BEQ fnq_done                 ; 空
+fnq_loop:
+    BIT PPUSTATUS
+    LDA NMI_QUEUE_ADDR, X        ; addr_hi
+    STA PPUADDR
+    INX
+    LDA NMI_QUEUE_ADDR, X        ; addr_lo
+    STA PPUADDR
+    INX
+    LDA NMI_QUEUE_ADDR, X        ; len
+    STA TMP0
+    INX
+    LDY #0
+fnq_inner:
+    CPY TMP0
+    BEQ fnq_entry_done
+    LDA NMI_QUEUE_ADDR, X
+    STA PPUDATA
+    INX
+    INY
+    BNE fnq_inner
+fnq_entry_done:
+    CPX nmi_queue_write
+    BNE fnq_loop                 ; まだエントリがある (== なら空)
+fnq_done:
+    STX nmi_queue_read           ; read を write に追いつかせる
+    RTS
+
+; =============================================================================
+; enqueue_ppu_nt: NMI キューに nametable 書き込みエントリを追加する
+;
+; 入力:
+;   TMP0 / TMP0+1 = PPU アドレス (TMP0 = lo, TMP0+1 = hi)
+;   TMP1 / TMP1+1 = 6502 側ソースデータへのポインタ
+;   TMP2          = データ長 (1-253)
+;
+; リングバッファ (256B、モノトニック head)。空き容量 = (read - write - 1) & 255。
+; 必要容量 (3 + TMP2) 未満なら NMI drain を busy-wait。
+;
+; 呼び出し側は sprite_mode_on = 1 であること (さもないと NMI が走らず busy wait
+; が無限ループになる)。
+;
+; ## race-free 設計
+;
+; - main CPU (producer) は write のみ、NMI (consumer) は read のみ更新
+; - 両方とも uint8 でモノトニック増加、256 で自然 wrap
+; - main の「空き容量チェック」時に NMI が read を増やしても、free が
+;   過小評価されるだけで書き込みは安全側 (不必要な wait は発生し得るが
+;   バッファ破壊はない)
+; - append 中に NMI が fire しても、NMI は commit 前の write を見るので
+;   新エントリには触れない。main は X を cache 済みなので wrap なしで継続
+; =============================================================================
+enqueue_ppu_nt:
+epn_check:
+    ; 空き容量 = (read - write - 1) mod 256
+    SEC
+    LDA nmi_queue_read
+    SBC nmi_queue_write
+    SEC
+    SBC #1
+    ; A = free
+    CMP TMP2
+    BCC epn_wait                 ; free < len → 待つ
+    SEC
+    SBC TMP2
+    CMP #3
+    BCC epn_wait                 ; free - len < 3 → ヘッダ入らない
+    ; fits: append
+    LDX nmi_queue_write
+    LDA TMP0+1                   ; addr_hi
+    STA NMI_QUEUE_ADDR, X
+    INX
+    LDA TMP0                     ; addr_lo
+    STA NMI_QUEUE_ADDR, X
+    INX
+    LDA TMP2                     ; len
+    STA NMI_QUEUE_ADDR, X
+    INX
+    LDY #0
+epn_copy:
+    CPY TMP2
+    BEQ epn_commit
+    LDA (TMP1), Y
+    STA NMI_QUEUE_ADDR, X
+    INX
+    INY
+    BNE epn_copy
+epn_commit:
+    STX nmi_queue_write          ; 原子的 commit (この 1 STA まで NMI は古い write を見る)
+    RTS
+
+epn_wait:
+    ; NMI が flush_nmi_queue で read を進めてくれるのを待つ
+    JMP epn_check
 
 irq:
     RTI
