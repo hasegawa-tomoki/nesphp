@@ -8,7 +8,7 @@
 - **マッパー: CNROM (mapper 3)**、PRG 32KB + CHR 32KB (4 × 8KB バンク)、詳細は [11-chr-banks](./11-chr-banks.md)
 - cc65: `brew install cc65`
 - 開発ホスト: macOS (NTS x64 PHP ビルド前提)
-- エミュレータ: Mesen (PPU/CPU 精度優先)
+- エミュレータ: fceux (`make run:NAME` で起動、`EMULATOR=` で変更可)
 
 ## 目次
 

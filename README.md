@@ -13,14 +13,16 @@
 ## クイックスタート
 
 ```bash
-# 依存: PHP 8.4, cc65 (brew install cc65), Mesen
+# 依存: PHP 8.4, cc65 (brew install cc65), fceux (brew install fceux)
 make                      # デフォルト: build/hello.nes
 make build/slides.nes     # 任意の examples/NAME.php → build/NAME.nes
+make run:hello            # ビルド + fceux で実行
+make run:slides           # 任意の example を指定して実行
 make verify               # hello.nes に対する L3 ロマン検証
 make clean
 ```
 
-ビルドした `.nes` を Mesen で開くと動きます。
+`make run:NAME` で **ビルドからエミュレータ起動まで 1 コマンド**で完結します。エミュレータを変えたい場合は `make run:hello EMULATOR=other_emu`。
 
 ### 3 層ビルドパイプライン
 

@@ -23,7 +23,9 @@ ifneq ($(PHP_VERSION),8.4)
 $(error PHP 8.4 required, found [$(PHP_VERSION)])
 endif
 
-.PHONY: all verify clean
+EMULATOR   := fceux
+
+.PHONY: all verify clean run
 .DELETE_ON_ERROR:
 # 中間ファイル (.ops.txt / .ops.bin / .o) を自動削除させない
 .SECONDARY:
@@ -71,6 +73,15 @@ verify: $(BUILD_DIR)/hello.nes
 	@printf "  strings:     "; strings $< | head -1
 	@printf "  ZEND_ECHO:   "; xxd -g 1 $< | grep -m1 '88 01 00 00' || echo "(not found)"
 	@printf "  ZEND_RETURN: "; xxd -g 1 $< | grep -m1 '3e 01 00 00' || echo "(not found)"
+
+# --- エミュレータで実行 ---
+# make run:hello       デフォルト (hello.nes)
+# make run:slides      任意の example を指定
+run\:hello: $(BUILD_DIR)/hello.nes
+	$(EMULATOR) $<
+
+run\:%: $(BUILD_DIR)/%.nes
+	$(EMULATOR) $<
 
 clean:
 	rm -rf $(BUILD_DIR)
