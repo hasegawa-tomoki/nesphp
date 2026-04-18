@@ -26,6 +26,10 @@ ZEND_IS_NOT_EQUAL     = 19
 ZEND_IS_SMALLER       = 20
 ZEND_ASSIGN           = 22
 ZEND_QM_ASSIGN        = 31
+ZEND_PRE_INC          = 34
+ZEND_PRE_DEC          = 35
+ZEND_POST_INC         = 36
+ZEND_POST_DEC         = 37
 ZEND_JMP              = 42
 ZEND_JMPZ             = 43
 ZEND_JMPNZ            = 44
@@ -428,6 +432,22 @@ main_loop:
     CMP #ZEND_QM_ASSIGN
     BNE :+
     JMP handle_zend_qm_assign
+:
+    CMP #ZEND_PRE_INC
+    BNE :+
+    JMP handle_zend_pre_inc
+:
+    CMP #ZEND_PRE_DEC
+    BNE :+
+    JMP handle_zend_pre_dec
+:
+    CMP #ZEND_POST_INC
+    BNE :+
+    JMP handle_zend_post_inc
+:
+    CMP #ZEND_POST_DEC
+    BNE :+
+    JMP handle_zend_post_dec
 :
     CMP #ZEND_JMP
     BNE :+
@@ -995,6 +1015,155 @@ handle_zend_qm_assign:
     STA RESULT_VAL+2
     LDA OP1_VAL+3
     STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+; -----------------------------------------------------------------------------
+; inc/dec ヘルパ: op1 の CV スロット絶対アドレスを TMP0 にセット
+; (op1_type != IS_CV なら handle_unimpl)
+; -----------------------------------------------------------------------------
+incdec_cv_addr:
+    LDY #21
+    LDA (VM_PC), Y         ; op1_type
+    CMP #IS_CV
+    BNE incdec_err
+    LDY #0
+    LDA (VM_PC), Y         ; op1.var lo (slot * 16)
+    LSR A
+    LSR A                  ; slot * 4
+    CLC
+    ADC VM_CVBASE
+    STA TMP0
+    LDA VM_CVBASE+1
+    ADC #0
+    STA TMP0+1
+    RTS
+incdec_err:
+    JMP handle_unimpl
+
+; -----------------------------------------------------------------------------
+; ZEND_PRE_INC: ++CV[op1]。result があれば更新後の値を書く
+; -----------------------------------------------------------------------------
+handle_zend_pre_inc:
+    JSR incdec_cv_addr
+    LDY #0
+    LDA (TMP0), Y          ; type
+    CMP #TYPE_LONG
+    BEQ :+
+    JMP incdec_err
+:
+    LDY #1
+    LDA (TMP0), Y          ; payload lo
+    CLC
+    ADC #1
+    STA (TMP0), Y
+    STA RESULT_VAL+1
+    LDY #2
+    LDA (TMP0), Y          ; payload hi
+    ADC #0
+    STA (TMP0), Y
+    STA RESULT_VAL+2
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+; -----------------------------------------------------------------------------
+; ZEND_PRE_DEC: --CV[op1]
+; -----------------------------------------------------------------------------
+handle_zend_pre_dec:
+    JSR incdec_cv_addr
+    LDY #0
+    LDA (TMP0), Y
+    CMP #TYPE_LONG
+    BEQ :+
+    JMP incdec_err
+:
+    LDY #1
+    LDA (TMP0), Y
+    SEC
+    SBC #1
+    STA (TMP0), Y
+    STA RESULT_VAL+1
+    LDY #2
+    LDA (TMP0), Y
+    SBC #0
+    STA (TMP0), Y
+    STA RESULT_VAL+2
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+; -----------------------------------------------------------------------------
+; ZEND_POST_INC: CV[op1]++。result には「更新前の値」を書く
+; -----------------------------------------------------------------------------
+handle_zend_post_inc:
+    JSR incdec_cv_addr
+    LDY #0
+    LDA (TMP0), Y
+    CMP #TYPE_LONG
+    BEQ :+
+    JMP incdec_err
+:
+    ; 更新前の値を RESULT_VAL にコピー
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDY #1
+    LDA (TMP0), Y
+    STA RESULT_VAL+1
+    LDY #2
+    LDA (TMP0), Y
+    STA RESULT_VAL+2
+    LDA #0
+    STA RESULT_VAL+3
+    ; CV slot を +1
+    LDY #1
+    LDA (TMP0), Y
+    CLC
+    ADC #1
+    STA (TMP0), Y
+    LDY #2
+    LDA (TMP0), Y
+    ADC #0
+    STA (TMP0), Y
+    JSR write_result
+    JMP advance
+
+; -----------------------------------------------------------------------------
+; ZEND_POST_DEC: CV[op1]--。result には更新前の値
+; -----------------------------------------------------------------------------
+handle_zend_post_dec:
+    JSR incdec_cv_addr
+    LDY #0
+    LDA (TMP0), Y
+    CMP #TYPE_LONG
+    BEQ :+
+    JMP incdec_err
+:
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDY #1
+    LDA (TMP0), Y
+    STA RESULT_VAL+1
+    LDY #2
+    LDA (TMP0), Y
+    STA RESULT_VAL+2
+    LDA #0
+    STA RESULT_VAL+3
+    LDY #1
+    LDA (TMP0), Y
+    SEC
+    SBC #1
+    STA (TMP0), Y
+    LDY #2
+    LDA (TMP0), Y
+    SBC #0
+    STA (TMP0), Y
     JSR write_result
     JMP advance
 
