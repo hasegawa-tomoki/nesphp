@@ -92,9 +92,31 @@ DMC_FREQ     = $4010
     STA addr
 .endmacro
 
-; --- ROM / op_array 配置 ---
-OPS_BASE     = $8000
-OPS_FIRST_OP = $8010
+; --- op_array 配置 ---
+; OPS_BASE は VM が実行時に読み出す op_array の先頭アドレス = PRG-RAM 先頭。
+; reset で compile_and_emit が PHP ソースをコンパイルしてここに emit する。
+OPS_BASE     = $6000
+OPS_FIRST_OP = $6010
+
+; PHP ソースのカートリッジ上の位置 (MMC1 PRG bank 0, $8000-$BFFF)。
+; pack_src.php が出した src.bin のレイアウト:
+;   $8000  u16 src_len
+;   $8002  u16 pool_off   zend_string プールまでの byte offset
+;   $8004  u16 pool_count
+;   $8006  u16 (reserved)
+;   $8008  ASCII src body
+;   ...    (pad to 4-align)
+;   $8000+pool_off  zend_string プール (Zend 互換 24B header + content + null の連結)
+;
+; zend_string は ROM-resident のまま使う。VM は value.str フィールドに書かれた
+; OPS_BASE 相対 16bit offset を ADC OPS_BASE で復元する (16bit wraparound により
+; $8XXX-$BFFF 帯のアドレスを正しく指せる)。
+PHP_SRC_LEN  = $8000
+PHP_POOL_OFF = $8002
+PHP_SRC_BODY = $8008
+
+; 一時的な literal バッファ (コンパイル中のみ使用、後に OPS_BASE + literals_off へ memcpy)
+CMP_LIT_STAGE    = $7000
 
 ; op_array ヘッダ (spec/01-rom-format.md)
 HDR_NUM_OPS        = OPS_BASE + 0
@@ -159,6 +181,19 @@ pi_count:       .res 1    ; print_int16 が書いたバイト数
 ; 専用 (1024B を 1 VBlank 予算 ~2273 cycle に収められないため)。
 sprite_mode_on: .res 1
 
+; --- On-NES コンパイラ状態 (compile_and_emit 実行中のみ valid) ---
+; コンパイル完了後は全て未使用。以降 reset が WRAM を既読のまま VM に引き渡す。
+CMP_SRC_PTR:     .res 2    ; ソース現在位置 (PHP_SRC_BODY..)
+CMP_SRC_END:     .res 2    ; ソース終端 (one-past-last)
+CMP_POOL_CURSOR: .res 2    ; 次に参照する ROM 内 zend_string の絶対 CPU アドレス
+CMP_OP_HEAD:     .res 2    ; 次に zend_op を書く PRG-RAM アドレス
+CMP_LIT_HEAD:    .res 2    ; 次に zval を書く PRG-RAM アドレス (CMP_LIT_STAGE から成長)
+CMP_OP_COUNT:    .res 2    ; emit 済み opcode 数
+CMP_LIT_COUNT:   .res 2    ; emit 済み literal 数
+CMP_TOK_KIND:    .res 1    ; 現在のトークン種別 (TK_*)
+CMP_TOK_PTR:     .res 2    ; トークン開始 ROM アドレス
+CMP_TOK_LEN:     .res 1    ; トークン長 (M-A は ASCII 文字列 ≤ 255B)
+
 ; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
 ;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT
 ppu_ctrl_shadow: .res 1
@@ -186,10 +221,16 @@ nmi_queue_read:  .res 1
     .byte 0, 0, 0, 0, 0, 0, 0
 
 ; =============================================================================
-; OPS セグメント: serializer が出した ops.bin
+; PHPSRC セグメント: pack_src.php が出した src.bin
+;   $8000-$8001  u16 ソース長
+;   $8002-$8003  pad (0)
+;   $8004-       ASCII 本体 (<?php タグ除去済み)
+;
+; 起動時に compile_and_emit がここを読んで PRG-RAM ($6000-$7FFF) に op_array を
+; emit する。VM 本体は PRG-RAM 側 (OPS_BASE = $6000) だけを見る。
 ; =============================================================================
-.segment "OPS"
-    .incbin "build/ops.bin"
+.segment "PHPSRC"
+    .incbin "build/src.bin"
 
 ; =============================================================================
 ; CODE セグメント: VM 本体
@@ -303,6 +344,12 @@ clear_nt_inner:
     BNE clear_nt_inner
     DEX
     BNE clear_nt_outer
+
+    ; PRG-RAM ($6000-$7FFF) に op_array を配置する。
+    ; Phase A (プラミング検証): ROM の ops.bin をそのまま PRG-RAM へ memcpy する
+    ;                          だけのスタブ。以降の HDR_* 読み出しは $6000 系を見る。
+    ; Phase B 以降: 本物のコンパイラ (PHP ソース → L3 opcode) に置き換える予定。
+    JSR compile_and_emit
 
     ; php_version を確認
     LDA HDR_PHP_MAJOR
@@ -2616,6 +2663,12 @@ palette_data:
     .byte $0F, $30, $10, $00
     .byte $0F, $30, $10, $00
     .byte $0F, $30, $10, $00
+
+; -----------------------------------------------------------------------------
+; On-NES コンパイラ本体 (compile_and_emit) は別ファイルに分離
+; ca65 invocation は -I vm なので "compiler.s" で解決される
+; -----------------------------------------------------------------------------
+.include "compiler.s"
 
 ; =============================================================================
 ; VECTORS

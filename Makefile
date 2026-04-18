@@ -12,7 +12,9 @@ CA65       := ca65
 LD65       := ld65
 
 SERIALIZER := serializer/serializer.php
+PACK_SRC   := tools/pack_src.php
 VM_SRC     := vm/nesphp.s
+VM_SRCS    := vm/nesphp.s vm/compiler.s
 VM_CFG     := vm/nesphp.cfg
 CHR_FONT   := chr/font.chr
 BUILD_DIR  := build
@@ -35,34 +37,37 @@ all: $(BUILD_DIR)/hello.nes
 $(BUILD_DIR):
 	@mkdir -p $@
 
-# --- (1) opcache dump: examples/NAME.php → build/NAME.ops.txt ---
-# file_update_protection=0: 直前に touch されたファイルでも opcache にキャッシュ
-# させる (デフォルト 2 秒のプロテクションだと optimizer が走らず dump が出ない)
-# `|| true`: nes_put など未定義関数を呼ぶと runtime error で非 0 終了するが、
-# opcache dump は error 出力より先に stderr に書かれているので継続させる
+# --- (1) pack: examples/NAME.php → build/NAME.src.bin ---
+# PHP ソースに <?php タグ除去 + ASCII チェック + 文字列リテラルを zend_string
+# プールに pre-build する。on-NES コンパイラは src.bin の本体を lex/parse する。
+$(BUILD_DIR)/%.src.bin: examples/%.php $(PACK_SRC) | $(BUILD_DIR)
+	@echo "[make] (1) pack      $< → $@"
+	@$(PHP) $(PACK_SRC) $< $@
+
+# --- オラクル用 (host-compile path): NAME.host.ops.bin ---
+# 正解データ生成 + 検証に使う。本線ビルド (NAME.nes) には含まれない。
 $(BUILD_DIR)/%.ops.txt: examples/%.php | $(BUILD_DIR)
-	@echo "[make] (1) extract   $< → $@"
+	@echo "[make] oracle extract $< → $@"
 	@$(PHP) -d opcache.enable_cli=1 \
 	        -d opcache.file_update_protection=0 \
 	        -d opcache.opt_debug_level=0x10000 \
 	        $< 2> $@ > /dev/null || true
 
-# --- (2) シリアライズ: ops.txt → ops.bin ---
-$(BUILD_DIR)/%.ops.bin: $(BUILD_DIR)/%.ops.txt $(SERIALIZER)
-	@echo "[make] (2) serialize $< → $@"
+$(BUILD_DIR)/%.host.ops.bin: $(BUILD_DIR)/%.ops.txt $(SERIALIZER)
+	@echo "[make] oracle serialize $< → $@"
 	@$(PHP) $(SERIALIZER) $< $@
 
-# --- (3) ca65 アセンブル ---
-# vm/nesphp.s の `.incbin "build/ops.bin"` は固定パスを見るので、対象の
-# .ops.bin を build/ops.bin にコピーしてからアセンブルする
-$(BUILD_DIR)/%.o: $(VM_SRC) $(BUILD_DIR)/%.ops.bin $(CHR_FONT) | $(BUILD_DIR)
-	@cp $(BUILD_DIR)/$*.ops.bin $(BUILD_DIR)/ops.bin
-	@echo "[make] (3) assemble  $(VM_SRC) → $@"
-	@$(CA65) $(VM_SRC) -o $@
+# --- (2) ca65 アセンブル ---
+# vm/nesphp.s は build/src.bin を固定パスで .incbin するので、対象の
+# NAME.src.bin を build/src.bin にコピーしてからアセンブルする。
+$(BUILD_DIR)/%.o: $(VM_SRCS) $(BUILD_DIR)/%.src.bin $(CHR_FONT) | $(BUILD_DIR)
+	@cp $(BUILD_DIR)/$*.src.bin $(BUILD_DIR)/src.bin
+	@echo "[make] (2) assemble  $(VM_SRC) → $@"
+	@$(CA65) -I vm $(VM_SRC) -o $@
 
-# --- (4) ld65 リンク ---
+# --- (3) ld65 リンク ---
 $(BUILD_DIR)/%.nes: $(BUILD_DIR)/%.o $(VM_CFG)
-	@echo "[make] (4) link      $< → $@"
+	@echo "[make] (3) link      $< → $@"
 	@$(LD65) -C $(VM_CFG) $< -o $@
 	@echo "[make] OK: $@"
 
