@@ -53,8 +53,8 @@ const NESPHP_NES_PUT          = 0xF1;  // nes_put($x, $y, $char) intrinsic
 const NESPHP_NES_SPRITE       = 0xF2;  // nes_sprite($x, $y, $tile) intrinsic (sprite 0)
 const NESPHP_NES_PUTS         = 0xF3;  // nes_puts($x, $y, "literal") intrinsic
 const NESPHP_NES_CLS          = 0xF4;  // nes_cls() intrinsic
-const NESPHP_NES_CHR_BANK     = 0xF5;  // nes_chr_bank(N) CNROM CHR bank 切替
-const NESPHP_NES_CHR_BG       = 0xF6;  // nes_chr_bg(N) PPUCTRL bit4 切替
+const NESPHP_NES_CHR_SPR      = 0xF5;  // nes_chr_spr(N) MMC1 CHR bank 1 ($1000, sprite 用)
+const NESPHP_NES_CHR_BG       = 0xF6;  // nes_chr_bg(N) MMC1 CHR bank 0 ($0000, BG 用)
 
 // === Zend operand type (zend_compile.h) ===
 const IS_UNUSED        = 0;
@@ -311,15 +311,15 @@ function parse_opcache_dump(string $text): array
                 $pendingArgs = [];
                 continue;
             }
-            if ($pendingBuiltin === 'nes_chr_bank' || $pendingBuiltin === 'nes_chr_bg') {
+            if ($pendingBuiltin === 'nes_chr_bg' || $pendingBuiltin === 'nes_chr_spr') {
                 if (count($pendingArgs) !== 1) {
                     fail("$pendingBuiltin requires 1 argument at line $index (got " . count($pendingArgs) . ")");
                 }
                 if ($pendingArgs[0]['type'] !== IS_CONST) {
                     fail("$pendingBuiltin: argument must be a compile-time integer literal at line $index");
                 }
-                $customOpcode = $pendingBuiltin === 'nes_chr_bank' ? NESPHP_NES_CHR_BANK : NESPHP_NES_CHR_BG;
-                $customName   = $pendingBuiltin === 'nes_chr_bank' ? 'NESPHP_NES_CHR_BANK' : 'NESPHP_NES_CHR_BG';
+                $customOpcode = $pendingBuiltin === 'nes_chr_spr' ? NESPHP_NES_CHR_SPR : NESPHP_NES_CHR_BG;
+                $customName   = $pendingBuiltin === 'nes_chr_spr' ? 'NESPHP_NES_CHR_SPR' : 'NESPHP_NES_CHR_BG';
                 $ops[$index] = [
                     'opcode'         => $customOpcode,
                     'mnemonic'       => $customName,

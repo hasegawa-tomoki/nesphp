@@ -132,7 +132,7 @@ offset  size  field              備考
 ```
 Offset     Bytes                                             ASCII
 ---------  ------------------------------------------------  ----------------
-00000000   4e 45 53 1a 02 04 30 00 00 00 00 00 00 00 00 00   NES...0.........   iNES ヘッダ (CNROM / mapper 3)
+00000000   4e 45 53 1a 02 04 10 00 01 00 00 00 00 00 00 00   NES.............   iNES ヘッダ (MMC1 / mapper 1)
 00000010   [ VM 6502 asm ~16KB ... ]                                             PRG bank 0
 ...
                                                              ↓ nesphp-bc セクション
@@ -171,8 +171,8 @@ Offset     Bytes                                             ASCII
                   Bank 1-3: 初期は Bank 0 のコピー (カスタム差し替え前提)
 ```
 
-ヘッダの `02 04 30 00` は CNROM (マッパー 3): PRG = 2 × 16KB、CHR = 4 × 8KB、
-Flags 6 上位 nibble = 3 → mapper 3。詳細は [11-chr-banks](./11-chr-banks.md)。
+ヘッダの `02 04 10 00 01` は MMC1 (マッパー 1, SNROM): PRG = 2 × 16KB、CHR = 4 × 8KB (4KB × 8 bank)、PRG-RAM = 8KB。
+Flags 6 上位 nibble = 1 → mapper 1。詳細は [11-chr-banks](./11-chr-banks.md)。
 
 ### 見どころ
 

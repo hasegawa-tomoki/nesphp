@@ -38,8 +38,8 @@ NESPHP_NES_PUT      = $F1
 NESPHP_NES_SPRITE   = $F2
 NESPHP_NES_PUTS     = $F3
 NESPHP_NES_CLS      = $F4
-NESPHP_NES_CHR_BANK = $F5
-NESPHP_NES_CHR_BG   = $F6
+NESPHP_NES_CHR_SPR  = $F5   ; MMC1 CHR bank 1 ($1000, sprite 用 4KB bank)
+NESPHP_NES_CHR_BG   = $F6   ; MMC1 CHR bank 0 ($0000, BG 用 4KB bank)
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -68,6 +68,22 @@ PPUSCROLL    = $2005
 PPUADDR      = $2006
 PPUDATA      = $2007
 DMC_FREQ     = $4010
+
+; --- MMC1 シリアル書き込みマクロ ---
+; MMC1 のレジスタは 5bit シリアルで書く: bit 0 から順に STA × 5 回。
+; 5 回目の STA アドレスでレジスタが決まる ($8000=Control, $A000=CHR0,
+; $C000=CHR1, $E000=PRG)。全 5 回を同じアドレスに書けば OK。
+.macro MMC1_WRITE addr
+    STA addr
+    LSR A
+    STA addr
+    LSR A
+    STA addr
+    LSR A
+    STA addr
+    LSR A
+    STA addr
+.endmacro
 
 ; --- ROM / op_array 配置 ---
 OPS_BASE     = $8000
@@ -142,15 +158,19 @@ nmi_queue_write: .res 1
 nmi_queue_read:  .res 1
 
 ; =============================================================================
-; iNES ヘッダ  (CNROM / mapper 3)
+; iNES ヘッダ  (MMC1 / mapper 1, SNROM 構成)
+;
+; PRG-ROM 32KB (2 × 16KB), CHR-ROM 32KB (8 × 4KB), PRG-RAM 8KB (WRAM $6000)
+; MMC1 により: PRG 16KB 切替 + CHR 4KB × 2 独立切替 + 8KB WRAM
 ; =============================================================================
 .segment "HEADER"
     .byte "NES", $1A
     .byte 2                ; PRG-ROM = 2 * 16KB = 32KB
-    .byte 4                ; CHR-ROM = 4 * 8KB = 32KB (CNROM 4 バンク)
-    .byte %00110000        ; Flags 6: mapper LSB = 3 (上位 nibble), mirroring = horizontal(0)
+    .byte 4                ; CHR-ROM = 4 * 8KB = 32KB (MMC1 4KB mode で 8 bank)
+    .byte %00010000        ; Flags 6: mapper LSB = 1 (上位 nibble), mirroring = horizontal(0)
     .byte %00000000        ; Flags 7: mapper MSB = 0
-    .byte 0, 0, 0, 0, 0, 0, 0, 0
+    .byte 1                ; PRG-RAM = 1 * 8KB (WRAM $6000-$7FFF)
+    .byte 0, 0, 0, 0, 0, 0, 0
 
 ; =============================================================================
 ; OPS セグメント: serializer が出した ops.bin
@@ -172,13 +192,37 @@ reset:
     LDX #$FF
     TXS
     INX                    ; X = 0
-    STX PPUCTRL
-    STX ppu_ctrl_shadow    ; shadow もクリア
+    ; PPUCTRL 初期値: bit 3 = 1 (sprite は $1000 = CHR bank 1 レジスタから取る)
+    ; BG は $0000 (bit 4 = 0 = CHR bank 0 レジスタから取る)
+    ; これで nes_chr_bg / nes_chr_spr が独立して動く
+    LDA #%00001000
+    STA PPUCTRL
+    STA ppu_ctrl_shadow
     STX PPUMASK            ; 強制 blanking
     STX DMC_FREQ
 
-    ; CNROM CHR bank = 0 を明示。LUT に index 自身が入っているので bus-conflict 無し
-    STX cnrom_bank_lut     ; X = 0: bank 0
+    ; --- MMC1 初期化 ---
+    ; まずシフトレジスタをリセット (bit 7 セットで書くと即リセット)
+    LDA #$80
+    STA $8000
+
+    ; Control ($8000): CHR 4KB mode (bit4=1), PRG fix-last mode (bit3-2=11),
+    ;                  horizontal mirroring (bit1-0=10)
+    ;   %11110 = $1E
+    LDA #$1E
+    MMC1_WRITE $8000
+
+    ; CHR bank 0 ($A000): $0000-$0FFF に 4KB bank 0 (通常フォント)
+    LDA #0
+    MMC1_WRITE $A000
+
+    ; CHR bank 1 ($C000): $1000-$1FFF に 4KB bank 1 (インバースフォント)
+    LDA #1
+    MMC1_WRITE $C000
+
+    ; PRG bank ($E000): $8000-$BFFF に PRG bank 0 (ops.bin), WRAM 有効 (bit4=0)
+    LDA #0
+    MMC1_WRITE $E000
 
     ; 1 回目の VBL 待ち
     BIT PPUSTATUS
@@ -332,9 +376,9 @@ main_loop:
     BNE :+
     JMP handle_nesphp_nes_cls
 :
-    CMP #NESPHP_NES_CHR_BANK
+    CMP #NESPHP_NES_CHR_SPR
     BNE :+
-    JMP handle_nesphp_nes_chr_bank
+    JMP handle_nesphp_nes_chr_spr
 :
     CMP #NESPHP_NES_CHR_BG
     BNE :+
@@ -1761,49 +1805,39 @@ cls_wait_vb:
     JMP advance
 
 ; =============================================================================
-; NESPHP_NES_CHR_BANK: CNROM (mapper 3) の CHR バンクを切り替える
+; NESPHP_NES_CHR_SPR (0xF5): sprite 用 4KB CHR bank を切り替える
 ;
-; 引数: op1 = 切り替え先バンク番号 (int literal 0-3, IS_CONST)
+; 引数: op1 = 4KB bank 番号 (int literal 0-7, IS_CONST)
 ;
-; CNROM はマッパ内の bank register に値を書くために、$8000-$FFFF 空間へ
-; 任意アドレスで STA する。本来の CNROM にはバス衝突 (bus conflict) があり、
-; 「書き込みデータが読み出しデータと一致していないと壊れる」挙動をする
-; ハードがあるので、ROM 内の `cnrom_bank_lut` テーブル (中身が各 index 自身)
-; を介して書き込む。
+; MMC1 CHR bank 1 register ($C000) に書く → PPU $1000-$1FFF にマッピング。
+; PPUCTRL bit 3 = 1 (reset で設定済み) なので sprite はここを参照する。
+; BG 側 (CHR bank 0, $0000) には影響しない。
 ; =============================================================================
-handle_nesphp_nes_chr_bank:
+handle_nesphp_nes_chr_spr:
     JSR resolve_op1
     LDA OP1_VAL
     CMP #TYPE_LONG
-    BNE chr_bank_err
-    LDA OP1_VAL+1          ; bank 番号 (下位 8bit)
-    AND #$03               ; 0-3 にクランプ (CNROM は 4 banks)
-    TAX
-    ; cnrom_bank_lut[X] は X 自身が入っているので STA 時の read = write で
-    ; bus conflict を回避できる
-    STA cnrom_bank_lut, X
+    BNE chr_spr_err
+    LDA OP1_VAL+1
+    AND #$07               ; 0-7 にクランプ (32KB / 4KB = 8 banks)
+    MMC1_WRITE $C000
     JMP advance
 
-chr_bank_err:
+chr_spr_err:
     JMP handle_unimpl
 
-; -----------------------------------------------------------------------------
-; CNROM bank 切り替え用の LUT (bus-conflict-safe)
-;   アドレスは $8000-$FFFF 空間にある ROM、各セルの値 = index 自身
-;   → LDA / STA の read-write サイクルで同じ値が見え、バス衝突が起きない
-; -----------------------------------------------------------------------------
-cnrom_bank_lut:
-    .byte $00, $01, $02, $03
-
 ; =============================================================================
-; NESPHP_NES_CHR_BG: PPUCTRL bit 4 を書き換えて BG 側 pattern table を切り替え
+; NESPHP_NES_CHR_BG (0xF6): BG 用 4KB CHR bank を切り替える
 ;
-; 引数: op1 = 0 or 1 (int literal, IS_CONST)
-;   0 → BG は pattern table 0 ($0000-$0FFF, 通常フォント)
-;   1 → BG は pattern table 1 ($1000-$1FFF, インバース / 装飾フォント)
+; 引数: op1 = 4KB bank 番号 (int literal 0-7, IS_CONST)
 ;
-; ppu_ctrl_shadow を更新してから PPUCTRL に書き戻す。NMI enable など他ビットは
-; 保存される。rendering 中でも PPUCTRL 書き換えは安全 (scroll を汚さない)。
+; MMC1 CHR bank 0 register ($A000) に書く → PPU $0000-$0FFF にマッピング。
+; PPUCTRL bit 4 = 0 (reset で設定済み) なので BG はここを参照する。
+; sprite 側 (CHR bank 1, $1000) には影響しない。
+;
+; 旧 CNROM 時代は PPUCTRL bit 4 のトグルだったが、MMC1 昇格により
+; CHR bank レジスタ直接操作に変更。より細かい粒度 (4KB 単位、0-7) で
+; 任意の bank を指定できるようになった。
 ; =============================================================================
 handle_nesphp_nes_chr_bg:
     JSR resolve_op1
@@ -1811,19 +1845,8 @@ handle_nesphp_nes_chr_bg:
     CMP #TYPE_LONG
     BNE chr_bg_err
     LDA OP1_VAL+1
-    AND #$01               ; 0 or 1 に丸める
-    BEQ chr_bg_clear
-    ; bit 4 セット
-    LDA ppu_ctrl_shadow
-    ORA #$10
-    JMP chr_bg_store
-chr_bg_clear:
-    ; bit 4 クリア
-    LDA ppu_ctrl_shadow
-    AND #$EF
-chr_bg_store:
-    STA ppu_ctrl_shadow
-    STA PPUCTRL
+    AND #$07               ; 0-7 にクランプ
+    MMC1_WRITE $A000
     JMP advance
 
 chr_bg_err:

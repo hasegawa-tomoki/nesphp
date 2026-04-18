@@ -5,7 +5,7 @@
 ## 動作確認バージョン
 
 - **PHP: 8.4.x** (version lock 必須、根拠は [05-toolchain](./05-toolchain.md))
-- **マッパー: CNROM (mapper 3)**、PRG 32KB + CHR 32KB (4 × 8KB バンク)、詳細は [11-chr-banks](./11-chr-banks.md)
+- **マッパー: MMC1 (mapper 1, SNROM 構成)**、PRG 32KB + CHR 32KB (4KB × 8 bank) + WRAM 8KB、詳細は [11-chr-banks](./11-chr-banks.md)
 - cc65: `brew install cc65`
 - 開発ホスト: macOS (NTS x64 PHP ビルド前提)
 - エミュレータ: fceux (`make run:NAME` で起動、`EMULATOR=` で変更可)
