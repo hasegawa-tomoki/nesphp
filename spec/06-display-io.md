@@ -426,6 +426,131 @@ OAM シャドウは次の VBlank で NMI ハンドラが `$4014` に書いて OA
 
 ---
 
+## パレット / attribute 制御 (Phase 5E)
+
+NES の PPU は 32 バイトのパレット RAM ($3F00-$3F1F) と、nametable 末尾 64 バイトの attribute table で色を管理する。nesphp は 3 つの intrinsic でこれを PHP から操作できる。
+
+### NES パレットメモリマップ
+
+```
+$3F00: universal background color (全パレット共通の背景色)
+$3F01-$3F03: BG palette 0 (色 1, 2, 3)
+$3F05-$3F07: BG palette 1
+$3F09-$3F0B: BG palette 2
+$3F0D-$3F0F: BG palette 3
+$3F11-$3F13: sprite palette 0 (= palette 4)
+$3F15-$3F17: sprite palette 1 (= palette 5)
+$3F19-$3F1B: sprite palette 2 (= palette 6)
+$3F1D-$3F1F: sprite palette 3 (= palette 7)
+```
+
+各パレットの色 0 ($3F04, $3F08, $3F0C, $3F10, $3F14, $3F18, $3F1C) は $3F00 のミラーで、実質 universal background color と同じ。
+
+### NES カラーコード ($00-$3F)
+
+```
+上位 2 bit = 明るさ (0=暗い, 1=普通, 2=明るい, 3=白寄り)
+下位 4 bit = 色相
+
+  $0x: 暗い        $1x: 普通        $2x: 明るい      $3x: 白寄り
+  x0: 灰 (gray)    x1: 青 (blue)    x2: 紺 (indigo)   x3: 紫 (violet)
+  x4: 赤紫         x5: ピンク       x6: 赤 (red)      x7: オレンジ
+  x8: 黄           x9: 黄緑         xA: 緑 (green)    xB: 青緑
+  xC: 水色 (cyan)  xD: 黒 (dark)    xE: 黒 (mirror)   xF: 黒 (mirror)
+
+  よく使う色:
+    $0F = 黒
+    $30 = 白
+    $16 = 暗い赤    $26 = 赤        $36 = 明るい赤
+    $12 = 暗い青    $22 = 青        $32 = 明るい青
+    $1A = 暗い緑    $2A = 緑        $3A = 明るい緑
+    $21 = 水色      $28 = 黄
+```
+
+### `nes_bg_color($c)` — 背景色設定
+
+PPU $3F00 (universal background color) を NES カラーコードで設定する。全パレット共通の背景色 (色 0) が変わる。
+
+```php
+nes_bg_color(0x0F);  // 黒背景 (デフォルト)
+nes_bg_color(0x02);  // 暗い紺背景
+```
+
+forced_blanking 中は PPU に直書き、sprite_mode 中は NMI キュー経由。
+
+### `nes_palette($id, $c1, $c2, $c3)` — パレット色設定
+
+パレットの色 1-3 を設定する。nesphp 初の 4 引数 intrinsic で、zend_op の op1/op2/result/extended_value を全て入力として使用する。
+
+```php
+nes_palette(0, 0x30, 0x16, 0x26);  // BG palette 0: 白, 暗い赤, 赤
+nes_palette(1, 0x30, 0x2A, 0x1A);  // BG palette 1: 白, 緑, 暗い緑
+nes_palette(4, 0x30, 0x16, 0x00);  // sprite palette 0: 白, 暗い赤, 灰
+```
+
+id 0-3 が BG パレット、4-7 が sprite パレット。PPU の $3F01+id*4 から 3 バイトを書く。
+
+### `nes_attr($x, $y, $pal)` — attribute table 設定
+
+BG の attribute table で、2×2 タイル (16×16 ピクセル) のブロック単位にパレット番号 (0-3) を割り当てる。
+
+```php
+nes_attr(0, 0, 1);   // 左上 16×16 px ブロックに BG palette 1 を割当
+nes_attr(2, 3, 2);   // x=2, y=3 の 16×16 px ブロックに BG palette 2 を割当
+```
+
+x は 0-15 (32 タイル / 2)、y は 0-14 (30 タイル / 2、端数切り捨て)。
+
+### Attribute table の仕組み
+
+NES の attribute table は nametable 末尾の 64 バイト ($23C0-$23FF) にあり、4×4 タイル (32×32 ピクセル) を 1 バイトで管理する。1 バイト内の 2bit ずつが 2×2 タイル (16×16 px) サブブロックのパレット番号を指定:
+
+```
+1 byte = [TL:2][TR:2][BL:2][BR:2]
+  bit 1-0: 左上 2×2 タイル
+  bit 3-2: 右上 2×2 タイル
+  bit 5-4: 左下 2×2 タイル
+  bit 7-6: 右下 2×2 タイル
+```
+
+### RAM shadow (ATTR_SHADOW = $0608, 64 バイト)
+
+attribute table は 1 バイトに 4 つのサブブロック情報が詰まっているため、個別のサブブロックだけを書き換えるには read-modify-write が必要。しかし PPU VRAM は読み出しに 1 cycle のバッファ遅延があり直接 RMW が困難。
+
+nesphp は RAM 上に 64 バイトの shadow ($0608-$0647) を保持し:
+
+1. `nes_attr` 呼び出しで shadow のバイトを read-modify-write (2bit だけ差し替え)
+2. 変更後の shadow 全体を PPU $23C0-$23FF に書き出す
+
+これにより任意の 16×16 px ブロック単位で安全にパレットを変更できる。
+
+### 3 つの intrinsic の組み合わせ例
+
+```php
+// 黒背景に設定
+nes_bg_color(0x0F);
+
+// BG palette 0: 白文字 (タイトル用)
+nes_palette(0, 0x30, 0x10, 0x00);
+// BG palette 1: 赤文字 (強調用)
+nes_palette(1, 0x26, 0x16, 0x06);
+// BG palette 2: 緑文字 (本文用)
+nes_palette(2, 0x2A, 0x1A, 0x0A);
+
+// 行ごとにパレットを割り当て
+for ($x = 0; $x < 16; $x++) {
+    nes_attr($x, 0, 0);  // row 0-1: palette 0 (白)
+    nes_attr($x, 1, 1);  // row 2-3: palette 1 (赤)
+    nes_attr($x, 2, 2);  // row 4-5: palette 2 (緑)
+}
+
+nes_puts(2, 0, "WHITE TITLE");
+nes_puts(2, 2, "RED HIGHLIGHT");
+nes_puts(2, 4, "GREEN BODY");
+```
+
+---
+
 ## 延長ゴール: `ZEND_CONCAT` 用の RAM 文字列バッファ
 
 固定 256B のバッファを 1 本だけ `$0600-$06FF` に配置。`ZEND_CONCAT` 実行時:

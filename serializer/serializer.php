@@ -55,6 +55,9 @@ const NESPHP_NES_PUTS         = 0xF3;  // nes_puts($x, $y, "literal") intrinsic
 const NESPHP_NES_CLS          = 0xF4;  // nes_cls() intrinsic
 const NESPHP_NES_CHR_SPR      = 0xF5;  // nes_chr_spr(N) MMC1 CHR bank 1 ($1000, sprite 用)
 const NESPHP_NES_CHR_BG       = 0xF6;  // nes_chr_bg(N) MMC1 CHR bank 0 ($0000, BG 用)
+const NESPHP_NES_BG_COLOR     = 0xF7;  // nes_bg_color(C) PPU $3F00 背景色
+const NESPHP_NES_PALETTE      = 0xF8;  // nes_palette(id, c1, c2, c3) パレット設定
+const NESPHP_NES_ATTR         = 0xF9;  // nes_attr(x, y, pal) attribute table 設定
 
 // === Zend operand type (zend_compile.h) ===
 const IS_UNUSED        = 0;
@@ -311,15 +314,19 @@ function parse_opcache_dump(string $text): array
                 $pendingArgs = [];
                 continue;
             }
-            if ($pendingBuiltin === 'nes_chr_bg' || $pendingBuiltin === 'nes_chr_spr') {
+            if ($pendingBuiltin === 'nes_chr_bg' || $pendingBuiltin === 'nes_chr_spr' || $pendingBuiltin === 'nes_bg_color') {
                 if (count($pendingArgs) !== 1) {
                     fail("$pendingBuiltin requires 1 argument at line $index (got " . count($pendingArgs) . ")");
                 }
                 if ($pendingArgs[0]['type'] !== IS_CONST) {
                     fail("$pendingBuiltin: argument must be a compile-time integer literal at line $index");
                 }
-                $customOpcode = $pendingBuiltin === 'nes_chr_spr' ? NESPHP_NES_CHR_SPR : NESPHP_NES_CHR_BG;
-                $customName   = $pendingBuiltin === 'nes_chr_spr' ? 'NESPHP_NES_CHR_SPR' : 'NESPHP_NES_CHR_BG';
+                $customMap1 = [
+                    'nes_chr_spr'  => [NESPHP_NES_CHR_SPR,  'NESPHP_NES_CHR_SPR'],
+                    'nes_chr_bg'   => [NESPHP_NES_CHR_BG,   'NESPHP_NES_CHR_BG'],
+                    'nes_bg_color' => [NESPHP_NES_BG_COLOR, 'NESPHP_NES_BG_COLOR'],
+                ];
+                [$customOpcode, $customName] = $customMap1[$pendingBuiltin];
                 $ops[$index] = [
                     'opcode'         => $customOpcode,
                     'mnemonic'       => $customName,
@@ -330,6 +337,46 @@ function parse_opcache_dump(string $text): array
                     'result'         => 0,
                     'result_type'    => IS_UNUSED,
                     'extended_value' => 0,
+                    'lineno'         => 1,
+                ];
+                $pendingBuiltin = null;
+                $pendingArgs = [];
+                continue;
+            }
+            if ($pendingBuiltin === 'nes_attr') {
+                if (count($pendingArgs) !== 3) {
+                    fail("nes_attr requires 3 arguments at line $index (got " . count($pendingArgs) . ")");
+                }
+                $ops[$index] = [
+                    'opcode'         => NESPHP_NES_ATTR,
+                    'mnemonic'       => 'NESPHP_NES_ATTR',
+                    'op1'            => $pendingArgs[0]['val'],
+                    'op1_type'       => $pendingArgs[0]['type'],
+                    'op2'            => $pendingArgs[1]['val'],
+                    'op2_type'       => $pendingArgs[1]['type'],
+                    'result'         => 0,
+                    'result_type'    => IS_UNUSED,
+                    'extended_value' => $pendingArgs[2]['val'],
+                    'lineno'         => 1,
+                ];
+                $pendingBuiltin = null;
+                $pendingArgs = [];
+                continue;
+            }
+            if ($pendingBuiltin === 'nes_palette') {
+                if (count($pendingArgs) !== 4) {
+                    fail("nes_palette requires 4 arguments at line $index (got " . count($pendingArgs) . ")");
+                }
+                $ops[$index] = [
+                    'opcode'         => NESPHP_NES_PALETTE,
+                    'mnemonic'       => 'NESPHP_NES_PALETTE',
+                    'op1'            => $pendingArgs[0]['val'],
+                    'op1_type'       => $pendingArgs[0]['type'],
+                    'op2'            => $pendingArgs[1]['val'],
+                    'op2_type'       => $pendingArgs[1]['type'],
+                    'result'         => $pendingArgs[2]['val'],
+                    'result_type'    => $pendingArgs[2]['type'],
+                    'extended_value' => $pendingArgs[3]['val'],
                     'lineno'         => 1,
                 ];
                 $pendingBuiltin = null;

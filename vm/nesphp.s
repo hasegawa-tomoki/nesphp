@@ -40,6 +40,9 @@ NESPHP_NES_PUTS     = $F3
 NESPHP_NES_CLS      = $F4
 NESPHP_NES_CHR_SPR  = $F5   ; MMC1 CHR bank 1 ($1000, sprite 用 4KB bank)
 NESPHP_NES_CHR_BG   = $F6   ; MMC1 CHR bank 0 ($0000, BG 用 4KB bank)
+NESPHP_NES_BG_COLOR = $F7   ; PPU $3F00 背景色
+NESPHP_NES_PALETTE  = $F8   ; パレット設定 (id, c1, c2, c3)
+NESPHP_NES_ATTR     = $F9   ; attribute table 設定 (x, y, pal)
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -112,6 +115,12 @@ NMI_QUEUE_ADDR    = $0300
 
 ; --- print_int16 用の digit バッファ (最長 "-32768" = 6 文字) ---
 INT_PRINT_BUFFER  = $0600
+
+; --- attribute table の RAM shadow (64 バイト) ---
+; nes_attr の read-modify-write で使用。attribute table 1 byte は 4 つの
+; 2×2 タイルブロックのパレット情報を共有するため、1 ブロックだけ変えるには
+; 他の 3 ブロックの値を壊さないようにする必要がある。
+ATTR_SHADOW       = $0608
 
 ; =============================================================================
 ; ゼロページ VM レジスタ
@@ -383,6 +392,18 @@ main_loop:
     CMP #NESPHP_NES_CHR_BG
     BNE :+
     JMP handle_nesphp_nes_chr_bg
+:
+    CMP #NESPHP_NES_BG_COLOR
+    BNE :+
+    JMP handle_nesphp_nes_bg_color
+:
+    CMP #NESPHP_NES_PALETTE
+    BNE :+
+    JMP handle_nesphp_nes_palette
+:
+    CMP #NESPHP_NES_ATTR
+    BNE :+
+    JMP handle_nesphp_nes_attr
 :
     CMP #ZEND_ECHO
     BNE :+
@@ -1850,6 +1871,274 @@ handle_nesphp_nes_chr_bg:
     JMP advance
 
 chr_bg_err:
+    JMP handle_unimpl
+
+; =============================================================================
+; NESPHP_NES_BG_COLOR (0xF7): 背景色 ($3F00) を設定する
+;
+; 引数: op1 = NES カラーコード (int literal 0x00-0x3F, IS_CONST)
+;
+; PPU $3F00 は全パレット共通の背景色。forced_blanking なら直接書き、
+; sprite_mode なら NMI キュー経由。1 バイトだけなので ppu_write_bytes を
+; 使い、INT_PRINT_BUFFER[0] を一時バッファにする。
+; =============================================================================
+handle_nesphp_nes_bg_color:
+    JSR resolve_op1
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE bg_color_err
+    LDA OP1_VAL+1
+    AND #$3F               ; NES カラーは 6 bit
+    STA INT_PRINT_BUFFER
+    ; TMP0 = PPU $3F00
+    LDA #$00
+    STA TMP0
+    LDA #$3F
+    STA TMP0+1
+    ; TMP1 = INT_PRINT_BUFFER, TMP2 = 1
+    LDA #<INT_PRINT_BUFFER
+    STA TMP1
+    LDA #>INT_PRINT_BUFFER
+    STA TMP1+1
+    LDA #1
+    STA TMP2
+    JSR ppu_write_bytes
+    JMP advance
+
+bg_color_err:
+    JMP handle_unimpl
+
+; =============================================================================
+; NESPHP_NES_PALETTE (0xF8): パレットエントリの 3 色を設定する
+;
+; 引数 (4 つ):
+;   op1            = パレット ID (0-3 = BG, 4-7 = sprite)
+;   op2            = 色 1 (NES カラーコード)
+;   result         = 色 2 (IS_CONST、result フィールドを入力引数として流用)
+;   extended_value = 色 3
+;
+; PPU アドレス = $3F01 + id * 4。3 バイトを連続書き込み。
+; forced_blanking = 直書き、sprite_mode = NMI キュー経由。
+; =============================================================================
+handle_nesphp_nes_palette:
+    JSR resolve_op1        ; OP1_VAL = id
+    JSR resolve_op2        ; OP2_VAL = c1
+
+    ; result (offset 8) を手動 resolve → c2
+    LDY #8
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    ; result_type チェック
+    LDY #23                ; result_type
+    LDA (VM_PC), Y
+    CMP #IS_CONST
+    BNE palette_err
+    ; TMP0 = literal offset → 実アドレスに解決
+    CLC
+    LDA VM_LITBASE
+    ADC TMP0
+    STA TMP0
+    LDA VM_LITBASE+1
+    ADC TMP0+1
+    STA TMP0+1
+    ; zval type check
+    LDY #8
+    LDA (TMP0), Y
+    CMP #TYPE_LONG
+    BNE palette_err
+    ; value.lval 下位 1B = c2
+    LDY #0
+    LDA (TMP0), Y
+    AND #$3F
+    STA INT_PRINT_BUFFER+1 ; c2 を buffer[1] に
+
+    ; extended_value (offset 12) → c3
+    LDY #12
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    CLC
+    LDA VM_LITBASE
+    ADC TMP0
+    STA TMP0
+    LDA VM_LITBASE+1
+    ADC TMP0+1
+    STA TMP0+1
+    LDY #8
+    LDA (TMP0), Y
+    CMP #TYPE_LONG
+    BNE palette_err
+    LDY #0
+    LDA (TMP0), Y
+    AND #$3F
+    STA INT_PRINT_BUFFER+2 ; c3 を buffer[2] に
+
+    ; c1 (OP2_VAL) を buffer[0] に
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE palette_err
+    LDA OP2_VAL+1
+    AND #$3F
+    STA INT_PRINT_BUFFER   ; c1 を buffer[0] に
+
+    ; id (OP1_VAL) からPPU アドレスを計算: $3F01 + id * 4
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE palette_err
+    LDA OP1_VAL+1
+    AND #$07               ; 0-7 にクランプ
+    ASL A
+    ASL A                  ; id * 4
+    CLC
+    ADC #$01               ; + $01 (色 0 をスキップ)
+    STA TMP0               ; PPU addr lo
+    LDA #$3F
+    STA TMP0+1             ; PPU addr hi = $3F
+
+    ; TMP1 = INT_PRINT_BUFFER, TMP2 = 3
+    LDA #<INT_PRINT_BUFFER
+    STA TMP1
+    LDA #>INT_PRINT_BUFFER
+    STA TMP1+1
+    LDA #3
+    STA TMP2
+    JSR ppu_write_bytes
+    JMP advance
+
+palette_err:
+    JMP handle_unimpl
+
+; =============================================================================
+; NESPHP_NES_ATTR (0xF9): attribute table の 2×2 タイルブロックにパレットを設定
+;
+; 引数 (3 つ):
+;   op1            = x (0-15, 2×2 タイルブロック座標)
+;   op2            = y (0-14, 同)
+;   extended_value = pal (0-3, BG パレット番号)
+;
+; attribute table は 64 バイト ($23C0-$23FF)。1 byte が 4×4 タイル (32×32 px)
+; 領域の 4 つの 2×2 タイル quadrant のパレット情報を持つ:
+;   bit 1-0 = 左上 quadrant
+;   bit 3-2 = 右上 quadrant
+;   bit 5-4 = 左下 quadrant
+;   bit 7-6 = 右下 quadrant
+;
+; attr byte index = (y / 2) * 8 + (x / 2)
+; bit position    = ((y % 2) * 2 + (x % 2)) * 2
+;
+; ATTR_SHADOW (RAM 64B) を read-modify-write して、対象 quadrant だけ変更。
+; 変更後の byte を PPU に書く (forced_blanking = 直書き / sprite_mode = queue)。
+; =============================================================================
+handle_nesphp_nes_attr:
+    JSR resolve_op1        ; OP1_VAL = x
+    JSR resolve_op2        ; OP2_VAL = y
+
+    ; extended_value → pal を取得
+    LDY #12
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    CLC
+    LDA VM_LITBASE
+    ADC TMP0
+    STA TMP0
+    LDA VM_LITBASE+1
+    ADC TMP0+1
+    STA TMP0+1
+    LDY #8
+    LDA (TMP0), Y
+    CMP #TYPE_LONG
+    BNE attr_err
+    LDY #0
+    LDA (TMP0), Y
+    AND #$03               ; pal を 0-3 にクランプ
+    STA TMP2               ; TMP2 = pal (2 bit)
+
+    ; attr byte index = (y / 2) * 8 + (x / 2)
+    LDA OP2_VAL+1          ; y
+    LSR A                  ; y / 2
+    ASL A
+    ASL A
+    ASL A                  ; (y / 2) * 8
+    STA TMP0               ; TMP0 = (y/2)*8
+    LDA OP1_VAL+1          ; x
+    LSR A                  ; x / 2
+    CLC
+    ADC TMP0
+    TAX                    ; X = attr byte index (0-63)
+
+    ; bit position = ((y % 2) * 2 + (x % 2)) * 2
+    LDA OP2_VAL+1          ; y
+    AND #$01               ; y % 2
+    ASL A                  ; * 2
+    STA TMP0
+    LDA OP1_VAL+1          ; x
+    AND #$01               ; x % 2
+    ORA TMP0               ; (y%2)*2 + (x%2) = quadrant (0-3)
+    ASL A                  ; * 2 = bit shift amount (0, 2, 4, 6)
+    TAY                    ; Y = shift amount
+
+    ; pal を shift 量だけ左にずらす
+    LDA TMP2               ; pal (0-3)
+attr_shift_pal:
+    CPY #0
+    BEQ attr_shift_done
+    ASL A
+    DEY
+    JMP attr_shift_pal
+attr_shift_done:
+    STA TMP1               ; TMP1 = pal << shift
+
+    ; mask を計算: ~(%11 << shift)
+    ; 方法: $03 を shift 回左シフトして EOR #$FF
+    LDA OP2_VAL+1
+    AND #$01
+    ASL A
+    STA TMP0
+    LDA OP1_VAL+1
+    AND #$01
+    ORA TMP0
+    ASL A
+    TAY                    ; Y = shift amount (再計算)
+    LDA #$03
+attr_shift_mask:
+    CPY #0
+    BEQ attr_mask_done
+    ASL A
+    DEY
+    JMP attr_shift_mask
+attr_mask_done:
+    EOR #$FF               ; A = ~(0x03 << shift) = mask
+    AND ATTR_SHADOW, X     ; 既存の byte から対象 quadrant だけクリア
+    ORA TMP1               ; pal を OR で合成
+    STA ATTR_SHADOW, X     ; shadow に書き戻す
+
+    ; PPU に 1 バイト書き込む: $23C0 + X
+    STA INT_PRINT_BUFFER
+    TXA
+    CLC
+    ADC #$C0
+    STA TMP0               ; PPU addr lo = $C0 + byte_index
+    LDA #$23
+    ADC #0                 ; carry (index >= 64 なら $24xx だが通常ありえない)
+    STA TMP0+1             ; PPU addr hi = $23
+    LDA #<INT_PRINT_BUFFER
+    STA TMP1
+    LDA #>INT_PRINT_BUFFER
+    STA TMP1+1
+    LDA #1
+    STA TMP2
+    JSR ppu_write_bytes
+    JMP advance
+
+attr_err:
     JMP handle_unimpl
 
 ; =============================================================================

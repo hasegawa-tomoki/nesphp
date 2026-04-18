@@ -260,14 +260,15 @@ bitplane 1 に立て、色 1 と併せてどちらか一方を 1 にする。
 ### `chr/make_font.php` の構造
 
 ```php
-function build_bank(array $font5x7): string
+function build_bank(array $font5x7, array $customTiles = []): string
 {
     $bank = str_repeat("\x00", 8192);
     // ... ASCII 0x20-0x7F の glyph を pattern table 0 と 1 に埋める
+    // ... $customTiles の各タイル (0x00-0x1F) を bp0/bp1 で書き込む
     return $bank;
 }
 
-$bank0 = build_bank($font5x7);
+$bank0 = build_bank($font5x7, $customTiles);
 $banks = [
     0 => $bank0,        // ← 既定は 4 バンクとも同じ
     1 => $bank0,
@@ -281,6 +282,56 @@ file_put_contents(__DIR__ . '/font.chr', $chr);
 ```
 
 `$banks` 配列を書き換えるのが主な拡張ポイント。
+
+### `$customTiles` 配列: タイル 0x00-0x1F にグラフィックを配置
+
+ASCII フォントはタイル 0x20-0x7F を使うため、**0x00-0x1F の 32 タイルは未使用**。
+`chr/make_font.php` の `$customTiles` 配列でここにカスタムグラフィックを配置
+できる。`build_bank()` が第 2 引数としてこの配列を受け取り、各タイルの
+bitplane 0 / bitplane 1 を書き込む。
+
+```php
+$customTiles = [
+    0x01 => [
+        'bp0' => [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],  // 色 1
+        'bp1' => [0x00, 0x00, 0x00, 0x18, 0x18, 0x00, 0x00, 0x00],  // 色 2
+    ],
+    // ... 0x02, 0x03, 0x04 なども同様
+];
+
+$bank0 = build_bank($font5x7, $customTiles);
+```
+
+- `bp0` (bitplane 0): 立っているピクセルが色 1 になる
+- `bp1` (bitplane 1): 立っているピクセルが色 2 になる
+- 両方立てると色 3、両方 0 なら色 0 (背景色 / 透明)
+
+#### 具体例: 日本国旗 (2×2 タイル = 16×16 ピクセル)
+
+`examples/color.php` で使われている日本国旗は 4 タイル (0x01-0x04) で構成:
+
+```
+タイル配置:
+  [0x01][0x02]    左上  右上
+  [0x03][0x04]    左下  右下
+```
+
+各タイルは 2 つの bitplane を使う:
+- **bitplane 0 (色 1 = 白)**: 旗の全面を塗る → `bp0` は全行 `0xFF`
+- **bitplane 1 (色 2 = 赤)**: 日の丸の円だけ立てる → `bp1` に円のピクセルパターン
+
+PHP 側では `nes_palette` で色 1 = `$30` (白)、色 2 = `$16` (暗い赤) を設定し、
+`nes_put($x, $y, 1)` 等でタイル番号を直接指定して 2×2 に配置する。
+
+#### 利用可能なタイル番号
+
+| 範囲 | 用途 |
+|---|---|
+| 0x00 | 空白 (nametable のデフォルト値、使わない方が安全) |
+| **0x01-0x1F** | カスタムタイルに利用可能 (31 タイル) |
+| 0x20-0x7E | ASCII フォント (make_font.php が自動生成) |
+| 0x7F | DEL (未使用、カスタム利用可) |
+| 0x80-0xFF | pattern table 1 側 (未使用、カスタム利用可) |
 
 ### 例 1: バンク 1 に全く別のフォントを入れる
 

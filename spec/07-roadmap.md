@@ -16,6 +16,7 @@
 | 延長 第 5D: CNROM + PPUCTRL bit 4 で CHR 切替 | `chrdemo.nes` | ✅ **完了** |
 | 延長 第 3 段階: NMI 同期 echo / nes_put / nes_puts | `livetext.nes` | ✅ **完了** |
 | 延長 第 3.1 段階: sprite_mode での nes_cls (brief force-blanking) | `livereset.nes` | ✅ **完了** |
+| 延長 第 5E: パレット + attribute + カスタムタイル | `color.nes` | ✅ **完了** |
 | 第 2 段階: 自作 Zend 拡張 | `nesphp_dump.so` | 未着手 |
 | 多スプライト対応 | — | 未着手 (現在 sprite 0 固定) |
 

@@ -218,7 +218,34 @@ $font5x7 = [
 //   pattern table 0 ($0000-$0FFF): 通常のフォント
 //   pattern table 1 ($1000-$1FFF): インバース (solid 5-wide 背景にグリフが punch out)
 //     PPUCTRL bit 4 で BG 側が切替わり、nes_chr_bg(1) で全テキストが "ハイライト" される
-function build_bank(array $font5x7): string
+// カスタムタイルのデータ ([tile_index => [bp0_0..bp0_7, bp1_0..bp1_7]])
+// タイル 0x01-0x04: 日本国旗 (2×2 = 16×16 px)
+//   色 1 (%01) = 白 (旗の地), 色 2 (%10) = 赤 (日の丸)
+//   パレットで c1=白($30), c2=赤($16) を設定して使う
+$customTiles = [
+    // 0x01: 左上
+    0x01 => [
+        0xFF, 0xFF, 0xFF, 0xFC, 0xF0, 0xF0, 0xE0, 0xE0,  // bp0
+        0x00, 0x00, 0x00, 0x03, 0x0F, 0x0F, 0x1F, 0x1F,  // bp1
+    ],
+    // 0x02: 右上
+    0x02 => [
+        0xFF, 0xFF, 0xFF, 0x3F, 0x0F, 0x0F, 0x07, 0x07,
+        0x00, 0x00, 0x00, 0xC0, 0xF0, 0xF0, 0xF8, 0xF8,
+    ],
+    // 0x03: 左下
+    0x03 => [
+        0xE0, 0xE0, 0xF0, 0xF0, 0xFC, 0xFF, 0xFF, 0xFF,
+        0x1F, 0x1F, 0x0F, 0x0F, 0x03, 0x00, 0x00, 0x00,
+    ],
+    // 0x04: 右下
+    0x04 => [
+        0x07, 0x07, 0x0F, 0x0F, 0x3F, 0xFF, 0xFF, 0xFF,
+        0xF8, 0xF8, 0xF0, 0xF0, 0xC0, 0x00, 0x00, 0x00,
+    ],
+];
+
+function build_bank(array $font5x7, array $customTiles): string
 {
     $bank = str_repeat("\x00", 8192);
 
@@ -243,6 +270,14 @@ function build_bank(array $font5x7): string
         }
     }
 
+    // カスタムタイルを table 0 に配置 (0x00-0x1F は ASCII フォント未使用域)
+    foreach ($customTiles as $tileIndex => $data) {
+        $offset = $tileIndex * 16;
+        for ($b = 0; $b < 16; $b++) {
+            $bank[$offset + $b] = chr($data[$b]);
+        }
+    }
+
     return $bank;
 }
 
@@ -250,7 +285,7 @@ function build_bank(array $font5x7): string
 //   Bank 0: 標準フォント + インバース (上記 build_bank)
 //   Bank 1-3: bank 0 のコピー (プレゼン用に自分で差し替える)
 // bank 1-3 に独自タイルを詰めたい場合は $banks を書き換える
-$bank0 = build_bank($font5x7);
+$bank0 = build_bank($font5x7, $customTiles);
 $banks = [
     0 => $bank0,
     1 => $bank0,

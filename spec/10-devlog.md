@@ -731,6 +731,65 @@ Oracle v. Google 以降、数値定数は著作物でないというのが通説
 
 ---
 
+## Phase 5E: パレット + attribute + カスタムタイル
+
+### ゴール
+
+プレゼンテーション用途で「行ごとに色を変えたカラフルな画面」を PHP から作れるようにする。NES の PPU パレットと attribute table を PHP intrinsic 経由で操作し、カスタムタイルで簡単なグラフィック (日本国旗) も表示する。
+
+### 設計判断: 3 つの intrinsic に分離
+
+パレット操作を 1 つの「万能 API」にまとめる案もあったが、NES のハードウェア構造に素直に対応させて 3 つに分離した:
+
+| intrinsic | NES ハードウェア対象 | 理由 |
+|---|---|---|
+| `nes_bg_color($c)` | PPU $3F00 (universal background) | 背景色は 1 色だけ、1 引数で完結 |
+| `nes_palette($id, $c1, $c2, $c3)` | PPU $3F01+id*4 (3 色) | パレットのエントリ単位操作。BG (0-3) / sprite (4-7) を同じ API で統一 |
+| `nes_attr($x, $y, $pal)` | attribute table ($23C0-$23FF) | 空間的な色割り当て。パレット設定とは独立 |
+
+この分離により「背景色だけ変える」「パレットだけ差し替える」「行ごとの色割り当てだけ変える」がそれぞれ独立して呼べる。
+
+### 4 引数 intrinsic のエンコーディング
+
+`nes_palette($id, $c1, $c2, $c3)` は nesphp 初の 4 引数 intrinsic。zend_op の 24 バイトに 4 つの引数を収めるため、**result フィールドを入力として流用**した:
+
+```
+op1           = $id   (パレット番号)
+op2           = $c1   (色 1)
+result        = $c2   (色 2)  ← 通常は「出力先」だが入力に流用
+extended_value = $c3   (色 3)
+```
+
+Zend の慣習から逸脱するが、custom opcode 領域 (0xE0-0xFF) なので問題ない。serializer の `pendingArgs` 配列に 4 要素を蓄積して DO_FCALL_BY_NAME で一括エンコードする。
+
+### Attribute table の RAM shadow
+
+NES の attribute table は 1 バイトに 4 つの 2×2 タイルブロックの情報が 2bit ずつ詰まっている。個別ブロックだけを書き換えるには read-modify-write が必要だが、PPU VRAM は読み出しにバッファ遅延があり直接 RMW が困難。
+
+解決策として **64 バイトの RAM shadow** を `ATTR_SHADOW = $0608` に配置:
+
+1. 起動時に shadow を $00 (全ブロック = palette 0) で初期化
+2. `nes_attr` 呼び出しで: バイトオフセット = y/2 * 8 + x/2、ビット位置 = ((y&1)*2 + (x&1)) * 2
+3. shadow のバイトを AND マスクで該当 2bit をクリア → OR で新パレット番号を挿入
+4. 変更後のバイトを PPU $23C0+offset に書き出す
+
+### カスタムタイルシステム
+
+`chr/make_font.php` に `$customTiles` 配列を追加。ASCII フォントが使わないタイル番号 0x00-0x1F に自由なグラフィックを配置できるようになった。
+
+日本国旗のデモでは 4 つのタイル (0x01-0x04) で 2×2 = 16×16 ピクセルの旗を表現:
+
+- **bitplane 0** (色 1) = 白: 旗の背景 (全面白)
+- **bitplane 1** (色 2) = 赤: 日の丸の円
+
+`nes_palette` で色 1 = 白 ($30)、色 2 = 赤 ($16) を設定し、`nes_put` でタイル番号 0x01-0x04 を 2×2 に配置する。NES の 2 bitplane 方式を活用した最小限のグラフィック表現。
+
+### 成果
+
+`examples/color.php` → `build/color.nes`: 黒背景に赤タイトル、白本文、緑強調、水色フッタ、そして日本国旗。行ごとの色分けが PHP のコードだけで制御できることを実証。
+
+---
+
 ## 関連ドキュメント
 
 - [01-rom-format](./01-rom-format.md) — 現在の ROM バイナリ仕様
