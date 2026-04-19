@@ -168,21 +168,21 @@
   <button id="clearBankBtn" class="sec">Clear current bank</button>
   <button id="copyFromBankBtn" class="sec">Copy bank 0 → all</button>
   <span style="margin-left:auto;color:#666;font-size:11px">|</span>
-  <button id="loadMisakiBtn" class="sec">Load Misaki BDF...</button>
-  <input type="file" id="loadMisakiInput" accept=".bdf,text/plain" style="display:none">
-  <button id="writeTextBtn" class="sec" disabled>Write Misaki text (T)</button>
-  <span id="misakiStatus" style="font-size:11px;color:#8a8;"></span>
+  <button id="loadBdfBtn" class="sec">Load 8x8 BDF...</button>
+  <input type="file" id="loadBdfInput" accept=".bdf,text/plain" style="display:none">
+  <button id="writeTextBtn" class="sec" disabled>Write BDF text (T)</button>
+  <span id="bdfStatus" style="font-size:11px;color:#8a8;"></span>
 </div>
 
 <div id="textWriteModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center;">
   <div style="background:#252525;padding:20px;border-radius:6px;min-width:420px;max-width:560px;border:1px solid #555;">
-    <h2 style="margin-top:0">美咲フォントでテキスト書込</h2>
+    <h2 style="margin-top:0">BDF フォントでテキスト書込</h2>
     <div style="font-size:12px;color:#aaa;margin-bottom:8px">
       開始タイル: <span id="writeStartLabel" style="font-family:monospace;color:#ff0">$00</span>
       &nbsp;&nbsp;bank <span id="writeBankLabel">0</span>, table <span id="writeTableLabel">0</span>
     </div>
     <textarea id="writeTextInput"
-              placeholder="日本語テキストを入力 (改行は次の行の同じ列から再開)"
+              placeholder="テキストを入力 (改行は次の行の同じ列から再開)"
               style="width:100%;height:80px;background:#111;color:#eee;border:1px solid #444;font-size:13px;padding:8px;font-family:monospace;"></textarea>
     <div class="hint">改行 = 次行の同じ開始列から再開。グリッド末端 (タイル $FF) で停止。未登録グリフは空白タイルで埋める。</div>
     <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end;">

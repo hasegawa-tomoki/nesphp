@@ -49,7 +49,7 @@ const state = {
   bgColor: 0x0F,   // shared universal BG (NES $3F00)
   paletteIdx: 0,
   colorIdx: 1,     // paint color slot selection (0..3)
-  misakiMap: null, // Map<codepoint, Uint8Array(8)> once BDF loaded
+  bdfMap: null,    // Map<codepoint, Uint8Array(8)> once BDF loaded
 };
 
 // --- Tile data access ---
@@ -456,7 +456,8 @@ function setStatus(msg, isErr) {
   el.classList.toggle('err', !!isErr);
 }
 
-// --- Misaki BDF loading + text writing ---
+// --- 8x8 BDF loading + text writing ---
+// Works with any BDF whose glyph width ≤ 8 (e.g., Misaki gothic/mincho).
 // BDF glyph bitmap rows are MSB-aligned within each byte, same as NES CHR bp0.
 // For glyphs wider than 8 we take only the leftmost byte; for shorter heights
 // we top-align within the 8×8 tile and zero-pad the rest.
@@ -502,8 +503,9 @@ function parseBdf(text) {
         i++;
       }
       if (encoding >= 0 && bits.length > 0) {
-        // Vertical alignment: baseline-aware. For Misaki 8×8 (FONTBOUNDINGBOX
-        // 8 8 0 -1, ascent=7, descent=1), baseline sits at tile row 6.
+        // Vertical alignment: baseline-aware. Example: Misaki 8×8 has
+        // FONTBOUNDINGBOX 8 8 0 -1 (ascent=7, descent=1) so baseline is at
+        // tile row 6.
         // Glyph bottom row is placed at (baselineRow - bbxYoff); glyph top row
         // is then (bottom - h + 1). This matches the font designer's intent
         // and makes short glyphs (exclamation, hiragana etc.) sit on the
@@ -533,19 +535,19 @@ function writeGlyphToTile(bank, table, tile, glyph8) {
   }
 }
 
-document.getElementById('loadMisakiBtn').addEventListener('click', () => {
-  document.getElementById('loadMisakiInput').click();
+document.getElementById('loadBdfBtn').addEventListener('click', () => {
+  document.getElementById('loadBdfInput').click();
 });
-document.getElementById('loadMisakiInput').addEventListener('change', (e) => {
+document.getElementById('loadBdfInput').addEventListener('change', (e) => {
   const file = e.target.files[0];
   if (!file) return;
   const reader = new FileReader();
   reader.onload = () => {
     try {
       const map = parseBdf(reader.result);
-      state.misakiMap = map;
+      state.bdfMap = map;
       document.getElementById('writeTextBtn').disabled = false;
-      document.getElementById('misakiStatus').textContent = `Misaki: ${map.size} glyphs`;
+      document.getElementById('bdfStatus').textContent = `BDF: ${map.size} glyphs`;
       setStatus(`BDF 読込: ${file.name} (${map.size} glyphs)`);
     } catch (err) {
       setStatus('BDF parse error: ' + err.message, true);
@@ -555,7 +557,7 @@ document.getElementById('loadMisakiInput').addEventListener('change', (e) => {
 });
 
 function openWriteModal() {
-  if (!state.misakiMap) return;
+  if (!state.bdfMap) return;
   const modal = document.getElementById('textWriteModal');
   modal.style.display = 'flex';
   document.getElementById('writeStartLabel').textContent =
@@ -574,7 +576,7 @@ function applyWriteText() {
   const ta = document.getElementById('writeTextInput');
   const text = ta.value;
   if (!text) { closeWriteModal(); return; }
-  if (!state.misakiMap) return;
+  if (!state.bdfMap) return;
 
   const startCol = state.tile & 0x0F;
   let col = startCol;
@@ -593,7 +595,7 @@ function applyWriteText() {
     if (cp === 0x0D) continue;  // ignore CR
     const tile = row * 16 + col;
     if (tile > 0xFF) break;
-    const glyph = state.misakiMap.get(cp);
+    const glyph = state.bdfMap.get(cp);
     if (glyph) {
       writeGlyphToTile(state.bank, state.table, tile, glyph);
       written++;
