@@ -28,6 +28,10 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 | `ZEND_IS_SMALLER` | **20 (0x14)** | ✓ | ✓ (P3) | op1 < op2 (IS_LONG 符号付き 16bit)。`BVC + EOR #$80 + BMI` の標準イディオム |
 | `ZEND_ASSIGN` | **22 (0x16)** | ✓ | ✓ (P2) | op1 (IS_CV) ← op2 の値。4B tagged value をそのままコピー |
 | `ZEND_QM_ASSIGN` | **31 (0x1F)** | ✓ | — | op1 → result。値コピー |
+| `ZEND_PRE_INC` | **34 (0x22)** | ✓ | ✓ (Q3) | `++$x`。op1 (IS_CV) を +1 し result に新値 |
+| `ZEND_PRE_DEC` | **35 (0x23)** | ✓ | ✓ (Q3) | `--$x`。op1 を −1 し result に新値 |
+| `ZEND_POST_INC` | **36 (0x24)** | ✓ | ✓ (Q3) | `$x++`。op1 を +1、result に旧値 |
+| `ZEND_POST_DEC` | **37 (0x25)** | ✓ | ✓ (Q3) | `$x--`。op1 を −1、result に旧値 |
 | `ZEND_JMP` | **42 (0x2A)** | ✓ | ✓ (P3) | op1.num (op_index) に無条件分岐 |
 | `ZEND_JMPZ` | **43 (0x2B)** | ✓ | ✓ (P3) | op1 が falsy のとき op2.num に分岐 |
 | `ZEND_JMPNZ` | **44 (0x2C)** | ✓ | — | op1 が truthy のとき op2.num に分岐 |
@@ -39,13 +43,17 @@ L3S で emit 対象の nesphp カスタム opcode (intrinsic 畳み込み):
 | Custom opcode | 番号 | emit (L3S) |
 |---|---|:---:|
 | `NESPHP_FGETS` | 0xF0 | ✓ (P1) |
+| `NESPHP_NES_PUT` | 0xF1 | ✓ (Q1) |
+| `NESPHP_NES_SPRITE` | 0xF2 | ✓ (Q1) |
 | `NESPHP_NES_PUTS` | 0xF3 | ✓ (P1) |
 | `NESPHP_NES_CLS` | 0xF4 | ✓ (P1) |
 | `NESPHP_NES_CHR_SPR` | 0xF5 | ✓ (P1) |
 | `NESPHP_NES_CHR_BG` | 0xF6 | ✓ (P1) |
 | `NESPHP_NES_BG_COLOR` | 0xF7 | ✓ (P1) |
 | `NESPHP_NES_PALETTE` | 0xF8 | ✓ (P1) |
-| `NESPHP_NES_PUT` / `NESPHP_NES_SPRITE` / `NESPHP_NES_ATTR` | 0xF1 / 0xF2 / 0xF9 | — (host のみ) |
+| `NESPHP_NES_ATTR` | 0xF9 | ✓ (Q1) |
+
+Q2: 16 進リテラル `0x..` 対応 (lexer)。Q3: `ZEND_PRE_INC` (34) / `ZEND_PRE_DEC` (35) / `ZEND_POST_INC` (36) / `ZEND_POST_DEC` (37) を L3S で emit 可能 (`++$x` / `$x++` / `--$x` / `$x--`)。Q4: `for (init; cond; update) body` を double-JMP で展開して emit。
 | `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 (forced_blanking 時) → 無限ループ |
 | `ZEND_ECHO` | **136 (0x88)** | MVP / 延長1 | op1 (IS_STRING / IS_LONG) を PPU nametable に出力。IS_LONG は `print_int16` で decimal ASCII に変換 |
 

@@ -49,6 +49,9 @@ TK_EQ3     = 19
 TK_NEQ2    = 20
 TK_NEQ3    = 21
 TK_TRUE    = 22
+TK_INC     = 23
+TK_DEC     = 24
+TK_FOR     = 25
 
 ; --- Intrinsic ID ---
 INT_CLS       = 0
@@ -58,6 +61,9 @@ INT_BG_COLOR  = 3
 INT_PALETTE   = 4
 INT_PUTS      = 5
 INT_FGETS     = 6
+INT_PUT       = 7
+INT_SPRITE    = 8
+INT_ATTR      = 9
 INT_NOT_FOUND = $FF
 
 ARG_STDIN_SENTINEL = $FE
@@ -191,6 +197,18 @@ cmp_dispatch_stmt:
     BNE :+
     JMP cpp_if_stmt
 :
+    CMP #TK_FOR
+    BNE :+
+    JMP cpp_for_stmt
+:
+    CMP #TK_INC
+    BNE :+
+    JMP cpp_pre_inc_stmt
+:
+    CMP #TK_DEC
+    BNE :+
+    JMP cpp_pre_dec_stmt
+:
     JMP cmp_error
 
 ; -----------------------------------------------------------------------------
@@ -217,12 +235,61 @@ cpp_assign_stmt:
     JSR cmp_lex_next
     LDA CMP_TOK_KIND
     CMP #TK_ASSIGN
-    BEQ :+
+    BEQ cas_eq
+    CMP #TK_INC
+    BEQ cas_post_inc
+    CMP #TK_DEC
+    BEQ cas_post_dec
     JMP cmp_error
-:
+cas_eq:
     JSR cmp_lex_next
     JSR cmp_parse_expr
     JSR cmp_emit_assign
+    LDA CMP_TOK_KIND
+    CMP #TK_SEMI
+    BEQ :+
+    JMP cmp_error
+:
+    RTS
+cas_post_inc:
+    LDA #ZEND_POST_INC
+    JMP cas_incdec_stmt
+cas_post_dec:
+    LDA #ZEND_POST_DEC
+cas_incdec_stmt:
+    STA TMP2
+    ; CMP_ASSIGN_SLOT を CMP_INCDEC_SLOT にコピー
+    LDA CMP_ASSIGN_SLOT
+    STA CMP_INCDEC_SLOT
+    LDA TMP2
+    JSR cmp_emit_incdec_discard
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_SEMI
+    BEQ :+
+    JMP cmp_error
+:
+    RTS
+
+; ++$x; / --$x; (stmt-level prefix inc/dec、結果破棄)
+cpp_pre_inc_stmt:
+    LDA #ZEND_PRE_INC
+    JMP cpp_pre_incdec_stmt
+cpp_pre_dec_stmt:
+    LDA #ZEND_PRE_DEC
+cpp_pre_incdec_stmt:
+    STA TMP2
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_CV
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_cv_intern
+    STA CMP_INCDEC_SLOT
+    LDA TMP2
+    JSR cmp_emit_incdec_discard
+    JSR cmp_lex_next
     LDA CMP_TOK_KIND
     CMP #TK_SEMI
     BEQ :+
@@ -284,7 +351,6 @@ ccs_rparen:
 ;   loop_end:
 ; -----------------------------------------------------------------------------
 cpp_while_stmt:
-    ; loop_top を 6502 ハードウェアスタックに退避
     LDA CMP_OP_COUNT
     PHA
     LDA CMP_OP_COUNT+1
@@ -303,23 +369,25 @@ cpp_while_stmt:
     BEQ :+
     JMP cmp_error
 :
-    ; JMPZ expr, loop_end (placeholder)
     LDA #ZEND_JMPZ
     JSR cmp_emit_jmpxx_with_bp
 
+    ; body: ブロック or 単文
     JSR cmp_lex_next
     LDA CMP_TOK_KIND
     CMP #TK_LBRACE
-    BEQ :+
-    JMP cmp_error
-:
-    JSR cmp_parse_block_body     ; parse stmt* until '}'
+    BNE cpw_single
+    JSR cmp_parse_block_body
+    JMP cpw_after_body
+cpw_single:
+    JSR cmp_dispatch_stmt
+cpw_after_body:
 
-    ; JMP loop_top (stack から pop)
+    ; JMP loop_top
     JSR cmp_op24_zero
-    PLA                          ; hi
+    PLA
     STA TMP0+1
-    PLA                          ; lo
+    PLA
     STA TMP0
     LDY #0
     LDA TMP0
@@ -332,7 +400,6 @@ cpp_while_stmt:
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
 
-    ; backpatch JMPZ の op2 → 現在の CMP_OP_COUNT (= loop_end)
     JSR cmp_bp_pop_patch
     RTS
 
@@ -361,13 +428,16 @@ cpp_if_stmt:
     LDA #ZEND_JMPZ
     JSR cmp_emit_jmpxx_with_bp
 
+    ; body: ブロック or 単文
     JSR cmp_lex_next
     LDA CMP_TOK_KIND
     CMP #TK_LBRACE
-    BEQ :+
-    JMP cmp_error
-:
+    BNE cpif_single
     JSR cmp_parse_block_body
+    JMP cpif_patch
+cpif_single:
+    JSR cmp_dispatch_stmt
+cpif_patch:
     JSR cmp_bp_pop_patch
     RTS
 
@@ -387,6 +457,175 @@ cblk_loop:
     JSR cmp_dispatch_stmt
     JMP cblk_loop
 cblk_done:
+    RTS
+
+; -----------------------------------------------------------------------------
+; for (init; cond; update) body
+;
+; 生成コード (update が body より前 にソースに出る都合で double-JMP):
+;   init
+;   L0 (loop_top):
+;     cond
+;     JMPZ cond, END          (bp1)
+;     JMP body-start          (bp2)
+;     update-start:
+;     update
+;     JMP L0
+;   body-start:               (patch bp2)
+;     body
+;     JMP update-start
+;   END:                      (patch bp1)
+;
+; 外側 for のために CMP_FOR_LOOP_TOP / CMP_FOR_UPD_START を HW stack に退避
+; -----------------------------------------------------------------------------
+cpp_for_stmt:
+    LDA CMP_FOR_LOOP_TOP
+    PHA
+    LDA CMP_FOR_LOOP_TOP+1
+    PHA
+    LDA CMP_FOR_UPD_START
+    PHA
+    LDA CMP_FOR_UPD_START+1
+    PHA
+
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_LPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    ; --- init ---
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_SEMI
+    BEQ cfs_init_skip
+    JSR cmp_dispatch_stmt
+    LDA CMP_TOK_KIND
+    CMP #TK_SEMI
+    BEQ :+
+    JMP cmp_error
+:
+cfs_init_skip:
+
+    ; loop_top を記録
+    LDA CMP_OP_COUNT
+    STA CMP_FOR_LOOP_TOP
+    LDA CMP_OP_COUNT+1
+    STA CMP_FOR_LOOP_TOP+1
+
+    ; --- cond ---
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_SEMI
+    BEQ cfs_cond_true
+    JSR cmp_parse_expr
+    LDA CMP_TOK_KIND
+    CMP #TK_SEMI
+    BEQ :+
+    JMP cmp_error
+:
+    JMP cfs_cond_emit
+cfs_cond_true:
+    ; 空の cond → IS_TRUE を使う
+    JSR cmp_emit_zval_true
+    LDX TMP1
+    JSR cmp_lit_idx_to_offset
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_CONST
+    STA CMP_EXPR_TYPE
+cfs_cond_emit:
+    LDA #ZEND_JMPZ
+    JSR cmp_emit_jmpxx_with_bp       ; bp1: END
+    JSR cmp_emit_jmp_with_bp         ; bp2: body-start
+
+    ; update_start を記録
+    LDA CMP_OP_COUNT
+    STA CMP_FOR_UPD_START
+    LDA CMP_OP_COUNT+1
+    STA CMP_FOR_UPD_START+1
+
+    ; --- update ---
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_RPAREN
+    BEQ cfs_update_skip
+    JSR cmp_parse_expr
+    LDA CMP_TOK_KIND
+    CMP #TK_RPAREN
+    BEQ :+
+    JMP cmp_error
+:
+cfs_update_skip:
+
+    ; JMP loop_top
+    JSR cmp_op24_zero
+    LDY #0
+    LDA CMP_FOR_LOOP_TOP
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_FOR_LOOP_TOP+1
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_JMP
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+
+    ; Patch bp2 (body-start = 現在の OP_COUNT)
+    JSR cmp_bp_pop_patch
+
+    ; --- body ---
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_LBRACE
+    BNE cfs_body_single
+    JSR cmp_parse_block_body
+    JMP cfs_body_done
+cfs_body_single:
+    JSR cmp_dispatch_stmt
+cfs_body_done:
+
+    ; JMP update_start
+    JSR cmp_op24_zero
+    LDY #0
+    LDA CMP_FOR_UPD_START
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_FOR_UPD_START+1
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_JMP
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+
+    ; Patch bp1 (END = 現在の OP_COUNT)
+    JSR cmp_bp_pop_patch
+
+    ; 外側 for 状態を復帰
+    PLA
+    STA CMP_FOR_UPD_START+1
+    PLA
+    STA CMP_FOR_UPD_START
+    PLA
+    STA CMP_FOR_LOOP_TOP+1
+    PLA
+    STA CMP_FOR_LOOP_TOP
+    RTS
+
+; cmp_emit_jmp_with_bp: 無条件 JMP を placeholder 0 で emit、op1 アドレスを bp stack に push
+cmp_emit_jmp_with_bp:
+    JSR cmp_op24_zero
+    LDY #20
+    LDA #ZEND_JMP
+    STA (CMP_OP_HEAD), Y
+    LDA CMP_OP_HEAD
+    STA TMP0
+    LDA CMP_OP_HEAD+1
+    STA TMP0+1
+    JSR cmp_bp_push
+    JSR cmp_op_finish
     RTS
 
 ; =============================================================================
@@ -660,7 +899,36 @@ cmp_parse_primary:
     BNE :+
     JMP cpp_ident
 :
+    CMP #TK_INC
+    BNE :+
+    JMP cpp_pre_inc_expr
+:
+    CMP #TK_DEC
+    BNE :+
+    JMP cpp_pre_dec_expr
+:
     JMP cmp_error
+
+; ++$x (prefix in expression) → PRE_INC with TMP result
+cpp_pre_inc_expr:
+    LDA #ZEND_PRE_INC
+    JMP cpp_pre_incdec_expr
+cpp_pre_dec_expr:
+    LDA #ZEND_PRE_DEC
+cpp_pre_incdec_expr:
+    STA TMP2                        ; opcode 退避
+    JSR cmp_lex_next                ; TK_CV を期待
+    LDA CMP_TOK_KIND
+    CMP #TK_CV
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_cv_intern
+    STA CMP_INCDEC_SLOT
+    LDA TMP2
+    JSR cmp_emit_incdec_tmp
+    JSR cmp_lex_next                ; peek next
+    RTS
 
 cpp_int:
     JSR cmp_emit_zval_long_value
@@ -697,6 +965,7 @@ cpp_str:
 
 cpp_cv:
     JSR cmp_cv_intern
+    STA CMP_INCDEC_SLOT             ; postfix ++/-- で再利用する可能性がある
     TAX
     JSR cmp_lit_idx_to_offset
     LDA TMP0
@@ -705,7 +974,22 @@ cpp_cv:
     STA CMP_EXPR_VAL+1
     LDA #IS_CV
     STA CMP_EXPR_TYPE
-    JSR cmp_lex_next
+    JSR cmp_lex_next                ; peek next
+    LDA CMP_TOK_KIND
+    CMP #TK_INC
+    BEQ cpp_cv_post_inc
+    CMP #TK_DEC
+    BEQ cpp_cv_post_dec
+    RTS                              ; just CV、terminator は CMP_TOK_KIND に残る
+
+cpp_cv_post_inc:
+    LDA #ZEND_POST_INC
+    JMP cpp_cv_post_common
+cpp_cv_post_dec:
+    LDA #ZEND_POST_DEC
+cpp_cv_post_common:
+    JSR cmp_emit_incdec_tmp         ; CMP_INCDEC_SLOT の CV を inc/dec、CMP_EXPR = TMP (旧値)
+    JSR cmp_lex_next                ; ++/-- の次の token
     RTS
 
 ; true → IS_TRUE zval (literal)
@@ -992,12 +1276,35 @@ cln_rbrace:
     STA CMP_TOK_KIND
     RTS
 cln_plus:
-    JSR cmp_advance1
+    JSR cmp_advance1                ; 1 個目の '+'
+    JSR cmp_at_eof
+    BEQ cln_plus_one
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'+'
+    BNE cln_plus_one
+    JSR cmp_advance1                ; 2 個目の '+'
+    LDA #TK_INC
+    STA CMP_TOK_KIND
+    RTS
+cln_plus_one:
     LDA #TK_PLUS
     STA CMP_TOK_KIND
     RTS
+
 cln_minus:
+    JSR cmp_advance1                ; 1 個目の '-'
+    JSR cmp_at_eof
+    BEQ cln_minus_one
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'-'
+    BNE cln_minus_one
     JSR cmp_advance1
+    LDA #TK_DEC
+    STA CMP_TOK_KIND
+    RTS
+cln_minus_one:
     LDA #TK_MINUS
     STA CMP_TOK_KIND
     RTS
@@ -1119,6 +1426,19 @@ cln_int:
     LDA #0
     STA CMP_TOK_VALUE
     STA CMP_TOK_VALUE+1
+    ; 先頭 '0' の後が 'x' / 'X' なら hex 解析に分岐
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'0'
+    BNE cln_int_loop              ; '0' 以外で始まる場合は 10 進のみ
+    ; peek next
+    LDY #1
+    LDA (CMP_SRC_PTR), Y
+    CMP #'x'
+    BEQ cln_hex_consume_prefix
+    CMP #'X'
+    BEQ cln_hex_consume_prefix
+    ; 10 進で続行
 cln_int_loop:
     JSR cmp_at_eof
     BEQ cln_int_done
@@ -1164,6 +1484,87 @@ cln_int_loop:
 cln_int_done:
     LDA #TK_INT
     STA CMP_TOK_KIND
+    RTS
+
+; --- 16 進リテラル: 先頭 '0x' または '0X' を消費してから hex 桁を解析 ---
+cln_hex_consume_prefix:
+    JSR cmp_advance1              ; '0'
+    JSR cmp_advance1              ; 'x' / 'X'
+    ; 少なくとも 1 桁必須
+    JSR cmp_at_eof
+    BNE :+
+    JMP cmp_error
+:
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    JSR hex_digit
+    BCC :+
+    JMP cmp_error                 ; 無効な hex 桁
+:
+cln_hex_loop:
+    JSR cmp_at_eof
+    BEQ cln_int_done
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    JSR hex_digit                 ; A = digit value (0-15), C=0 成功 / C=1 失敗
+    BCC :+
+    JMP cln_int_done_hex          ; 非 hex 文字で終了
+:
+    PHA
+    ; value <<= 4 (16 倍)
+    ASL CMP_TOK_VALUE
+    ROL CMP_TOK_VALUE+1
+    ASL CMP_TOK_VALUE
+    ROL CMP_TOK_VALUE+1
+    ASL CMP_TOK_VALUE
+    ROL CMP_TOK_VALUE+1
+    ASL CMP_TOK_VALUE
+    ROL CMP_TOK_VALUE+1
+    ; + digit
+    PLA
+    CLC
+    ADC CMP_TOK_VALUE
+    STA CMP_TOK_VALUE
+    LDA CMP_TOK_VALUE+1
+    ADC #0
+    STA CMP_TOK_VALUE+1
+    JSR cmp_advance1
+    JMP cln_hex_loop
+cln_int_done_hex:
+    LDA #TK_INT
+    STA CMP_TOK_KIND
+    RTS
+
+; hex_digit: A = char → A = digit value (0-15), C=0 成功 / C=1 失敗
+hex_digit:
+    CMP #'0'
+    BCC hd_no
+    CMP #'9'+1
+    BCS hd_alpha
+    SEC
+    SBC #'0'
+    CLC
+    RTS
+hd_alpha:
+    CMP #'A'
+    BCC hd_no
+    CMP #'F'+1
+    BCS hd_lower
+    SEC
+    SBC #'A'-10
+    CLC
+    RTS
+hd_lower:
+    CMP #'a'
+    BCC hd_no
+    CMP #'f'+1
+    BCS hd_no
+    SEC
+    SBC #'a'-10
+    CLC
+    RTS
+hd_no:
+    SEC
     RTS
 
 cln_ident:
@@ -1225,6 +1626,14 @@ cmp_check_keyword:
     LDA #TK_TRUE
     RTS
 :
+    LDA #<kw_for
+    LDX #>kw_for
+    LDY #3
+    JSR cmi_try_match
+    BCS :+
+    LDA #TK_FOR
+    RTS
+:
     LDA #TK_IDENT
     RTS
 
@@ -1232,6 +1641,7 @@ kw_echo:  .byte "echo"
 kw_while: .byte "while"
 kw_if:    .byte "if"
 kw_true:  .byte "true"
+kw_for:   .byte "for"
 
 ; -----------------------------------------------------------------------------
 ; char classification
@@ -1482,6 +1892,30 @@ cmp_match_intrinsic:
     LDA #INT_FGETS
     RTS
 :
+    LDA #<intrinsic_name_nes_put
+    LDX #>intrinsic_name_nes_put
+    LDY #7
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_PUT
+    RTS
+:
+    LDA #<intrinsic_name_nes_sprite
+    LDX #>intrinsic_name_nes_sprite
+    LDY #10
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_SPRITE
+    RTS
+:
+    LDA #<intrinsic_name_nes_attr
+    LDX #>intrinsic_name_nes_attr
+    LDY #8
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_ATTR
+    RTS
+:
     LDA #INT_NOT_FOUND
     RTS
 
@@ -1513,6 +1947,9 @@ intrinsic_name_nes_bg_color:  .byte "nes_bg_color"
 intrinsic_name_nes_palette:   .byte "nes_palette"
 intrinsic_name_nes_puts:      .byte "nes_puts"
 intrinsic_name_fgets:         .byte "fgets"
+intrinsic_name_nes_put:       .byte "nes_put"
+intrinsic_name_nes_sprite:    .byte "nes_sprite"
+intrinsic_name_nes_attr:      .byte "nes_attr"
 
 ; =============================================================================
 ; intrinsic 発行 (statement context、戻り値破棄)
@@ -1535,6 +1972,9 @@ cmp_emit_jmp_table:
     .word cmp_emit_palette
     .word cmp_emit_puts
     .word cmp_emit_fgets_stmt
+    .word cmp_emit_put
+    .word cmp_emit_sprite
+    .word cmp_emit_attr
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -1652,6 +2092,84 @@ cmp_emit_fgets_stmt:
     JSR cmp_op24_zero
     LDY #20
     LDA #NESPHP_FGETS
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_put($x, $y, "X" | tile_int)
+; op1 = $x, op2 = $y, extended_value = char/tile literal (IS_CONST)
+cmp_emit_put:
+    LDA CMP_ARG_COUNT
+    CMP #3
+    BEQ :+
+    JMP cmp_error
+:
+    LDA CMP_ARG_TYPES+2
+    CMP #IS_CONST
+    BEQ :+
+    JMP cmp_error                ; 第 3 引数は compile-time リテラル必須
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDX #2
+    JSR cmp_set_extended_from_arg
+    LDY #20
+    LDA #NESPHP_NES_PUT
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_sprite($x, $y, tile)
+; op1 = $x, op2 = $y, extended_value = tile literal (IS_CONST、int 想定)
+cmp_emit_sprite:
+    LDA CMP_ARG_COUNT
+    CMP #3
+    BEQ :+
+    JMP cmp_error
+:
+    LDA CMP_ARG_TYPES+2
+    CMP #IS_CONST
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDX #2
+    JSR cmp_set_extended_from_arg
+    LDY #20
+    LDA #NESPHP_NES_SPRITE
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_attr($x, $y, $pal)
+; op1 = $x, op2 = $y, extended_value = pal literal (IS_CONST、int)
+cmp_emit_attr:
+    LDA CMP_ARG_COUNT
+    CMP #3
+    BEQ :+
+    JMP cmp_error
+:
+    LDA CMP_ARG_TYPES+2
+    CMP #IS_CONST
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDX #2
+    JSR cmp_set_extended_from_arg
+    LDY #20
+    LDA #NESPHP_NES_ATTR
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     RTS
@@ -1940,6 +2458,76 @@ cmp_emit_op_const1:
     LDA TMP2
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
+    RTS
+
+; -----------------------------------------------------------------------------
+; cmp_emit_incdec_discard: PRE/POST INC/DEC、result_type = IS_UNUSED
+;   入力: A = opcode (ZEND_PRE_INC / PRE_DEC / POST_INC / POST_DEC)
+;         CMP_INCDEC_SLOT = CV slot
+; -----------------------------------------------------------------------------
+cmp_emit_incdec_discard:
+    STA TMP2
+    JSR cmp_op24_zero
+    LDX CMP_INCDEC_SLOT
+    JSR cmp_lit_idx_to_offset
+    LDY #0
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA #IS_CV
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA TMP2
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; cmp_emit_incdec_tmp: PRE/POST INC/DEC、result = 新 TMP、CMP_EXPR = TMP
+;   入力: A = opcode、CMP_INCDEC_SLOT = CV slot
+cmp_emit_incdec_tmp:
+    STA TMP2
+    JSR cmp_op24_zero
+    LDX CMP_INCDEC_SLOT
+    JSR cmp_lit_idx_to_offset
+    LDY #0
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA #IS_CV
+    STA (CMP_OP_HEAD), Y
+    ; result = 新 TMP
+    LDX CMP_TMP_COUNT
+    CPX #64
+    BCC :+
+    JMP cmp_error
+:
+    JSR cmp_lit_idx_to_offset
+    LDY #8
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #23
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA TMP2
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    INC CMP_TMP_COUNT
     RTS
 
 ; =============================================================================

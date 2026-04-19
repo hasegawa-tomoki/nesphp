@@ -202,12 +202,15 @@ CMP_ARG_COUNT:    .res 1    ; 関数呼び出しの現在引数数 (0..4)
 CMP_ARG_LITS:     .res 8    ; 引数 operand 値 (4 引数 × 2B、byte i*2 = arg[i] lo, i*2+1 = hi)
 CMP_ARG_TYPES:    .res 4    ; 引数の operand 型 (IS_CONST / IS_CV / IS_TMP_VAR / ARG_STDIN_SENTINEL)
 CMP_ASSIGN_SLOT:  .res 1    ; assign_stmt 実行中の LHS CV slot
+CMP_INCDEC_SLOT:  .res 1    ; PRE/POST INC/DEC の対象 CV slot (ネスト対応で ASSIGN とは別)
 CMP_EXPR_TYPE:    .res 1    ; parse_primary/expr の結果 operand type
 CMP_EXPR_VAL:     .res 2    ; parse_primary/expr の結果 operand 値 (16bit)
 CMP_LHS_TYPE:     .res 1    ; 二項演算の左オペランド type (一時退避)
 CMP_LHS_VAL:      .res 2    ; 二項演算の左オペランド 値
 CMP_BP_TOP:       .res 1    ; backpatch stack pointer (0..8)
 CMP_BP_STACK:     .res 16   ; backpatch stack: 8 エントリ × 2B (patch 対象の PRG-RAM アドレス)
+CMP_FOR_LOOP_TOP:  .res 2   ; for: loop_top op_index (cond の先頭)
+CMP_FOR_UPD_START: .res 2   ; for: update 部の先頭 op_index
 
 ; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
 ;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT
