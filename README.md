@@ -56,7 +56,7 @@ L3 (host-compile) のオラクルが欲しいときは `make build/foo.host.ops.
 | カテゴリ | 対応 |
 |---|---|
 | 整数リテラル | 10 進 / 16 進 `0x..` / 2 進 `0b..`、16bit 符号付き narrow (`-32768..32767`) |
-| 文字列 | **ROM 内イミュータブル**のみ (リテラル)。連結 (`.`) は未対応、non-ASCII byte は pass through |
+| 文字列 | double-quoted リテラルのみ、連結 (`.`) 未対応。non-ASCII byte pass through + `\xHH` / `\\` / `\"` エスケープ対応。decoded 結果は PRG-RAM pool ($7800-$7FFF) に置く |
 | 変数 | CV / TMP / VAR スロット、`$a = ...` / `$a = $b + 1` |
 | 算術 | `+` / `-` |
 | ビット | `&` / `\|` / `<<` / `>>` (16bit、`>>` は算術右シフト) |
@@ -140,6 +140,7 @@ while (true) {
 | [`examples/comments.php`](./examples/comments.php) | `//` `#` `/* */` すべて通る | コメント parser |
 | [`examples/bintest.php`](./examples/bintest.php) | 2 進 / 16 進 / 10 進混在 + `&` `\|` | `0b..`, `0x..`, ビット演算 |
 | [`examples/logtest.php`](./examples/logtest.php) | `&&` `\|\|` `<<` `>>` の挙動確認 | 短絡評価、シフト |
+| [`examples/strescape.php`](./examples/strescape.php) | `"\xHH"` / `"\\"` / `"\""` エスケープの動作確認 | 任意 byte 埋込 (日本語タイル index 等) |
 | [`examples/button.php`](./examples/button.php) | 押したボタン文字を表示 (blocking) | `fgets(STDIN)` |
 | [`examples/poll.php`](./examples/poll.php) | 十字キーで `X` を 60fps 連続移動 | `nes_vsync` + `nes_btn` + `&` |
 | [`examples/move.php`](./examples/move.php) | 十字キーで `X` をタイル単位移動 | `nes_put`, `===` |

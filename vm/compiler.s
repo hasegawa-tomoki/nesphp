@@ -110,6 +110,10 @@ cmp_init:
     STA CMP_LIT_HEAD
     LDA #>CMP_LIT_STAGE
     STA CMP_LIT_HEAD+1
+    LDA #<STR_POOL_BASE
+    STA CMP_STRPOOL_HEAD
+    LDA #>STR_POOL_BASE
+    STA CMP_STRPOOL_HEAD+1
     LDA #0
     STA CMP_OP_COUNT
     STA CMP_OP_COUNT+1
@@ -1692,13 +1696,25 @@ cln_cv_done:
     STA CMP_TOK_KIND
     RTS
 
+; cln_string: 文字列リテラルを lex。
+;   - 開始 `"` を消費
+;   - 内容は常に STR_POOL_BASE 以降の pool へ bytewise に decode して書く
+;     (escape なしの普通の文字もコピー)。cpp_str が zval から参照するため、
+;     TOK_PTR は pool 上のこの文字列の先頭を指す。
+;   - 対応エスケープ:
+;       \xHH  → 1 byte (HH は hex 2 桁、大小文字 OK)
+;       \\    → '\'
+;       \"    → '"'
+;     それ以外の `\` に続く文字は compile error
+;   - pool overflow ($8000 以上) も compile error
 cln_string:
-    JSR cmp_advance1
-    LDA CMP_SRC_PTR
+    JSR cmp_advance1                ; consume opening "
+    ; TOK_PTR = 現在の pool head (この文字列の先頭)
+    LDA CMP_STRPOOL_HEAD
     STA CMP_TOK_PTR
-    LDA CMP_SRC_PTR+1
+    LDA CMP_STRPOOL_HEAD+1
     STA CMP_TOK_PTR+1
-    LDX #0
+    LDX #0                          ; decoded byte count
 cln_str_loop:
     JSR cmp_at_eof
     BNE :+
@@ -1708,17 +1724,126 @@ cln_str_loop:
     LDA (CMP_SRC_PTR), Y
     CMP #'"'
     BEQ cln_str_end
+    CMP #'\'
+    BEQ cln_str_escape
+    ; plain byte: write-through to pool
+    JSR cln_str_pool_put            ; preserves X
     JSR cmp_advance1
     INX
     CPX #$FF
     BCC cln_str_loop
     JMP cmp_error
+
+cln_str_escape:
+    JSR cmp_advance1                ; skip '\'
+    JSR cmp_at_eof
+    BNE :+
+    JMP cmp_error
+:
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'x'
+    BEQ cln_str_hex
+    CMP #'X'
+    BEQ cln_str_hex
+    CMP #'\'
+    BEQ cln_str_lit_bs
+    CMP #'"'
+    BEQ cln_str_lit_dq
+    JMP cmp_error                   ; unknown escape
+
+cln_str_lit_bs:
+    JSR cmp_advance1
+    LDA #'\'
+    JSR cln_str_pool_put
+    INX
+    CPX #$FF
+    BCC cln_str_loop
+    JMP cmp_error
+
+cln_str_lit_dq:
+    JSR cmp_advance1
+    LDA #'"'
+    JSR cln_str_pool_put
+    INX
+    CPX #$FF
+    BCC cln_str_loop
+    JMP cmp_error
+
+cln_str_hex:
+    JSR cmp_advance1                ; skip 'x'
+    JSR cln_str_read_hex2           ; A = decoded byte
+    JSR cln_str_pool_put
+    INX
+    CPX #$FF
+    BCC cln_str_loop
+    JMP cmp_error
+
 cln_str_end:
     STX CMP_TOK_LEN
-    JSR cmp_advance1
+    JSR cmp_advance1                ; consume closing "
     LDA #TK_STRING
     STA CMP_TOK_KIND
     RTS
+
+; cln_str_pool_put: A を *CMP_STRPOOL_HEAD++ に書く。overflow で cmp_error。
+; X は保存する (caller のカウンタ)。Y は 0 に潰す。A は clobber。
+cln_str_pool_put:
+    LDY #0
+    STA (CMP_STRPOOL_HEAD), Y
+    INC CMP_STRPOOL_HEAD
+    BNE :+
+    INC CMP_STRPOOL_HEAD+1
+:
+    LDA CMP_STRPOOL_HEAD+1
+    CMP #>STR_POOL_END
+    BCC :+
+    JMP cmp_error                   ; pool overflow
+:
+    RTS
+
+; cln_str_read_hex2: SRC_PTR 位置から 2 桁の hex を読み、A = decoded byte にして
+; SRC_PTR を 2 進める。失敗で cmp_error。X は保存する。
+; ハイニブルをスタックに退避してヘルパー間で TMP を汚染しない。
+cln_str_read_hex2:
+    JSR cmp_at_eof
+    BNE :+
+    JMP cmp_error
+:
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    JSR hex_digit
+    BCC :+
+    JMP cmp_error
+:
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    PHA                             ; save high nibble
+    JSR cmp_advance1
+    JSR cmp_at_eof
+    BNE :+
+    JMP cmp_error_pop1
+:
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    JSR hex_digit
+    BCC :+
+    JMP cmp_error_pop1
+:
+    STA CMP_TOK_VALUE               ; 一時置場 (STRING token 中 TK_INT の value 枠は未使用)
+    PLA
+    ORA CMP_TOK_VALUE
+    PHA
+    JSR cmp_advance1
+    PLA
+    RTS
+
+; stack を 1 調整してから cmp_error へ飛ぶ補助 (中断時の leak 回避)
+cmp_error_pop1:
+    PLA
+    JMP cmp_error
 
 cln_int:
     LDA #0

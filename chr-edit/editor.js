@@ -271,7 +271,12 @@ tileGrid.addEventListener('click', (e) => {
   const tx = Math.floor(x / tileWH);
   const ty = Math.floor(y / tileWH);
   if (tx < 0 || tx > 15 || ty < 0 || ty > 15) return;
-  state.tile = ty * 16 + tx;
+  const tileIdx = ty * 16 + tx;
+  state.tile = tileIdx;
+  if (strExport.active) {
+    strExport.seq.push(tileIdx);
+    renderStrExport();
+  }
   renderTileGrid();
   renderTileEditor();
 });
@@ -497,11 +502,21 @@ function parseBdf(text) {
         i++;
       }
       if (encoding >= 0 && bits.length > 0) {
-        // Vertical alignment: put glyph top at top of 8×8 tile (simple policy).
-        // For Misaki (FONTBOUNDINGBOX 8 8 0 -1), this produces a faithful render.
+        // Vertical alignment: baseline-aware. For Misaki 8×8 (FONTBOUNDINGBOX
+        // 8 8 0 -1, ascent=7, descent=1), baseline sits at tile row 6.
+        // Glyph bottom row is placed at (baselineRow - bbxYoff); glyph top row
+        // is then (bottom - h + 1). This matches the font designer's intent
+        // and makes short glyphs (exclamation, hiragana etc.) sit on the
+        // baseline rather than floating at the top of the tile.
         const glyph = new Uint8Array(8);
         const h = Math.min(bits.length, 8);
-        for (let y = 0; y < h; y++) glyph[y] = bits[y] & 0xFF;
+        const ascent = Math.max(1, Math.min(8, fbbHeight + fbbYoff));
+        const baselineRow = ascent - 1;
+        const topRow = baselineRow - bbxYoff - h + 1;
+        for (let y = 0; y < h; y++) {
+          const ty = topRow + y;
+          if (ty >= 0 && ty < 8) glyph[ty] = bits[y] & 0xFF;
+        }
         map.set(encoding, glyph);
       }
     }
@@ -627,6 +642,157 @@ window.addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape') {
     const modal = document.getElementById('textWriteModal');
     if (modal.style.display === 'flex') closeWriteModal();
+  }
+});
+
+// --- String export (tile index sequence → PHP nes_puts) ---
+const strExport = {
+  active: false,
+  seq: [],   // tile indices in click order; "newline" is represented as -1
+};
+
+function strExportStart() {
+  strExport.active = true;
+  strExport.seq = [];
+  document.getElementById('strExportStartBtn').disabled = true;
+  document.getElementById('strExportFinishBtn').disabled = false;
+  document.getElementById('strExportCancelBtn').disabled = false;
+  renderStrExport();
+  setStatus('エクスポートモード: Tile Grid をクリックして文字を並べる (スペースキーで改行)');
+}
+
+function strExportReset() {
+  strExport.active = false;
+  strExport.seq = [];
+  document.getElementById('strExportStartBtn').disabled = false;
+  document.getElementById('strExportFinishBtn').disabled = true;
+  document.getElementById('strExportCancelBtn').disabled = true;
+  renderStrExport();
+}
+
+function strExportCancel() {
+  strExportReset();
+  setStatus('文字列エクスポートをキャンセル');
+}
+
+async function strExportFinish() {
+  if (strExport.seq.length === 0) {
+    setStatus('タイルが 1 つも選択されていません', true);
+    return;
+  }
+  const php = buildStrExportPhp();
+  const count = strExport.seq.length;
+  try {
+    await navigator.clipboard.writeText(php);
+    strExportReset();
+    setStatus(`PHP コード (${count} tile 分) をクリップボードにコピー`);
+  } catch (e) {
+    setStatus('clipboard 書き込みに失敗: ' + e.message, true);
+  }
+}
+
+function buildStrExportPhp() {
+  const x = parseInt(document.getElementById('strExportX').value, 10) || 0;
+  const y = parseInt(document.getElementById('strExportY').value, 10) || 0;
+  // Split seq on -1 (newline) into groups; each group → one nes_puts call on
+  // an incrementing y.
+  const groups = [[]];
+  for (const t of strExport.seq) {
+    if (t === -1) groups.push([]);
+    else groups[groups.length - 1].push(t);
+  }
+  const lines = [];
+  let yy = y;
+  for (const g of groups) {
+    if (g.length === 0) { yy++; continue; }
+    const escaped = g.map((t) => '\\x' + t.toString(16).toUpperCase().padStart(2, '0')).join('');
+    lines.push(`nes_puts(${x}, ${yy}, "${escaped}");`);
+    yy++;
+  }
+  return lines.join('\n');
+}
+
+function renderStrExport() {
+  const prev = document.getElementById('strExportPreview');
+  const hexEl = document.getElementById('strExportHex');
+  const php = document.getElementById('strExportPhp');
+  const ctx = prev.getContext('2d');
+  const PREV_SCALE = 2;          // 1 tile = 16×16 px in preview
+  const TILE_PX = 8 * PREV_SCALE; // 16
+  const ROW_TILES = 32;          // NES nametable row width (matches canvas 512px / 16)
+
+  // Compute number of rows needed
+  let rows = 1;
+  let col = 0;
+  for (const t of strExport.seq) {
+    if (t === -1) { rows++; col = 0; continue; }
+    col++;
+    if (col >= ROW_TILES) { col = 0; rows++; }
+  }
+  prev.height = Math.max(TILE_PX, rows * TILE_PX);
+
+  // Clear (width assignment is a reset; but we only need to clear if canvas
+  // height was just changed — set size then fill)
+  ctx.fillStyle = nesRgbCss(state.bgColor);
+  ctx.fillRect(0, 0, prev.width, prev.height);
+
+  // Draw tiles
+  let r = 0, c = 0;
+  for (const t of strExport.seq) {
+    if (t === -1) { r++; c = 0; continue; }
+    const px0 = c * TILE_PX;
+    const py0 = r * TILE_PX;
+    for (let y = 0; y < 8; y++) {
+      for (let x = 0; x < 8; x++) {
+        const ci = getPixel(state.bank, state.table, t, x, y);
+        ctx.fillStyle = nesRgbCss(resolveColor(ci));
+        ctx.fillRect(px0 + x * PREV_SCALE, py0 + y * PREV_SCALE, PREV_SCALE, PREV_SCALE);
+      }
+    }
+    c++;
+    if (c >= ROW_TILES) { c = 0; r++; }
+  }
+
+  // Hex labels (one line per row, compact)
+  if (strExport.seq.length === 0) {
+    hexEl.textContent = strExport.active ? '(Tile Grid をクリックで追加)' : '';
+  } else {
+    const parts = [];
+    let buf = [];
+    for (const t of strExport.seq) {
+      if (t === -1) { parts.push(buf.join(' ')); buf = []; continue; }
+      buf.push('$' + t.toString(16).toUpperCase().padStart(2, '0'));
+    }
+    parts.push(buf.join(' '));
+    hexEl.textContent = parts.join(' / ');
+  }
+
+  php.textContent = strExport.seq.length ? buildStrExportPhp() : '';
+}
+
+document.getElementById('strExportStartBtn').addEventListener('click', strExportStart);
+document.getElementById('strExportFinishBtn').addEventListener('click', strExportFinish);
+document.getElementById('strExportCancelBtn').addEventListener('click', strExportCancel);
+
+// Space key: insert newline marker while in export mode
+window.addEventListener('keydown', (e) => {
+  if (!strExport.active) return;
+  if (document.activeElement.tagName === 'INPUT' ||
+      document.activeElement.tagName === 'TEXTAREA') return;
+  if (e.key === ' ') {
+    e.preventDefault();
+    strExport.seq.push(-1);
+    renderStrExport();
+  } else if (e.key === 'Backspace') {
+    e.preventDefault();
+    strExport.seq.pop();
+    renderStrExport();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    strExportFinish();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    strExportCancel();
   }
 });
 

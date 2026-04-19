@@ -119,6 +119,13 @@ PHP_SRC_BODY = $8002
 ; 一時的な literal バッファ (コンパイル中のみ使用、後に OPS_BASE + literals_off へ memcpy)
 CMP_LIT_STAGE    = $7000
 
+; 文字列リテラル用プール: cln_string が `\xHH` エスケープを解釈して decoded bytes を
+; ここへ書き、zval は OPS_BASE 相対でこの領域を指す。staging area $7000-$77FF
+; (zval 128 entries 分) とは衝突しない $7800-$7FFF (2KB) を使う。runtime 中も
+; この領域はそのまま読み出し対象として残る。
+STR_POOL_BASE    = $7800
+STR_POOL_END     = $8000
+
 ; CV シンボル表: WRAM の $0700 以降。1 エントリ 4B ([len, name_ptr_lo, name_ptr_hi, pad])
 ; VM runtime では $0700-$07FF は予備 (spec/02-ram-layout.md)。コンパイル完了後は
 ; ハンドオフで 0 埋めする予定 (TODO)。最大 32 CV スロット (128B) 使用。
@@ -222,6 +229,7 @@ CMP_FOR_LOOP_TOP:  .res 2   ; for: loop_top op_index (cond の先頭)
 CMP_FOR_UPD_START: .res 2   ; for: update 部の先頭 op_index
 CMP_LOGIC_SLOT:    .res 1   ; &&/|| の結果を受ける TMP slot
 CMP_LOGIC_DONE:    .res 2   ; &&/|| 終端 JMP の patch 対象アドレス
+CMP_STRPOOL_HEAD:  .res 2   ; 文字列 pool の次書込アドレス (STR_POOL_BASE から成長)
 
 ; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
 ;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT

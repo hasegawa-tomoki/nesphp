@@ -152,7 +152,12 @@ args         ::= arg ("," arg)*
 arg          ::= expr | "STDIN"
 CV           ::= "$" IDENT
 INT          ::= [0-9]+ | "0" ("x"|"X") [0-9a-fA-F]+ | "0" ("b"|"B") [01]+
-STRING       ::= '"' [^"]* '"'              (エスケープ未対応、non-ASCII OK)
+STRING       ::= '"' (char | escape)* '"'
+escape       ::= "\x" hex2                  ; 任意 byte (0x00-0xFF)
+             |   "\\"                        ; リテラル `\`
+             |   "\""                        ; リテラル `"`
+hex2         ::= [0-9a-fA-F]{2}
+char         ::= [^"\\]                      (non-ASCII byte を含む)
 IDENT        ::= [a-zA-Z_] [a-zA-Z0-9_]*    (ASCII のみ)
 COMMENT      ::= "//" [^\n]* "\n"
              |   "#" [^\n]* "\n"
@@ -170,7 +175,7 @@ COMMENT      ::= "//" [^\n]* "\n"
 | `TK_FOR`   | `for` | keyword |
 | `TK_TRUE`  | `true` | keyword、`IS_TRUE` zval として emit |
 | `TK_IDENT` | `[a-zA-Z_]\w*` | キーワード以外の識別子 (関数名等) |
-| `TK_STRING`| `"..."` | val[] は ROM 内に残る、non-ASCII OK |
+| `TK_STRING`| `"..."` | 内容は decoded で PRG-RAM 内の string pool ($7800-$7FFF) に置かれ、zval は pool への OPS_BASE 相対 offset を持つ。`\xHH` / `\\` / `\"` のエスケープ対応 (それ以外の `\` で compile error)、non-ASCII byte は pass-through |
 | `TK_INT`   | `[0-9]+` / `0x..` / `0b..` | 10 進 / 16 進 / 2 進、16bit signed narrow |
 | `TK_CV`    | `$name` | compile variable |
 | `TK_SEMI` / `TK_LPAREN` / `TK_RPAREN` / `TK_COMMA` / `TK_LBRACE` / `TK_RBRACE` | `; ( ) , { }` | |
@@ -198,6 +203,7 @@ COMMENT      ::= "//" [^\n]* "\n"
 | **R2** | `nes_btn()` を 0 引数化。コントローラ状態 (下位 1B = bitmask) を IS_LONG で返す | ✅ |
 | **R3** | ビット演算子 `&` / `\|` (`ZEND_BW_AND` / `ZEND_BW_OR`)、2 進リテラル `0b..` | ✅ |
 | **S1-S4** | 論理演算 `&&` / `\|\|` (短絡評価、JMPZ/JMPNZ + QM_ASSIGN パターン)、シフト `<<` / `>>` (`ZEND_SL` / `ZEND_SR`) | ✅ |
+| **T1** | 文字列リテラルに `\xHH` / `\\` / `\"` エスケープ追加。decoded bytes を PRG-RAM pool ($7800-$7FFF) に書き zval は pool 内 offset を指す。本物の PHP 互換構文で任意 byte を埋めこめる (CHR タイル index 直接指定で非 ASCII テキストを扱うため) | ✅ |
 | 次 | `else` / `elseif`、`<=` / `>` / `>=`、単項 `-` / `!`、`^` (BW_XOR) | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | L3 方針 |
 
@@ -316,6 +322,7 @@ END:   (backpatch pop)
 ### 作業エリア
 
 - `$7000-$77FF`: コンパイル中、literal zval の一時バッファ (CMP_LIT_STAGE)。cmp_finalize で $6000 + literals_off に memcpy 後は未使用
+- `$7800-$7FFF`: 文字列 pool (STR_POOL_BASE、2KB)。cln_string が decoded bytes をここに書き、zval の IS_STRING value は pool 内アドレスを指す OPS_BASE 相対 offset (= pool_addr - $6000 = $1800+)。runtime でもそのまま読み出される (memcpy しない)
 - `$6000-$6FFF`: 最終レイアウト (header + opcodes + literals)。runtime は VM_PC / VM_LITBASE 経由で参照
 
 ### TMP0/TMP1/TMP2 の共有
@@ -328,7 +335,7 @@ END:   (backpatch pop)
 
 1. **PHP ソース先頭は `<?php` 必須**。省略はできない。タグ直後に空白類 1 文字以上が無くても OK (lexer がその後の echo / IDENT で区切る)
 2. **non-ASCII**: **文字列リテラル内とコメント内は透過的に pass through**。それ以外の位置で non-ASCII バイトが出ると NES lexer が compile error (ERR L/C 画面表示)。pack_src.php にチェックなし。文字列内の UTF-8 バイト (例: 「あ」= 3B) はタイル ID として `echo` / `nes_puts` がそのまま PPU に流すので、ユーザ側で CHR タイルを用意する
-3. **文字列は double-quoted のみ**、エスケープ (`\n` 等) 未対応
+3. **文字列は double-quoted のみ**。エスケープは `\xHH` (任意 byte)、`\\`、`\"` の 3 種だけ (`\n` 等は compile error)。decoded 結果は PRG-RAM pool ($7800-$7FFF、2KB) に溜まる。pool overflow で compile error
 4. **文字列長 ≤ 255 バイト** (現行 `CMP_TOK_LEN` が 1 バイト)。UTF-8 日本語 (1 文字 = 3B) なら ~85 文字まで
 5. **コメント対応済** (P4): `//`, `#`, `/* */`。block コメント未閉は compile error
 6. **ソース長上限 16382 バイト** (PRG bank 0 の 16KB − 2B ヘッダ)
