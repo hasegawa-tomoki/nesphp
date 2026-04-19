@@ -623,6 +623,10 @@ document.getElementById('writeTextBtn').addEventListener('click', openWriteModal
 document.getElementById('writeCloseBtn').addEventListener('click', closeWriteModal);
 document.getElementById('writeApplyBtn').addEventListener('click', applyWriteText);
 document.getElementById('writeTextInput').addEventListener('keydown', (e) => {
+  // IME 確定中 (日本語の Enter) は apply を発火させず、変換確定だけを通す。
+  // macOS Safari / Chrome / Firefox 共通: isComposing もしくは keyCode 229 が
+  // IME compose 中の keydown を示す。
+  if (e.isComposing || e.keyCode === 229) return;
   // Enter (no shift) = apply; Shift+Enter = newline
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
