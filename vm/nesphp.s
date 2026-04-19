@@ -206,6 +206,8 @@ CMP_EXPR_TYPE:    .res 1    ; parse_primary/expr の結果 operand type
 CMP_EXPR_VAL:     .res 2    ; parse_primary/expr の結果 operand 値 (16bit)
 CMP_LHS_TYPE:     .res 1    ; 二項演算の左オペランド type (一時退避)
 CMP_LHS_VAL:      .res 2    ; 二項演算の左オペランド 値
+CMP_BP_TOP:       .res 1    ; backpatch stack pointer (0..8)
+CMP_BP_STACK:     .res 16   ; backpatch stack: 8 エントリ × 2B (patch 対象の PRG-RAM アドレス)
 
 ; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
 ;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT

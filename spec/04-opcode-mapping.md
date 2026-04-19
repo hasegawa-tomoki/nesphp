@@ -13,21 +13,39 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 
 ## 対応 Zend opcode (実装済み)
 
-| Zend opcode | 番号 | 段階 | nesphp での扱い |
-|-------------|------|------|----------------|
-| `ZEND_NOP` | **0 (0x00)** | 延長4 | 何もせず PC を進める (intrinsic 畳み込みのプレースホルダ) |
-| `ZEND_ADD` | **1 (0x01)** | 延長1 | op1+op2 (IS_LONG 前提) → result。16bit 符号付き加算 |
-| `ZEND_SUB` | **2 (0x02)** | 延長1 | op1-op2 → result。16bit 符号付き減算 |
-| `ZEND_IS_IDENTICAL` | **16 (0x10)** | 延長5A | 同じ型 + 同じ値。文字列は `values_equal_content` で len + val[] content 比較 |
-| `ZEND_IS_NOT_IDENTICAL` | **17 (0x11)** | 延長5A | 否定版 |
-| `ZEND_IS_EQUAL` | **18 (0x12)** | 延長2 | `IS_IDENTICAL` と同じ実装を共用 (PHP の type juggling は未対応) |
-| `ZEND_IS_NOT_EQUAL` | **19 (0x13)** | 延長5A | 否定版 |
-| `ZEND_IS_SMALLER` | **20 (0x14)** | 延長2 | op1 < op2 (IS_LONG 符号付き 16bit)。`BVC + EOR #$80 + BMI` の標準イディオム |
-| `ZEND_ASSIGN` | **22 (0x16)** | 延長1 | op1 (IS_CV) ← op2 の値。4B tagged value をそのままコピー |
-| `ZEND_QM_ASSIGN` | **31 (0x1F)** | 延長1 | op1 → result。値コピー |
-| `ZEND_JMP` | **42 (0x2A)** | 延長2 | op1.num (op_index) に無条件分岐 |
-| `ZEND_JMPZ` | **43 (0x2B)** | 延長2 | op1 が falsy のとき op2.num に分岐 |
-| `ZEND_JMPNZ` | **44 (0x2C)** | 延長2 | op1 が truthy のとき op2.num に分岐 |
+「emit (host)」列は host-compile 経路 (serializer.php) で生成されることを示す。
+「emit (L3S)」列は on-NES コンパイラ (vm/compiler.s) で生成されるものを示す ([13-compiler](./13-compiler.md))。
+
+| Zend opcode | 番号 | emit (host) | emit (L3S) | nesphp での扱い |
+|-------------|------|:---:|:---:|----------------|
+| `ZEND_NOP` | **0 (0x00)** | ✓ | — | 何もせず PC を進める (intrinsic 畳み込みのプレースホルダ) |
+| `ZEND_ADD` | **1 (0x01)** | ✓ | ✓ (P2) | op1+op2 (IS_LONG 前提) → result。16bit 符号付き加算 |
+| `ZEND_SUB` | **2 (0x02)** | ✓ | ✓ (P2) | op1-op2 → result。16bit 符号付き減算 |
+| `ZEND_IS_IDENTICAL` | **16 (0x10)** | ✓ | ✓ (P3) | 同じ型 + 同じ値。文字列は `values_equal_content` で len + val[] content 比較 |
+| `ZEND_IS_NOT_IDENTICAL` | **17 (0x11)** | ✓ | ✓ (P3) | 否定版 |
+| `ZEND_IS_EQUAL` | **18 (0x12)** | ✓ | ✓ (P3) | `IS_IDENTICAL` と同じ実装を共用 (PHP の type juggling は未対応) |
+| `ZEND_IS_NOT_EQUAL` | **19 (0x13)** | ✓ | ✓ (P3) | 否定版 |
+| `ZEND_IS_SMALLER` | **20 (0x14)** | ✓ | ✓ (P3) | op1 < op2 (IS_LONG 符号付き 16bit)。`BVC + EOR #$80 + BMI` の標準イディオム |
+| `ZEND_ASSIGN` | **22 (0x16)** | ✓ | ✓ (P2) | op1 (IS_CV) ← op2 の値。4B tagged value をそのままコピー |
+| `ZEND_QM_ASSIGN` | **31 (0x1F)** | ✓ | — | op1 → result。値コピー |
+| `ZEND_JMP` | **42 (0x2A)** | ✓ | ✓ (P3) | op1.num (op_index) に無条件分岐 |
+| `ZEND_JMPZ` | **43 (0x2B)** | ✓ | ✓ (P3) | op1 が falsy のとき op2.num に分岐 |
+| `ZEND_JMPNZ` | **44 (0x2C)** | ✓ | — | op1 が truthy のとき op2.num に分岐 |
+| `ZEND_RETURN` | **62 (0x3E)** | ✓ | ✓ (M-A') | PPUMASK 有効化 → 無限ループ |
+| `ZEND_ECHO` | **136 (0x88)** | ✓ | ✓ (M-A') | op1 を PPU nametable に出力 |
+
+L3S で emit 対象の nesphp カスタム opcode (intrinsic 畳み込み):
+
+| Custom opcode | 番号 | emit (L3S) |
+|---|---|:---:|
+| `NESPHP_FGETS` | 0xF0 | ✓ (P1) |
+| `NESPHP_NES_PUTS` | 0xF3 | ✓ (P1) |
+| `NESPHP_NES_CLS` | 0xF4 | ✓ (P1) |
+| `NESPHP_NES_CHR_SPR` | 0xF5 | ✓ (P1) |
+| `NESPHP_NES_CHR_BG` | 0xF6 | ✓ (P1) |
+| `NESPHP_NES_BG_COLOR` | 0xF7 | ✓ (P1) |
+| `NESPHP_NES_PALETTE` | 0xF8 | ✓ (P1) |
+| `NESPHP_NES_PUT` / `NESPHP_NES_SPRITE` / `NESPHP_NES_ATTR` | 0xF1 / 0xF2 / 0xF9 | — (host のみ) |
 | `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 (forced_blanking 時) → 無限ループ |
 | `ZEND_ECHO` | **136 (0x88)** | MVP / 延長1 | op1 (IS_STRING / IS_LONG) を PPU nametable に出力。IS_LONG は `print_int16` で decimal ASCII に変換 |
 

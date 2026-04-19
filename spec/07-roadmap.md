@@ -20,6 +20,21 @@
 | 第 2 段階: 自作 Zend 拡張 | `nesphp_dump.so` | 未着手 |
 | 多スプライト対応 | — | 未着手 (現在 sprite 0 固定) |
 
+---
+
+## L3S (on-NES コンパイラ) 別系統の進捗 ([13-compiler](./13-compiler.md))
+
+2026-04 以降に新しい系統として、**PHP ソースを ROM に焼いて NES 自身が lex/parse/codegen する**構成を立ち上げた。host-compile 系統 (上記) とは独立に存在し、現在は default ビルド (`make build/X.nes`) が L3S、`make build/X.host.ops.bin` が host オラクル。
+
+| フェーズ | 内容 | 成果物 | 状態 |
+|---------|------|--------|------|
+| M-A' | lexer (`<?php` 含む) + `echo "..."` + 新文字列方式 | `hello.nes` (self-hosted) | ✅ **完了** |
+| P1 | intrinsic 6 種 + 整数リテラル + fgets 単独 | `presen.nes` | ✅ **完了** |
+| P2 | CV + assign + `+ -` + エラー画面表示 | `arith.nes` (self-hosted), `err_syntax.nes` | ✅ **完了** |
+| P3 (M-C) | `while { }` + `if { }` + 比較 `===/!==/==/!=/<` + `$k = fgets(STDIN)` + `true` + backpatch | `loop.nes`, `button.nes`, `iftest.nes` (self-hosted) | ✅ **完了** |
+| 次 | `else` / `elseif` / `<=` / `>` / `&&` / `||` / `!` / コメント | — | 未着手 |
+| 対象外 | 配列、オブジェクト、foreach、例外 | — | L3 方針 |
+
 各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。
 
 ## MVP (`echo "HELLO, NES!";` を NES で表示する)

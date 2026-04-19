@@ -24,13 +24,8 @@ if ($src === false) {
     exit(1);
 }
 
-for ($i = 0, $n = strlen($src); $i < $n; $i++) {
-    if (ord($src[$i]) > 0x7F) {
-        fwrite(STDERR, "pack_src: non-ASCII byte 0x" . dechex(ord($src[$i])) . " at offset {$i}\n");
-        exit(1);
-    }
-}
-
+// 非 ASCII バイトは pass through する (NES lexer がコメント/文字列内で透過)。
+// 外側に出てきた non-ASCII は NES 側で compile error (ERR L/C 画面表示)。
 $len = strlen($src);
 if ($len > 16382) {
     fwrite(STDERR, "pack_src: source too long ({$len}B > 16382B cap)\n");
