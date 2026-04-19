@@ -2,8 +2,8 @@
 
 PHP ソースをファミコン (6502) にそのまま持ち込み、**NES 自身がコンパイルして実行する** PHP VM。実用ではなくロマン重視。
 
-- **L3S (self-hosted)**: PHP ソースを ROM に生のまま焼き、電源 ON で 6502 が lex/parse/codegen → Zend 互換の `zend_op 24B` / `zval 16B` を PRG-RAM に emit → 既存 VM で実行
-- **L3 (host-compile) も並存**: `serializer.php` が出した L3 ROM バイナリをオラクルとして検証可能
+- **L3S (self-hosted)**: PHP ソースを ROM に生のまま焼き、電源 ON で 6502 が lex/parse/codegen → Zend 互換の `zend_op 24B` / `zval 16B` を PRG-RAM に emit → 既存 VM で実行。**`.nes` になる経路はこれだけ**
+- **L3 (host-compile) はオラクル限定**: `serializer.php` は生きており `make build/NAME.host.ops.bin` で Zend 互換 opcode バイナリを生成可能 (L3S の出力と突き合わせる検証用)。現状 `.nes` に焼く Makefile target は無く、VM ディスパッチャ部分は残っているので `.incbin` を差し替えれば復活できる状態
 - **マッパー**: MMC1 (mapper 1, SNROM 構成)、PRG 32KB + CHR 32KB (4KB × 8 bank) + WRAM 8KB
 - **動作確認**: PHP 8.4 (version lock) + cc65 + fceux/Mesen
 
@@ -45,7 +45,7 @@ make clean
 
 ホスト側でやっているのは「u16 長さを前置 + 16382B サイズ上限チェック」だけで、中身は non-ASCII も含めてそのまま pass through (文字列 / コメント内の日本語等は NES lexer が透過)。`<?php` タグも文字列リテラルも ROM に生で残り、**NES 側の `vm/compiler.s` が唯一の PHP パーサ**。
 
-L3 (host-compile) オラクルは `make build/foo.host.ops.bin` で取得可能 (L3S の出力を Zend 原本と突き合わせるとき用)。詳細: [`spec/05-toolchain.md`](./spec/05-toolchain.md) と [`spec/13-compiler.md`](./spec/13-compiler.md)。
+L3 (host-compile) のオラクルが欲しいときは `make build/foo.host.ops.bin` で Zend 互換 opcode バイナリを生成 (L3S の emit 結果と突き合わせる検証用途、`.nes` には焼かれません)。詳細: [`spec/05-toolchain.md`](./spec/05-toolchain.md) と [`spec/13-compiler.md`](./spec/13-compiler.md)。
 
 ---
 
