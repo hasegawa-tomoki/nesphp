@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>nesphp CHR Editor</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Helvetica Neue", sans-serif;
+    background: #1a1a1a;
+    color: #eaeaea;
+    margin: 0;
+    padding: 16px;
+  }
+  h1 { font-size: 18px; margin: 0 0 12px; }
+  h2 { font-size: 13px; margin: 0 0 6px; color: #9cc; font-weight: 600; }
+  .bar {
+    display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    background: #252525;
+    border-radius: 4px;
+  }
+  .bar label { font-size: 12px; }
+  .bar select, .bar button { font-size: 12px; }
+  button {
+    background: #2c5a8c;
+    border: 1px solid #4a8bc2;
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  button:hover { background: #3870a8; }
+  button.sec { background: #444; border-color: #666; }
+  button.sec:hover { background: #555; }
+  .grid-layout {
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    gap: 16px;
+    align-items: start;
+  }
+  .panel {
+    background: #252525;
+    padding: 12px;
+    border-radius: 4px;
+  }
+  canvas { image-rendering: pixelated; display: block; background: #000; }
+  #tileGrid { cursor: pointer; }
+  #tileEditor { cursor: crosshair; }
+  .tile-info {
+    font-size: 11px; color: #aaa; margin-top: 4px; font-family: monospace;
+  }
+  .palette-row {
+    display: flex; gap: 4px; margin-bottom: 6px; align-items: center;
+  }
+  .palette-row-label {
+    width: 70px; font-size: 11px; color: #aaa;
+  }
+  .pal-cell {
+    width: 28px; height: 28px;
+    border: 2px solid #444;
+    cursor: pointer;
+    position: relative;
+  }
+  .pal-cell.selected { border-color: #ff0; }
+  .pal-cell .label {
+    position: absolute;
+    bottom: -14px; left: 0; right: 0;
+    text-align: center;
+    font-size: 9px; font-family: monospace;
+    color: #888;
+  }
+  #nesPalette {
+    display: grid;
+    grid-template-columns: repeat(16, 22px);
+    gap: 2px;
+    margin-top: 8px;
+  }
+  #nesPalette .swatch {
+    width: 22px; height: 22px;
+    border: 1px solid #333;
+    cursor: pointer;
+    position: relative;
+  }
+  #nesPalette .swatch:hover { outline: 2px solid #fff; }
+  #nesPalette .swatch .hex {
+    position: absolute;
+    bottom: -12px; left: 50%; transform: translateX(-50%);
+    font-size: 8px; font-family: monospace; color: #888;
+    white-space: nowrap;
+  }
+  .color-slot-row {
+    display: flex; gap: 8px; margin-top: 8px;
+    padding: 8px; background: #1e1e1e; border-radius: 3px;
+    flex-wrap: wrap;
+  }
+  .color-slot {
+    width: 38px; height: 38px;
+    border: 3px solid #555;
+    cursor: pointer;
+    position: relative;
+    border-radius: 3px;
+  }
+  .color-slot.active { border-color: #fc0; }
+  .color-slot .num {
+    position: absolute;
+    top: -3px; left: 2px;
+    font-size: 11px; font-family: monospace;
+    color: #fff;
+    text-shadow: 1px 1px 0 #000, -1px -1px 0 #000;
+    font-weight: bold;
+  }
+  .export-panel {
+    margin-top: 16px;
+    padding: 12px;
+    background: #252525;
+    border-radius: 4px;
+  }
+  .export-panel .row {
+    display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
+  }
+  #status {
+    font-size: 11px; color: #8c8;
+    margin-top: 8px;
+    font-family: monospace;
+    min-height: 1em;
+  }
+  #status.err { color: #f88; }
+  .hint {
+    font-size: 11px; color: #888; margin-top: 4px;
+  }
+  .tile-nav-row {
+    display: flex; gap: 8px; align-items: center; margin-top: 8px;
+  }
+  .tile-nav-row input {
+    background: #111; color: #eee;
+    border: 1px solid #444;
+    padding: 4px 6px;
+    width: 56px;
+    font-family: monospace;
+  }
+  details { margin-top: 8px; }
+  summary { cursor: pointer; font-size: 12px; color: #9cc; }
+</style>
+</head>
+<body>
+<h1>nesphp CHR Editor</h1>
+
+<div class="bar">
+  <label>Bank:
+    <select id="bankSel">
+      <option value="0">0</option>
+      <option value="1">1</option>
+      <option value="2">2</option>
+      <option value="3">3</option>
+    </select>
+  </label>
+  <label>Pattern Table:
+    <select id="tableSel">
+      <option value="0">0 ($0000)</option>
+      <option value="1">1 ($1000)</option>
+    </select>
+  </label>
+  <button id="loadChrBtn" class="sec">Load font.chr...</button>
+  <input type="file" id="loadChrInput" accept=".chr,application/octet-stream" style="display:none">
+  <button id="downloadChrBtn" class="sec">Download font.chr</button>
+  <button id="clearBankBtn" class="sec">Clear current bank</button>
+  <button id="copyFromBankBtn" class="sec">Copy bank 0 → all</button>
+</div>
+
+<div class="grid-layout">
+
+  <div class="panel">
+    <h2>Tile Grid (256 tiles)</h2>
+    <canvas id="tileGrid" width="384" height="384"></canvas>
+    <div class="tile-info">
+      Selected: tile <span id="tileIdLabel">$00</span>
+    </div>
+    <div class="tile-nav-row">
+      <label style="font-size:11px">Goto (hex):</label>
+      <input id="gotoInput" value="00" maxlength="2">
+      <button id="gotoBtn" class="sec">Go</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Tile Editor (left click: paint, right click: color 0)</h2>
+    <canvas id="tileEditor" width="320" height="320"></canvas>
+    <div class="color-slot-row">
+      <div class="color-slot active" data-idx="0"><div class="num">0</div></div>
+      <div class="color-slot" data-idx="1"><div class="num">1</div></div>
+      <div class="color-slot" data-idx="2"><div class="num">2</div></div>
+      <div class="color-slot" data-idx="3"><div class="num">3</div></div>
+    </div>
+    <div class="hint">active = 左クリックで塗る色。0 はパレット透過 (bg)</div>
+  </div>
+
+  <div class="panel">
+    <h2>Palettes</h2>
+    <div id="paletteList"></div>
+    <h2 style="margin-top:12px">NES Color ($00-$3F)</h2>
+    <div id="nesPalette"></div>
+    <div class="hint">上のパレットセルを選ぶ → 下のセル列から色をクリック</div>
+    <details>
+      <summary>palette PHP snippet</summary>
+      <pre id="palettePhp" style="background:#111;padding:8px;border-radius:3px;font-size:11px;margin-top:6px;"></pre>
+      <button id="copyPaletteBtn" class="sec" style="margin-top:4px">Copy PHP snippet</button>
+    </details>
+  </div>
+
+</div>
+
+<div class="export-panel">
+  <h2>Export</h2>
+  <div class="row">
+    <button id="copyPhpBtn">Copy make_font.php to clipboard</button>
+    <button id="downloadPhpBtn">Download make_font.php</button>
+  </div>
+  <div class="hint">生成された make_font.php を <code>chr/make_font.php</code> に保存し <code>php chr/make_font.php</code> で <code>chr/font.chr</code> が更新されます。</div>
+  <div id="status"></div>
+</div>
+
+<script src="editor.js"></script>
+</body>
+</html>
