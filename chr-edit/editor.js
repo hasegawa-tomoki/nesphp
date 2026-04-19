@@ -546,6 +546,7 @@ function hydrateBdf(text, filename, isAutoRestore) {
     const map = parseBdf(text);
     state.bdfMap = map;
     document.getElementById('writeTextBtn').disabled = false;
+    document.getElementById('installAsciiBtn').disabled = false;
     document.getElementById('bdfStatus').textContent = `BDF: ${map.size} glyphs`;
     const forgetBtn = document.getElementById('forgetBdfBtn');
     if (forgetBtn) forgetBtn.style.display = '';
@@ -589,6 +590,7 @@ function forgetBdf() {
   } catch (e) { /* ignore */ }
   state.bdfMap = null;
   document.getElementById('writeTextBtn').disabled = true;
+  document.getElementById('installAsciiBtn').disabled = true;
   document.getElementById('bdfStatus').textContent = '';
   const forgetBtn = document.getElementById('forgetBdfBtn');
   if (forgetBtn) forgetBtn.style.display = 'none';
@@ -597,6 +599,28 @@ function forgetBdf() {
 
 const forgetBdfBtn = document.getElementById('forgetBdfBtn');
 if (forgetBdfBtn) forgetBdfBtn.addEventListener('click', forgetBdf);
+
+// ASCII 0x20-0x7E の glyph を対応するタイル index (= codepoint) に一括コピー。
+// 現在の bank / pattern table に書く。writeGlyphToTile は bp1=0 なので 1-bit で
+// 書き込まれるため、color 1 で表示される。
+document.getElementById('installAsciiBtn').addEventListener('click', () => {
+  if (!state.bdfMap) return;
+  if (!confirm('ASCII 0x20-0x7E (95 タイル) を BDF グリフで上書きします。よろしいですか？')) return;
+  let written = 0, missing = 0;
+  for (let cp = 0x20; cp <= 0x7E; cp++) {
+    const glyph = state.bdfMap.get(cp);
+    if (glyph) {
+      writeGlyphToTile(state.bank, state.table, cp, glyph);
+      written++;
+    } else {
+      missing++;
+    }
+  }
+  renderTileGrid();
+  renderTileEditor();
+  setStatus(`ASCII 一括配置 (bank ${state.bank}, table ${state.table}): ${written} 文字書込` +
+            (missing ? `、${missing} 文字は BDF に無し` : ''));
+});
 
 function openWriteModal() {
   if (!state.bdfMap) return;

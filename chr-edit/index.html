@@ -172,10 +172,13 @@
   <button id="downloadChrBtn">Download font.chr</button>
   <button id="clearBankBtn">Clear current bank</button>
   <button id="copyFromBankBtn">Copy bank 0 → all</button>
-  <span style="margin-left:auto;color:#666;font-size:11px">|</span>
+</div>
+
+<div class="bar">
   <button id="loadBdfBtn">Load 8x8 BDF...</button>
   <input type="file" id="loadBdfInput" accept=".bdf,text/plain" style="display:none">
   <button id="writeTextBtn" disabled>Write BDF text (T)</button>
+  <button id="installAsciiBtn" disabled title="ASCII 0x20-0x7E のタイルを BDF グリフで一括上書き">Install ASCII</button>
   <span id="bdfStatus" style="font-size:11px;color:#8a8;"></span>
   <button id="forgetBdfBtn" title="保存済み BDF を削除"
           style="display:none;padding:2px 6px;font-size:11px;background:transparent;border:1px solid #555;color:#aaa;">×</button>
