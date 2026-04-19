@@ -7,6 +7,9 @@ const BANK_SIZE = 8192;
 const TABLE_SIZE = 4096;
 const TILE_SIZE = 16;
 
+const BDF_STORAGE_KEY_TEXT = 'chrEdit.bdf.text';
+const BDF_STORAGE_KEY_NAME = 'chrEdit.bdf.name';
+
 // --- NES 64-color palette (2C02) RGB lookup ---
 const NES_RGB = [
   [0x52,0x52,0x52],[0x01,0x1A,0x51],[0x0F,0x0F,0x65],[0x23,0x06,0x63],
@@ -535,6 +538,29 @@ function writeGlyphToTile(bank, table, tile, glyph8) {
   }
 }
 
+// BDF テキストを parse して state に反映。isAutoRestore が true の場合は
+// localStorage からの復元と判定して status メッセージを変える。成功で true、
+// parse 失敗で false を返す。
+function hydrateBdf(text, filename, isAutoRestore) {
+  try {
+    const map = parseBdf(text);
+    state.bdfMap = map;
+    document.getElementById('writeTextBtn').disabled = false;
+    document.getElementById('bdfStatus').textContent = `BDF: ${map.size} glyphs`;
+    const forgetBtn = document.getElementById('forgetBdfBtn');
+    if (forgetBtn) forgetBtn.style.display = '';
+    if (isAutoRestore) {
+      setStatus(`BDF 自動復元: ${filename} (${map.size} glyphs)`);
+    } else {
+      setStatus(`BDF 読込: ${filename} (${map.size} glyphs)`);
+    }
+    return true;
+  } catch (err) {
+    setStatus('BDF parse error: ' + err.message, true);
+    return false;
+  }
+}
+
 document.getElementById('loadBdfBtn').addEventListener('click', () => {
   document.getElementById('loadBdfInput').click();
 });
@@ -543,18 +569,34 @@ document.getElementById('loadBdfInput').addEventListener('change', (e) => {
   if (!file) return;
   const reader = new FileReader();
   reader.onload = () => {
-    try {
-      const map = parseBdf(reader.result);
-      state.bdfMap = map;
-      document.getElementById('writeTextBtn').disabled = false;
-      document.getElementById('bdfStatus').textContent = `BDF: ${map.size} glyphs`;
-      setStatus(`BDF 読込: ${file.name} (${map.size} glyphs)`);
-    } catch (err) {
-      setStatus('BDF parse error: ' + err.message, true);
+    if (hydrateBdf(reader.result, file.name, false)) {
+      try {
+        localStorage.setItem(BDF_STORAGE_KEY_TEXT, reader.result);
+        localStorage.setItem(BDF_STORAGE_KEY_NAME, file.name);
+      } catch (err) {
+        // QuotaExceeded / SecurityError (Safari private mode 等) は無視して続行
+        console.warn('localStorage save failed:', err.message);
+      }
     }
   };
   reader.readAsText(file);
 });
+
+function forgetBdf() {
+  try {
+    localStorage.removeItem(BDF_STORAGE_KEY_TEXT);
+    localStorage.removeItem(BDF_STORAGE_KEY_NAME);
+  } catch (e) { /* ignore */ }
+  state.bdfMap = null;
+  document.getElementById('writeTextBtn').disabled = true;
+  document.getElementById('bdfStatus').textContent = '';
+  const forgetBtn = document.getElementById('forgetBdfBtn');
+  if (forgetBtn) forgetBtn.style.display = 'none';
+  setStatus('保存済 BDF を削除しました');
+}
+
+const forgetBdfBtn = document.getElementById('forgetBdfBtn');
+if (forgetBdfBtn) forgetBdfBtn.addEventListener('click', forgetBdf);
 
 function openWriteModal() {
   if (!state.bdfMap) return;
@@ -812,3 +854,24 @@ renderColorSlots();
 renderTileGrid();
 renderTileEditor();
 setStatus('空の CHR で開始。既存を編集するなら [Load font.chr...] でロード');
+
+// Auto-restore BDF from localStorage (if any). Degrades silently when storage
+// is unavailable (Safari private mode) or when saved data fails to parse.
+(function restoreBdfFromStorage() {
+  let savedText = null;
+  let savedName = '(unknown)';
+  try {
+    savedText = localStorage.getItem(BDF_STORAGE_KEY_TEXT);
+    savedName = localStorage.getItem(BDF_STORAGE_KEY_NAME) || savedName;
+  } catch (e) {
+    return;   // storage unavailable, skip restore
+  }
+  if (!savedText) return;
+  if (!hydrateBdf(savedText, savedName, true)) {
+    // corrupt cache, clean up
+    try {
+      localStorage.removeItem(BDF_STORAGE_KEY_TEXT);
+      localStorage.removeItem(BDF_STORAGE_KEY_NAME);
+    } catch (e) { /* ignore */ }
+  }
+})();
