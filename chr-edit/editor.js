@@ -547,6 +547,7 @@ function hydrateBdf(text, filename, isAutoRestore) {
     state.bdfMap = map;
     document.getElementById('writeTextBtn').disabled = false;
     document.getElementById('installAsciiBtn').disabled = false;
+    document.getElementById('installAsciiFwBtn').disabled = false;
     document.getElementById('bdfStatus').textContent = `BDF: ${map.size} glyphs`;
     const forgetBtn = document.getElementById('forgetBdfBtn');
     if (forgetBtn) forgetBtn.style.display = '';
@@ -591,6 +592,7 @@ function forgetBdf() {
   state.bdfMap = null;
   document.getElementById('writeTextBtn').disabled = true;
   document.getElementById('installAsciiBtn').disabled = true;
+  document.getElementById('installAsciiFwBtn').disabled = true;
   document.getElementById('bdfStatus').textContent = '';
   const forgetBtn = document.getElementById('forgetBdfBtn');
   if (forgetBtn) forgetBtn.style.display = 'none';
@@ -600,15 +602,22 @@ function forgetBdf() {
 const forgetBdfBtn = document.getElementById('forgetBdfBtn');
 if (forgetBdfBtn) forgetBdfBtn.addEventListener('click', forgetBdf);
 
-// ASCII 0x20-0x7E の glyph を対応するタイル index (= codepoint) に一括コピー。
-// 現在の bank / pattern table に書く。writeGlyphToTile は bp1=0 なので 1-bit で
-// 書き込まれるため、color 1 で表示される。
-document.getElementById('installAsciiBtn').addEventListener('click', () => {
+// ASCII 0x20-0x7E に対応する glyph を各タイル index に一括コピー。
+// fullWidth=false の場合は半角 ASCII (U+0020-U+007E) をそのまま参照。
+// fullWidth=true の場合は全角 ASCII にマップ: 0x20 → U+3000 (ideographic space)、
+// 0x21-0x7E → U+FF01-U+FF5E (fullwidth ASCII、オフセット +0xFEE0)。
+// どちらのモードも「タイル index は ASCII のまま」で書き込むので、PHP 側から
+// `echo "ABC";` (半角) と書いても、全角モードの CHR なら全角で描画される。
+function installAsciiTiles(fullWidth) {
   if (!state.bdfMap) return;
-  if (!confirm('ASCII 0x20-0x7E (95 タイル) を BDF グリフで上書きします。よろしいですか？')) return;
+  const label = fullWidth ? 'ASCII 全角' : 'ASCII 半角';
+  if (!confirm(`${label} 0x20-0x7E (95 タイル) を BDF グリフで上書きします。よろしいですか？`)) return;
   let written = 0, missing = 0;
   for (let cp = 0x20; cp <= 0x7E; cp++) {
-    const glyph = state.bdfMap.get(cp);
+    const lookupCp = fullWidth
+      ? (cp === 0x20 ? 0x3000 : cp + 0xFEE0)
+      : cp;
+    const glyph = state.bdfMap.get(lookupCp);
     if (glyph) {
       writeGlyphToTile(state.bank, state.table, cp, glyph);
       written++;
@@ -618,9 +627,12 @@ document.getElementById('installAsciiBtn').addEventListener('click', () => {
   }
   renderTileGrid();
   renderTileEditor();
-  setStatus(`ASCII 一括配置 (bank ${state.bank}, table ${state.table}): ${written} 文字書込` +
+  setStatus(`${label} 一括配置 (bank ${state.bank}, table ${state.table}): ${written} 文字書込` +
             (missing ? `、${missing} 文字は BDF に無し` : ''));
-});
+}
+
+document.getElementById('installAsciiBtn').addEventListener('click', () => installAsciiTiles(false));
+document.getElementById('installAsciiFwBtn').addEventListener('click', () => installAsciiTiles(true));
 
 function openWriteModal() {
   if (!state.bdfMap) return;
