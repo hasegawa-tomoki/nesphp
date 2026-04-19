@@ -21,6 +21,8 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 | `ZEND_NOP` | **0 (0x00)** | ✓ | — | 何もせず PC を進める (intrinsic 畳み込みのプレースホルダ) |
 | `ZEND_ADD` | **1 (0x01)** | ✓ | ✓ (P2) | op1+op2 (IS_LONG 前提) → result。16bit 符号付き加算 |
 | `ZEND_SUB` | **2 (0x02)** | ✓ | ✓ (P2) | op1-op2 → result。16bit 符号付き減算 |
+| `ZEND_SL` | **6 (0x06)** | ✓ | ✓ (S1) | op1 << op2 → result。16bit 論理左シフト |
+| `ZEND_SR` | **7 (0x07)** | ✓ | ✓ (S1) | op1 >> op2 → result。16bit 算術右シフト (符号保持) |
 | `ZEND_BW_OR` | **9 (0x09)** | ✓ | ✓ (R3) | op1 \| op2 → result。16bit bitwise OR (IS_LONG) |
 | `ZEND_BW_AND` | **10 (0x0A)** | ✓ | ✓ (R3) | op1 & op2 → result。16bit bitwise AND (IS_LONG) |
 | `ZEND_IS_IDENTICAL` | **16 (0x10)** | ✓ | ✓ (P3) | 同じ型 + 同じ値。文字列は `values_equal_content` で len + val[] content 比較 |

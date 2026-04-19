@@ -54,6 +54,10 @@ TK_DEC     = 24
 TK_FOR     = 25
 TK_AMP     = 26
 TK_PIPE    = 27
+TK_AMPAMP  = 28
+TK_PIPEPIPE = 29
+TK_SL      = 30
+TK_SR      = 31
 
 ; --- Intrinsic ID ---
 INT_CLS       = 0
@@ -807,11 +811,149 @@ cpa_expr:
     RTS
 
 ; =============================================================================
-; parse_expr: add_expr (cmp_op add_expr)?
-; parse_add: primary (+/- primary)*
-; parse_primary: INT | STRING | CV | TRUE | fgets(...)
+; parse_expr: 式のトップレベル、logic_expr = cmp_expr (&&|||cmp_expr)*
+; parse_cmp_expr: add_expr (cmp_op add_expr)?
+; parse_add_expr: primary (+/-/&/|/<</>> primary)*
+; parse_primary: INT | STRING | CV | TRUE | fgets(...) | nes_btn() | ++/-- etc.
 ; =============================================================================
 cmp_parse_expr:
+    JSR cmp_parse_cmp_expr
+cle_loop:
+    LDA CMP_TOK_KIND
+    CMP #TK_AMPAMP
+    BNE :+
+    JMP cle_andand
+:
+    CMP #TK_PIPEPIPE
+    BNE :+
+    JMP cle_oror
+:
+    RTS
+
+; --- && 短絡評価 (両 operand truthy なら 1、一つでも falsy なら 0) ---
+cle_andand:
+    JSR cmp_reserve_logic_slot
+    LDA #ZEND_JMPZ
+    JSR cmp_emit_jmpxx_with_bp       ; bp1: a → L_false
+    JSR cmp_lex_next                 ; consume '&&'
+    JSR cmp_parse_cmp_expr           ; RHS
+    LDA #ZEND_JMPZ
+    JSR cmp_emit_jmpxx_with_bp       ; bp2: b → L_false
+    LDA #1
+    JSR cmp_emit_qm_assign_const_slot ; slot = 1
+    JSR cmp_emit_jmp_save_done        ; JMP → L_done
+    JSR cmp_bp_pop_patch             ; bp2 → current (L_false)
+    JSR cmp_bp_pop_patch             ; bp1 → current
+    LDA #0
+    JSR cmp_emit_qm_assign_const_slot ; slot = 0
+    JSR cmp_patch_logic_done          ; L_done
+    JSR cmp_expr_set_to_logic_slot
+    JMP cle_loop
+
+; --- || 短絡評価 (どちらか truthy なら 1、両 falsy なら 0) ---
+cle_oror:
+    JSR cmp_reserve_logic_slot
+    LDA #ZEND_JMPNZ
+    JSR cmp_emit_jmpxx_with_bp       ; bp1: a → L_true
+    JSR cmp_lex_next
+    JSR cmp_parse_cmp_expr
+    LDA #ZEND_JMPNZ
+    JSR cmp_emit_jmpxx_with_bp       ; bp2: b → L_true
+    LDA #0
+    JSR cmp_emit_qm_assign_const_slot ; slot = 0 (両 falsy)
+    JSR cmp_emit_jmp_save_done
+    JSR cmp_bp_pop_patch
+    JSR cmp_bp_pop_patch
+    LDA #1
+    JSR cmp_emit_qm_assign_const_slot
+    JSR cmp_patch_logic_done
+    JSR cmp_expr_set_to_logic_slot
+    JMP cle_loop
+
+; --- 共通ヘルパー ---
+cmp_reserve_logic_slot:
+    LDA CMP_TMP_COUNT
+    STA CMP_LOGIC_SLOT
+    CMP #64
+    BCC :+
+    JMP cmp_error
+:
+    INC CMP_TMP_COUNT
+    RTS
+
+cmp_emit_jmp_save_done:
+    JSR cmp_op24_zero
+    LDY #20
+    LDA #ZEND_JMP
+    STA (CMP_OP_HEAD), Y
+    LDA CMP_OP_HEAD
+    STA CMP_LOGIC_DONE
+    LDA CMP_OP_HEAD+1
+    STA CMP_LOGIC_DONE+1
+    JSR cmp_op_finish
+    RTS
+
+cmp_patch_logic_done:
+    LDA CMP_LOGIC_DONE
+    STA TMP0
+    LDA CMP_LOGIC_DONE+1
+    STA TMP0+1
+    LDY #0
+    LDA CMP_OP_COUNT
+    STA (TMP0), Y
+    INY
+    LDA CMP_OP_COUNT+1
+    STA (TMP0), Y
+    RTS
+
+; QM_ASSIGN literal(A) → CMP_LOGIC_SLOT (IS_TMP_VAR)
+cmp_emit_qm_assign_const_slot:
+    STA CMP_TOK_VALUE
+    LDA #0
+    STA CMP_TOK_VALUE+1
+    JSR cmp_emit_zval_long_value     ; TMP1 = lit_idx
+    JSR cmp_op24_zero
+    LDX TMP1
+    JSR cmp_lit_idx_to_offset
+    LDY #0
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA #IS_CONST
+    STA (CMP_OP_HEAD), Y
+    LDX CMP_LOGIC_SLOT
+    JSR cmp_lit_idx_to_offset
+    LDY #8
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #23
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_QM_ASSIGN
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+cmp_expr_set_to_logic_slot:
+    LDX CMP_LOGIC_SLOT
+    JSR cmp_lit_idx_to_offset
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    RTS
+
+; --- 旧 cmp_parse_expr の本体を cmp_parse_cmp_expr にリネーム ---
+cmp_parse_cmp_expr:
     JSR cmp_parse_add_expr
     LDA CMP_TOK_KIND
     CMP #TK_EQ3
@@ -874,8 +1016,18 @@ cpa_loop:
     JMP cpa_binop
 :
     CMP #TK_PIPE
-    BNE cpa_done
+    BNE :+
     LDA #ZEND_BW_OR
+    JMP cpa_binop
+:
+    CMP #TK_SL
+    BNE :+
+    LDA #ZEND_SL
+    JMP cpa_binop
+:
+    CMP #TK_SR
+    BNE cpa_done
+    LDA #ZEND_SR
 cpa_binop:
     STA CMP_INTRINSIC_ID
     LDA CMP_EXPR_TYPE
@@ -1281,6 +1433,10 @@ cln_not_eof:
     BNE :+
     JMP cln_lt
 :
+    CMP #'>'
+    BNE :+
+    JMP cln_gt
+:
     CMP #'{'
     BNE :+
     JMP cln_lbrace
@@ -1338,8 +1494,37 @@ cln_comma:
     STA CMP_TOK_KIND
     RTS
 cln_lt:
-    JSR cmp_advance1
+    JSR cmp_advance1                ; 最初の '<'
+    JSR cmp_at_eof
+    BEQ cln_lt_single
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'<'
+    BNE cln_lt_single
+    JSR cmp_advance1                ; '<<'
+    LDA #TK_SL
+    STA CMP_TOK_KIND
+    RTS
+cln_lt_single:
     LDA #TK_LT
+    STA CMP_TOK_KIND
+    RTS
+
+; '>' 単体は比較演算として未対応 (エラー)。'>>' のみ TK_SR として emit。
+cln_gt:
+    JSR cmp_advance1
+    JSR cmp_at_eof
+    BNE :+
+    JMP cmp_error
+:
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'>'
+    BEQ :+
+    JMP cmp_error                    ; `>` 単独は未対応
+:
+    JSR cmp_advance1                 ; '>>'
+    LDA #TK_SR
     STA CMP_TOK_KIND
     RTS
 cln_lbrace:
@@ -1386,7 +1571,7 @@ cln_minus_one:
     STA CMP_TOK_KIND
     RTS
 
-; ビット演算 &: 2 個連続 (&&) は未対応 (compile error)
+; ビット AND `&` / 論理 AND `&&`
 cln_amp:
     JSR cmp_advance1
     JSR cmp_at_eof
@@ -1395,13 +1580,16 @@ cln_amp:
     LDA (CMP_SRC_PTR), Y
     CMP #'&'
     BNE cln_amp_single
-    JMP cmp_error                   ; && 未対応
+    JSR cmp_advance1
+    LDA #TK_AMPAMP
+    STA CMP_TOK_KIND
+    RTS
 cln_amp_single:
     LDA #TK_AMP
     STA CMP_TOK_KIND
     RTS
 
-; ビット演算 |: 2 個連続 (||) は未対応
+; ビット OR `|` / 論理 OR `||`
 cln_pipe:
     JSR cmp_advance1
     JSR cmp_at_eof
@@ -1410,7 +1598,10 @@ cln_pipe:
     LDA (CMP_SRC_PTR), Y
     CMP #'|'
     BNE cln_pipe_single
-    JMP cmp_error                   ; || 未対応
+    JSR cmp_advance1
+    LDA #TK_PIPEPIPE
+    STA CMP_TOK_KIND
+    RTS
 cln_pipe_single:
     LDA #TK_PIPE
     STA CMP_TOK_KIND

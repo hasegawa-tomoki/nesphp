@@ -140,9 +140,10 @@ for_stmt     ::= "for" "(" init? ";" cond? ";" update? ")" body
 init         ::= assign_stmt body (without trailing ';' consumption) | inc_stmt | …
 update       ::= expr                       (side-effect: $i++, --$j, etc.)
 body         ::= "{" stmt* "}" | stmt      (single stmt 許可)
-expr         ::= add_expr (cmp_op add_expr)?
+expr         ::= cmp_expr (("&&" | "||") cmp_expr)*
+cmp_expr     ::= add_expr (cmp_op add_expr)?
 cmp_op       ::= "===" | "!==" | "==" | "!=" | "<"
-add_expr     ::= primary (("+" | "-" | "&" | "|") primary)*
+add_expr     ::= primary (("+" | "-" | "&" | "|" | "<<" | ">>") primary)*
 primary      ::= INT | STRING | CV | "true" | call_expr
              |   ("++" | "--") CV           (prefix inc/dec in expr)
              |   CV ("++" | "--")           (postfix inc/dec in expr)
@@ -179,7 +180,9 @@ COMMENT      ::= "//" [^\n]* "\n"
 | `TK_LT` | `<` | |
 | `TK_EQ2` / `TK_EQ3` | `==` / `===` | lexer が `=` の後ろを lookahead |
 | `TK_NEQ2` / `TK_NEQ3` | `!=` / `!==` | `!` 単独はエラー |
-| `TK_AMP` / `TK_PIPE` | `&` / `\|` | bitwise AND / OR。`&&` / `\|\|` (論理演算) は未対応 |
+| `TK_AMP` / `TK_PIPE` | `&` / `\|` | bitwise AND / OR |
+| `TK_AMPAMP` / `TK_PIPEPIPE` | `&&` / `\|\|` | **論理 AND / OR (短絡評価)**。両オペランドを bool に正規化して 0/1 を返す |
+| `TK_SL` / `TK_SR` | `<<` / `>>` | 16bit 論理左 / 算術右シフト。単体 `>` は未対応でエラー |
 
 ### マイルストーン進行
 
@@ -194,7 +197,8 @@ COMMENT      ::= "//" [^\n]* "\n"
 | **R1** | リアルタイム入力: `nes_vsync()` (VBlank 同期 + sprite_mode 自動有効化) | ✅ |
 | **R2** | `nes_btn()` を 0 引数化。コントローラ状態 (下位 1B = bitmask) を IS_LONG で返す | ✅ |
 | **R3** | ビット演算子 `&` / `\|` (`ZEND_BW_AND` / `ZEND_BW_OR`)、2 進リテラル `0b..` | ✅ |
-| 次 | `else` / `elseif`、`<=` / `>` / `>=`、`&&` / `\|\|` / `!`、単項 `-`、`^` (BW_XOR)、`<<` `>>` (SL/SR) | 未着手 |
+| **S1-S4** | 論理演算 `&&` / `\|\|` (短絡評価、JMPZ/JMPNZ + QM_ASSIGN パターン)、シフト `<<` / `>>` (`ZEND_SL` / `ZEND_SR`) | ✅ |
+| 次 | `else` / `elseif`、`<=` / `>` / `>=`、単項 `-` / `!`、`^` (BW_XOR) | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | L3 方針 |
 
 ### 数値リテラル
@@ -231,6 +235,8 @@ $i = 0; while ($i < 10) { $i = $i + 1; }
 | `$x = expr;` | `ZEND_ASSIGN` (op1 = CV, op2 = expr result) |
 | `$a + $b` / `$a - $b` | `ZEND_ADD` / `ZEND_SUB` (result = 新 TMP) |
 | `$a & $b` / `$a \| $b` | `ZEND_BW_AND` / `ZEND_BW_OR` (result = 新 TMP、IS_LONG) |
+| `$a << $b` / `$a >> $b` | `ZEND_SL` / `ZEND_SR` (result = 新 TMP、16bit シフト) |
+| `$a && $b` / `$a \|\| $b` | JMPZ/JMPNZ + QM_ASSIGN + JMP による短絡評価。result = 新 TMP (IS_LONG 0 or 1)。5 opcode emit/演算子 |
 | `$a === $b` etc. | `ZEND_IS_IDENTICAL` / `ZEND_IS_NOT_IDENTICAL` / `ZEND_IS_EQUAL` / `ZEND_IS_NOT_EQUAL` / `ZEND_IS_SMALLER` (result = 新 TMP) |
 | `$x++;` / `$x--;` (stmt) | `ZEND_POST_INC` / `ZEND_POST_DEC` result_type = IS_UNUSED |
 | `++$x;` / `--$x;` (stmt) | `ZEND_PRE_INC` / `ZEND_PRE_DEC` result_type = IS_UNUSED |
@@ -329,12 +335,13 @@ END:   (backpatch pop)
 7. **PRG-RAM 8KB** がコンパイル出力の上限 (opcode + literal zval、文字列は ROM 常駐)
 8. **CV 最大 32 スロット**、**TMP 最大 64 スロット**、**関数引数 ≤ 4**、**関数呼出ネスト無し** (call expr は `fgets` / `nes_btn` のみ)
 9. **比較式は非連鎖** (`$a < $b < $c` は compile error)
-10. **`else` / `elseif` 未対応**、**`&&` `||` `!` / 単項 `-` 未対応**、**`<=` `>` `>=` 未対応**、**`^` (BW_XOR) / `<<` `>>` (SL/SR) 未対応**
+10. **`else` / `elseif` 未対応**、**`!` / 単項 `-` 未対応**、**`<=` `>` `>=` 未対応**、**`^` (BW_XOR) 未対応**
 11. **if / while / for のボディ**: `{ ... }` または単文どちらも可
 12. **ネスト深さ**: backpatch stack 8 段、6502 HW stack 256B (for ネスト 1 段で 4B 消費)、CV table 32 エントリ
 13. **対応 intrinsic** (合計 12 種): `nes_cls` / `nes_put` / `nes_puts` / `nes_sprite` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn`
 14. **整数リテラル**: 10 進 (`42`)、16 進 (`0xFF` / `0X0A`)、2 進 (`0b1010` / `0B11`)。16bit signed narrow、overflow 検出なし
-15. **ビット演算**: `&` (BW_AND) と `|` (BW_OR) のみ。`^` や `<<` `>>` は未対応
+15. **ビット演算**: `&` (BW_AND) / `|` (BW_OR) / `<<` (SL) / `>>` (SR、算術右シフト = 符号保持)。`^` (BW_XOR) / `~` (BW_NOT) は未対応
+16. **論理演算**: `&&` / `||` は短絡評価、結果は 0 or 1 の IS_LONG。`!` (NOT) は未対応
 
 ---
 

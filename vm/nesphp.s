@@ -19,6 +19,8 @@
 ZEND_NOP              = 0
 ZEND_ADD              = 1
 ZEND_SUB              = 2
+ZEND_SL               = 6
+ZEND_SR               = 7
 ZEND_BW_OR            = 9
 ZEND_BW_AND           = 10
 ZEND_IS_IDENTICAL     = 16
@@ -218,6 +220,8 @@ CMP_BP_TOP:       .res 1    ; backpatch stack pointer (0..8)
 CMP_BP_STACK:     .res 16   ; backpatch stack: 8 エントリ × 2B (patch 対象の PRG-RAM アドレス)
 CMP_FOR_LOOP_TOP:  .res 2   ; for: loop_top op_index (cond の先頭)
 CMP_FOR_UPD_START: .res 2   ; for: update 部の先頭 op_index
+CMP_LOGIC_SLOT:    .res 1   ; &&/|| の結果を受ける TMP slot
+CMP_LOGIC_DONE:    .res 2   ; &&/|| 終端 JMP の patch 対象アドレス
 
 ; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
 ;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT
@@ -516,6 +520,14 @@ main_loop:
     CMP #ZEND_BW_OR
     BNE :+
     JMP handle_zend_bw_or
+:
+    CMP #ZEND_SL
+    BNE :+
+    JMP handle_zend_sl
+:
+    CMP #ZEND_SR
+    BNE :+
+    JMP handle_zend_sr
 :
     CMP #ZEND_QM_ASSIGN
     BNE :+
@@ -1131,6 +1143,69 @@ handle_zend_bw_or:
     JMP advance
 
 bw_type_err:
+    JMP handle_unimpl
+
+; -----------------------------------------------------------------------------
+; ZEND_SL: result = op1 << op2 (16bit logical shift left)
+; ZEND_SR: result = op1 >> op2 (16bit arithmetic shift right、符号保持)
+;   op2 は下位 1B をシフト量として使う (0..15 を想定、大きいと全 0 / -1 にしかならない)
+; -----------------------------------------------------------------------------
+handle_zend_sl:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE sh_type_err
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE sh_type_err
+    LDA OP1_VAL+1
+    STA RESULT_VAL+1
+    LDA OP1_VAL+2
+    STA RESULT_VAL+2
+    LDX OP2_VAL+1
+sl_loop:
+    CPX #0
+    BEQ sh_done
+    ASL RESULT_VAL+1
+    ROL RESULT_VAL+2
+    DEX
+    JMP sl_loop
+
+handle_zend_sr:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE sh_type_err
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE sh_type_err
+    LDA OP1_VAL+1
+    STA RESULT_VAL+1
+    LDA OP1_VAL+2
+    STA RESULT_VAL+2
+    LDX OP2_VAL+1
+sr_loop:
+    CPX #0
+    BEQ sh_done
+    ; arithmetic shift right: high byte bit 0 → C、bit 7 は符号保持 (C=sign 前処理で)
+    LDA RESULT_VAL+2
+    CMP #$80             ; C = sign bit (1 なら負)
+    ROR RESULT_VAL+2     ; new bit 7 = 旧 C (sign 保持)
+    ROR RESULT_VAL+1     ; new bit 7 = 上位 bit 0
+    DEX
+    JMP sr_loop
+
+sh_done:
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+sh_type_err:
     JMP handle_unimpl
 
 ; -----------------------------------------------------------------------------
