@@ -121,12 +121,17 @@
     display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
   }
   #status {
-    font-size: 11px; color: #8c8;
-    margin-top: 8px;
+    padding: 6px 12px;
+    margin-bottom: 12px;
+    background: #1e1e1e;
+    border-radius: 4px;
+    border-left: 3px solid #2c5a8c;
     font-family: monospace;
-    min-height: 1em;
+    font-size: 11px;
+    color: #8c8;
+    min-height: 1.6em;
   }
-  #status.err { color: #f88; }
+  #status.err { color: #f88; border-left-color: #c43; }
   .hint {
     font-size: 11px; color: #888; margin-top: 4px;
   }
@@ -173,6 +178,8 @@
   <button id="writeTextBtn" class="sec" disabled>Write BDF text (T)</button>
   <span id="bdfStatus" style="font-size:11px;color:#8a8;"></span>
 </div>
+
+<div id="status"></div>
 
 <div id="textWriteModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center;">
   <div style="background:#252525;padding:20px;border-radius:6px;min-width:420px;max-width:560px;border:1px solid #555;">
@@ -241,7 +248,6 @@
     <button id="downloadPhpBtn">Download make_font.php</button>
   </div>
   <div class="hint">生成された make_font.php を <code>chr/make_font.php</code> に保存し <code>php chr/make_font.php</code> で <code>chr/font.chr</code> が更新されます。</div>
-  <div id="status"></div>
 </div>
 
 <div class="export-panel">
