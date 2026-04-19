@@ -24,16 +24,17 @@
   .bar label { font-size: 12px; }
   .bar select, .bar button { font-size: 12px; }
   button {
-    background: #2c5a8c;
-    border: 1px solid #4a8bc2;
+    background: #444;
+    border: 1px solid #666;
     color: #fff;
     padding: 6px 10px;
     border-radius: 3px;
     cursor: pointer;
   }
-  button:hover { background: #3870a8; }
-  button.sec { background: #444; border-color: #666; }
-  button.sec:hover { background: #555; }
+  button:hover { background: #555; }
+  button.primary { background: #2c5a8c; border-color: #4a8bc2; }
+  button.primary:hover { background: #3870a8; }
+  button:disabled { opacity: 0.55; cursor: default; }
   .grid-layout {
     display: grid;
     grid-template-columns: auto auto 1fr;
@@ -167,15 +168,15 @@
       <option value="1">1 ($1000)</option>
     </select>
   </label>
-  <button id="loadChrBtn" class="sec">Load font.chr...</button>
+  <button id="loadChrBtn">Load font.chr...</button>
   <input type="file" id="loadChrInput" accept=".chr,application/octet-stream" style="display:none">
-  <button id="downloadChrBtn" class="sec">Download font.chr</button>
-  <button id="clearBankBtn" class="sec">Clear current bank</button>
-  <button id="copyFromBankBtn" class="sec">Copy bank 0 → all</button>
+  <button id="downloadChrBtn">Download font.chr</button>
+  <button id="clearBankBtn">Clear current bank</button>
+  <button id="copyFromBankBtn">Copy bank 0 → all</button>
   <span style="margin-left:auto;color:#666;font-size:11px">|</span>
-  <button id="loadBdfBtn" class="sec">Load 8x8 BDF...</button>
+  <button id="loadBdfBtn">Load 8x8 BDF...</button>
   <input type="file" id="loadBdfInput" accept=".bdf,text/plain" style="display:none">
-  <button id="writeTextBtn" class="sec" disabled>Write BDF text (T)</button>
+  <button id="writeTextBtn" disabled>Write BDF text (T)</button>
   <span id="bdfStatus" style="font-size:11px;color:#8a8;"></span>
 </div>
 
@@ -193,7 +194,7 @@
               style="width:100%;height:80px;background:#111;color:#eee;border:1px solid #444;font-size:13px;padding:8px;font-family:monospace;"></textarea>
     <div class="hint">改行 = 次行の同じ開始列から再開。グリッド末端 (タイル $FF) で停止。未登録グリフは空白タイルで埋める。</div>
     <div style="display:flex;gap:8px;margin-top:12px;justify-content:flex-end;">
-      <button id="writeCloseBtn" class="sec">Close (Esc)</button>
+      <button id="writeCloseBtn">Close (Esc)</button>
       <button id="writeApplyBtn">Write at cursor (Enter)</button>
     </div>
   </div>
@@ -210,7 +211,7 @@
     <div class="tile-nav-row">
       <label style="font-size:11px">Goto (hex):</label>
       <input id="gotoInput" value="00" maxlength="2">
-      <button id="gotoBtn" class="sec">Go</button>
+      <button id="gotoBtn">Go</button>
     </div>
   </div>
 
@@ -235,7 +236,7 @@
     <details>
       <summary>palette PHP snippet</summary>
       <pre id="palettePhp" style="background:#111;padding:8px;border-radius:3px;font-size:11px;margin-top:6px;"></pre>
-      <button id="copyPaletteBtn" class="sec" style="margin-top:4px">Copy PHP snippet</button>
+      <button id="copyPaletteBtn" style="margin-top:4px">Copy PHP snippet</button>
     </details>
   </div>
 
@@ -253,9 +254,9 @@
 <div class="export-panel">
   <h2>Export: 文字列 PHP コード (tile index 列 → <code>nes_puts</code>)</h2>
   <div class="row">
-    <button id="strExportStartBtn">文字列エクスポート 開始</button>
-    <button id="strExportFinishBtn" class="sec" disabled>Finish → コピー</button>
-    <button id="strExportCancelBtn" class="sec" disabled>Cancel</button>
+    <button id="strExportStartBtn">文字列エクスポート</button>
+    <button id="strExportFinishBtn" disabled>コピー</button>
+    <button id="strExportCancelBtn" disabled>Cancel</button>
     <label style="font-size:11px">start x:
       <input id="strExportX" type="number" min="0" max="31" value="10" style="width:48px;background:#111;color:#eee;border:1px solid #444;padding:2px 4px;">
     </label>

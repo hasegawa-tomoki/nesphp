@@ -656,7 +656,9 @@ const strExport = {
 function strExportStart() {
   strExport.active = true;
   strExport.seq = [];
-  document.getElementById('strExportStartBtn').disabled = true;
+  const startBtn = document.getElementById('strExportStartBtn');
+  startBtn.disabled = true;
+  startBtn.classList.add('primary');
   document.getElementById('strExportFinishBtn').disabled = false;
   document.getElementById('strExportCancelBtn').disabled = false;
   renderStrExport();
@@ -666,7 +668,9 @@ function strExportStart() {
 function strExportReset() {
   strExport.active = false;
   strExport.seq = [];
-  document.getElementById('strExportStartBtn').disabled = false;
+  const startBtn = document.getElementById('strExportStartBtn');
+  startBtn.disabled = false;
+  startBtn.classList.remove('primary');
   document.getElementById('strExportFinishBtn').disabled = true;
   document.getElementById('strExportCancelBtn').disabled = true;
   renderStrExport();
@@ -686,8 +690,7 @@ async function strExportFinish() {
   const count = strExport.seq.length;
   try {
     await navigator.clipboard.writeText(php);
-    strExportReset();
-    setStatus(`PHP コード (${count} tile 分) をクリップボードにコピー`);
+    setStatus(`PHP コード (${count} tile 分) をクリップボードにコピー — 続けて選択可 / Cancel で終了`);
   } catch (e) {
     setStatus('clipboard 書き込みに失敗: ' + e.message, true);
   }
