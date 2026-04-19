@@ -49,6 +49,7 @@ const state = {
   bgColor: 0x0F,   // shared universal BG (NES $3F00)
   paletteIdx: 0,
   colorIdx: 1,     // paint color slot selection (0..3)
+  misakiMap: null, // Map<codepoint, Uint8Array(8)> once BDF loaded
 };
 
 // --- Tile data access ---
@@ -449,6 +450,185 @@ function setStatus(msg, isErr) {
   el.textContent = msg;
   el.classList.toggle('err', !!isErr);
 }
+
+// --- Misaki BDF loading + text writing ---
+// BDF glyph bitmap rows are MSB-aligned within each byte, same as NES CHR bp0.
+// For glyphs wider than 8 we take only the leftmost byte; for shorter heights
+// we top-align within the 8×8 tile and zero-pad the rest.
+function parseBdf(text) {
+  const map = new Map();
+  const lines = text.split(/\r?\n/);
+  let i = 0;
+  let fbbHeight = 8;
+  let fbbYoff = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (line.startsWith('FONTBOUNDINGBOX')) {
+      const p = line.split(/\s+/);
+      // FONTBOUNDINGBOX w h xoff yoff
+      if (p.length >= 5) {
+        fbbHeight = parseInt(p[2], 10) || 8;
+        fbbYoff = parseInt(p[4], 10) || 0;
+      }
+    } else if (line.startsWith('STARTCHAR')) {
+      let encoding = -1;
+      let bbxH = fbbHeight;
+      let bbxYoff = fbbYoff;
+      let bits = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith('ENDCHAR')) {
+        const ln = lines[i];
+        if (ln.startsWith('ENCODING ')) {
+          encoding = parseInt(ln.substring(9).trim(), 10);
+        } else if (ln.startsWith('BBX ')) {
+          const p = ln.substring(4).trim().split(/\s+/).map(Number);
+          // BBX w h xoff yoff
+          bbxH = p[1] || fbbHeight;
+          bbxYoff = p[3] || 0;
+        } else if (ln === 'BITMAP') {
+          i++;
+          while (i < lines.length && !lines[i].startsWith('ENDCHAR')) {
+            const hex = lines[i].trim();
+            if (hex.length >= 2) bits.push(parseInt(hex.substring(0, 2), 16));
+            i++;
+          }
+          break;
+        }
+        i++;
+      }
+      if (encoding >= 0 && bits.length > 0) {
+        // Vertical alignment: put glyph top at top of 8×8 tile (simple policy).
+        // For Misaki (FONTBOUNDINGBOX 8 8 0 -1), this produces a faithful render.
+        const glyph = new Uint8Array(8);
+        const h = Math.min(bits.length, 8);
+        for (let y = 0; y < h; y++) glyph[y] = bits[y] & 0xFF;
+        map.set(encoding, glyph);
+      }
+    }
+    i++;
+  }
+  return map;
+}
+
+function writeGlyphToTile(bank, table, tile, glyph8) {
+  const base = tileOffset(bank, table, tile);
+  for (let y = 0; y < 8; y++) {
+    state.chr[base + y] = glyph8[y];
+    state.chr[base + 8 + y] = 0;  // bp1 = 0 (1-bit glyph)
+  }
+}
+
+document.getElementById('loadMisakiBtn').addEventListener('click', () => {
+  document.getElementById('loadMisakiInput').click();
+});
+document.getElementById('loadMisakiInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const map = parseBdf(reader.result);
+      state.misakiMap = map;
+      document.getElementById('writeTextBtn').disabled = false;
+      document.getElementById('misakiStatus').textContent = `Misaki: ${map.size} glyphs`;
+      setStatus(`BDF 読込: ${file.name} (${map.size} glyphs)`);
+    } catch (err) {
+      setStatus('BDF parse error: ' + err.message, true);
+    }
+  };
+  reader.readAsText(file);
+});
+
+function openWriteModal() {
+  if (!state.misakiMap) return;
+  const modal = document.getElementById('textWriteModal');
+  modal.style.display = 'flex';
+  document.getElementById('writeStartLabel').textContent =
+    '$' + state.tile.toString(16).toUpperCase().padStart(2, '0');
+  document.getElementById('writeBankLabel').textContent = state.bank;
+  document.getElementById('writeTableLabel').textContent = state.table;
+  const ta = document.getElementById('writeTextInput');
+  ta.focus();
+  ta.select();
+}
+function closeWriteModal() {
+  document.getElementById('textWriteModal').style.display = 'none';
+}
+
+function applyWriteText() {
+  const ta = document.getElementById('writeTextInput');
+  const text = ta.value;
+  if (!text) { closeWriteModal(); return; }
+  if (!state.misakiMap) return;
+
+  const startCol = state.tile & 0x0F;
+  let col = startCol;
+  let row = state.tile >> 4;
+  let written = 0;
+  let missing = 0;
+
+  for (const ch of text) {
+    if (row > 15) break;
+    const cp = ch.codePointAt(0);
+    if (ch === '\n') {
+      row++;
+      col = startCol;
+      continue;
+    }
+    if (cp === 0x0D) continue;  // ignore CR
+    const tile = row * 16 + col;
+    if (tile > 0xFF) break;
+    const glyph = state.misakiMap.get(cp);
+    if (glyph) {
+      writeGlyphToTile(state.bank, state.table, tile, glyph);
+      written++;
+    } else {
+      // fill with blank tile (zeros) so advancing is visible
+      writeGlyphToTile(state.bank, state.table, tile, new Uint8Array(8));
+      missing++;
+    }
+    col++;
+    if (col > 15) { col = 0; row++; }
+  }
+
+  // Move cursor to next position after written text (clamped within grid)
+  if (row > 15) row = 15;
+  state.tile = (row * 16 + col) & 0xFF;
+
+  renderTileGrid();
+  renderTileEditor();
+  const msg = `${written} 文字を書込、${missing} 文字は未登録 (空白で埋め)`;
+  setStatus(msg);
+  closeWriteModal();
+}
+
+document.getElementById('writeTextBtn').addEventListener('click', openWriteModal);
+document.getElementById('writeCloseBtn').addEventListener('click', closeWriteModal);
+document.getElementById('writeApplyBtn').addEventListener('click', applyWriteText);
+document.getElementById('writeTextInput').addEventListener('keydown', (e) => {
+  // Enter (no shift) = apply; Shift+Enter = newline
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    applyWriteText();
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeWriteModal();
+  }
+});
+window.addEventListener('keydown', (e) => {
+  // 'T' opens write modal when not typing in another field
+  if ((e.key === 't' || e.key === 'T') &&
+      document.activeElement.tagName !== 'TEXTAREA' &&
+      document.activeElement.tagName !== 'INPUT') {
+    if (!document.getElementById('writeTextBtn').disabled) {
+      e.preventDefault();
+      openWriteModal();
+    }
+  } else if (e.key === 'Escape') {
+    const modal = document.getElementById('textWriteModal');
+    if (modal.style.display === 'flex') closeWriteModal();
+  }
+});
 
 // --- Init ---
 renderNesPalette();
