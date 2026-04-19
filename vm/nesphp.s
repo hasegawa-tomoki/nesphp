@@ -101,22 +101,22 @@ OPS_FIRST_OP = $6010
 ; PHP ソースのカートリッジ上の位置 (MMC1 PRG bank 0, $8000-$BFFF)。
 ; pack_src.php が出した src.bin のレイアウト:
 ;   $8000  u16 src_len
-;   $8002  u16 pool_off   zend_string プールまでの byte offset
-;   $8004  u16 pool_count
-;   $8006  u16 (reserved)
-;   $8008  ASCII src body
-;   ...    (pad to 4-align)
-;   $8000+pool_off  zend_string プール (Zend 互換 24B header + content + null の連結)
+;   $8002+ ASCII src body (生 PHP ソース、<?php タグ含む)
 ;
-; zend_string は ROM-resident のまま使う。VM は value.str フィールドに書かれた
-; OPS_BASE 相対 16bit offset を ADC OPS_BASE で復元する (16bit wraparound により
-; $8XXX-$BFFF 帯のアドレスを正しく指せる)。
+; 文字列リテラルは PHP ソース内の `"..."` バイト列をそのまま val[] として使う
+; (zend_string 構造体は持たない)。コンパイラは 16B zval の value bytes 0-1 に
+; OPS_BASE 相対 16bit offset、bytes 2-3 に length を書く。VM は
+; `ADC #<OPS_BASE` で復元した ROM アドレスから len バイト読む。
 PHP_SRC_LEN  = $8000
-PHP_POOL_OFF = $8002
-PHP_SRC_BODY = $8008
+PHP_SRC_BODY = $8002
 
 ; 一時的な literal バッファ (コンパイル中のみ使用、後に OPS_BASE + literals_off へ memcpy)
 CMP_LIT_STAGE    = $7000
+
+; CV シンボル表: WRAM の $0700 以降。1 エントリ 4B ([len, name_ptr_lo, name_ptr_hi, pad])
+; VM runtime では $0700-$07FF は予備 (spec/02-ram-layout.md)。コンパイル完了後は
+; ハンドオフで 0 埋めする予定 (TODO)。最大 32 CV スロット (128B) 使用。
+CMP_CV_TABLE     = $0700
 
 ; op_array ヘッダ (spec/01-rom-format.md)
 HDR_NUM_OPS        = OPS_BASE + 0
@@ -183,16 +183,29 @@ sprite_mode_on: .res 1
 
 ; --- On-NES コンパイラ状態 (compile_and_emit 実行中のみ valid) ---
 ; コンパイル完了後は全て未使用。以降 reset が WRAM を既読のまま VM に引き渡す。
-CMP_SRC_PTR:     .res 2    ; ソース現在位置 (PHP_SRC_BODY..)
-CMP_SRC_END:     .res 2    ; ソース終端 (one-past-last)
-CMP_POOL_CURSOR: .res 2    ; 次に参照する ROM 内 zend_string の絶対 CPU アドレス
-CMP_OP_HEAD:     .res 2    ; 次に zend_op を書く PRG-RAM アドレス
-CMP_LIT_HEAD:    .res 2    ; 次に zval を書く PRG-RAM アドレス (CMP_LIT_STAGE から成長)
+CMP_SRC_PTR:      .res 2    ; ソース現在位置 (PHP_SRC_BODY..)
+CMP_SRC_END:      .res 2    ; ソース終端 (one-past-last)
+CMP_LINE:         .res 2    ; 現在行 (1-origin、エラー表示用)
+CMP_COL:          .res 2    ; 現在列 (1-origin、エラー表示用)
+CMP_OP_HEAD:      .res 2    ; 次に zend_op を書く PRG-RAM アドレス
+CMP_LIT_HEAD:     .res 2    ; 次に zval を書く PRG-RAM アドレス (CMP_LIT_STAGE から成長)
 CMP_OP_COUNT:    .res 2    ; emit 済み opcode 数
-CMP_LIT_COUNT:   .res 2    ; emit 済み literal 数
-CMP_TOK_KIND:    .res 1    ; 現在のトークン種別 (TK_*)
-CMP_TOK_PTR:     .res 2    ; トークン開始 ROM アドレス
-CMP_TOK_LEN:     .res 1    ; トークン長 (M-A は ASCII 文字列 ≤ 255B)
+CMP_LIT_COUNT:    .res 2    ; emit 済み literal 数
+CMP_TMP_COUNT:    .res 1    ; 確保済み TMP スロット数 (算術結果や fgets result 等)
+CMP_CV_COUNT:     .res 1    ; 確保済み CV スロット数
+CMP_TOK_KIND:     .res 1    ; 現在のトークン種別 (TK_*)
+CMP_TOK_PTR:      .res 2    ; トークン開始 ROM アドレス (STRING/IDENT/CV 時)
+CMP_TOK_LEN:      .res 1    ; トークン長 (≤ 255)
+CMP_TOK_VALUE:    .res 2    ; TK_INT: パース結果の 16bit 整数値
+CMP_INTRINSIC_ID: .res 1    ; 解決された intrinsic 番号 (INT_* 定数)
+CMP_ARG_COUNT:    .res 1    ; 関数呼び出しの現在引数数 (0..4)
+CMP_ARG_LITS:     .res 8    ; 引数 operand 値 (4 引数 × 2B、byte i*2 = arg[i] lo, i*2+1 = hi)
+CMP_ARG_TYPES:    .res 4    ; 引数の operand 型 (IS_CONST / IS_CV / IS_TMP_VAR / ARG_STDIN_SENTINEL)
+CMP_ASSIGN_SLOT:  .res 1    ; assign_stmt 実行中の LHS CV slot
+CMP_EXPR_TYPE:    .res 1    ; parse_primary/expr の結果 operand type
+CMP_EXPR_VAL:     .res 2    ; parse_primary/expr の結果 operand 値 (16bit)
+CMP_LHS_TYPE:     .res 1    ; 二項演算の左オペランド type (一時退避)
+CMP_LHS_VAL:      .res 2    ; 二項演算の左オペランド 値
 
 ; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
 ;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT
@@ -640,12 +653,13 @@ res_const:
     STA OP1_VAL
     LDY #0
     LDA (TMP0), Y
-    STA OP1_VAL+1
+    STA OP1_VAL+1          ; value byte 0 (IS_STRING 時は ROM offset lo、IS_LONG 時は lval lo)
     LDY #1
     LDA (TMP0), Y
-    STA OP1_VAL+2
-    LDA #0
-    STA OP1_VAL+3
+    STA OP1_VAL+2          ; value byte 1 (同 hi)
+    LDY #2
+    LDA (TMP0), Y
+    STA OP1_VAL+3          ; value byte 2 (IS_STRING 時は length lo、IS_LONG 時は 0)
     RTS
 
 res_cv:
@@ -720,8 +734,9 @@ res_const_to_op2:
     LDY #1
     LDA (TMP0), Y
     STA OP2_VAL+2
-    LDA #0
-    STA OP2_VAL+3
+    LDY #2
+    LDA (TMP0), Y
+    STA OP2_VAL+3           ; IS_STRING 時は length lo、他は 0
     RTS
 
 res_cv_to_op2:
@@ -856,27 +871,16 @@ handle_zend_echo:
     JMP handle_unimpl
 
 echo_string:
-    ; OP1_VAL+1/+2 = ops.bin 内 zend_string へのオフセット
-    ; TMP1 を zend_string 絶対アドレスにセット
+    ; 新方式: OP1_VAL+1/+2 = val[] 先頭の OPS_BASE 相対 offset、OP1_VAL+3 = length
     CLC
     LDA OP1_VAL+1
     ADC #<OPS_BASE
-    STA TMP1
+    STA TMP1                ; val[] の絶対 CPU アドレス
     LDA OP1_VAL+2
     ADC #>OPS_BASE
     STA TMP1+1
-    ; len @ zend_string + 16 (下位 1B) → TMP2
-    LDY #16
-    LDA (TMP1), Y
-    STA TMP2
-    ; TMP1 += 24 で val[] 先頭へ進める
-    CLC
-    LDA TMP1
-    ADC #24
-    STA TMP1
-    LDA TMP1+1
-    ADC #0
-    STA TMP1+1
+    LDA OP1_VAL+3
+    STA TMP2                ; len
     JMP echo_write
 
 echo_long:
@@ -1375,7 +1379,14 @@ vec_false:
     RTS
 
 vec_string:
-    ; 両方の zend_string の絶対アドレスを TMP0 / TMP1 に
+    ; 新方式: OP1/OP2_VAL+1/+2 = val[] 先頭の OPS_BASE 相対 offset、+3 = length
+    ; 長さ比較から (byte 3 同士)
+    LDA OP1_VAL+3
+    CMP OP2_VAL+3
+    BNE vec_false
+    TAX                    ; X = 残りバイト数
+    BEQ vec_eq             ; 両方 len 0 → 等しい
+    ; val[] 絶対アドレスを TMP0 / TMP1 に
     CLC
     LDA OP1_VAL+1
     ADC #<OPS_BASE
@@ -1390,14 +1401,7 @@ vec_string:
     LDA OP2_VAL+2
     ADC #>OPS_BASE
     STA TMP1+1
-    ; 長さ比較 (offset 16 の 1 バイトだけ見る。MVP は短い文字列のみ)
-    LDY #16
-    LDA (TMP0), Y
-    CMP (TMP1), Y
-    BNE vec_false
-    TAX                    ; X = 残りバイト数
-    BEQ vec_eq             ; 長さ 0 → 等しい
-    LDY #24                ; val[] 先頭
+    LDY #0
 vec_loop:
     LDA (TMP0), Y
     CMP (TMP1), Y
@@ -1674,7 +1678,7 @@ fgets_got_str:
     STX RESULT_VAL+2
     LDA #TYPE_STRING
     STA RESULT_VAL
-    LDA #0
+    LDA #1                   ; length = 1 (button char は 1 バイト固定)
     STA RESULT_VAL+3
 
     ; sprite_mode_on なら rendering を維持 (スプライト表示継続)
@@ -1765,7 +1769,8 @@ handle_nesphp_nes_put:
     JMP handle_unimpl
 
 np_from_string:
-    ; value.str = zend_string への offset (TMP1 に展開)
+    ; 新方式: value bytes 0-1 = val[] への OPS_BASE 相対 offset
+    ; 1 文字目を直接読み INT_PRINT_BUFFER[0] に保存 (nes_put は 1 文字固定)
     LDY #0
     LDA (TMP0), Y
     STA TMP1
@@ -1779,8 +1784,7 @@ np_from_string:
     LDA TMP1+1
     ADC #>OPS_BASE
     STA TMP1+1
-    ; val[0] @ offset 24 を INT_PRINT_BUFFER[0] に保存
-    LDY #24
+    LDY #0
     LDA (TMP1), Y
     STA INT_PRINT_BUFFER
     JMP np_addr
@@ -1866,33 +1870,23 @@ handle_nesphp_nes_puts:
     CMP #TYPE_STRING
     BNE nps_type_err
 
-    ; value.str (bytes 0-1) = ops.bin 内 zend_string への offset
+    ; 新方式: value bytes 0-1 = val[] への OPS_BASE 相対 offset、byte 2 = length
     LDY #0
     LDA (TMP0), Y
     STA TMP1
     INY
     LDA (TMP0), Y
     STA TMP1+1
-    ; TMP1 += OPS_BASE
     CLC
     LDA TMP1
     ADC #<OPS_BASE
-    STA TMP1
+    STA TMP1                ; val[] 絶対 CPU アドレス
     LDA TMP1+1
     ADC #>OPS_BASE
     STA TMP1+1
-    ; len @ zend_string + 16 (下位 1B)
-    LDY #16
-    LDA (TMP1), Y
-    STA TMP2               ; TMP2 = 書き込みバイト数 (8bit)
-    ; val @ zend_string + 24
-    CLC
-    LDA TMP1
-    ADC #24
-    STA TMP1
-    LDA TMP1+1
-    ADC #0
-    STA TMP1+1
+    LDY #2
+    LDA (TMP0), Y
+    STA TMP2                ; len
 
     ; nametable addr = $2000 + y*32 + x, store in TMP0
     LDA OP2_VAL+1
@@ -2363,23 +2357,17 @@ attr_err:
 ; 各ブロックは spec/01-rom-format.md の zend_string 24B ヘッダ + content + null
 ; のレイアウトに準拠 (fgets が返す IS_STRING の参照先として)。
 ; =============================================================================
-.macro ONE_CHAR_ZSTR ch
-    .byte 0, 0, 0, 0                       ; gc.refcount
-    .byte $40, 0, 0, 0                     ; gc.type_info (IMMUTABLE)
-    .byte 0, 0, 0, 0, 0, 0, 0, 0           ; hash
-    .byte 1, 0, 0, 0, 0, 0, 0, 0           ; len = 1
-    .byte ch, 0                            ; val + null
-    .byte 0, 0                             ; 4B アラインのパディング
-.endmacro
-
-button_str_a:     ONE_CHAR_ZSTR 'A'
-button_str_b:     ONE_CHAR_ZSTR 'B'
-button_str_sel:   ONE_CHAR_ZSTR 'S'
-button_str_start: ONE_CHAR_ZSTR 'T'
-button_str_u:     ONE_CHAR_ZSTR 'U'
-button_str_d:     ONE_CHAR_ZSTR 'D'
-button_str_l:     ONE_CHAR_ZSTR 'L'
-button_str_r:     ONE_CHAR_ZSTR 'R'
+; 新方式: zend_string ヘッダは持たず、1 バイトの val[] だけを ROM に置く。
+; fgets_got_str は RESULT_VAL+1/+2 に OPS_BASE 相対 offset、RESULT_VAL+3 に
+; length=1 を書き込む。
+button_str_a:     .byte 'A'
+button_str_b:     .byte 'B'
+button_str_sel:   .byte 'S'
+button_str_start: .byte 'T'
+button_str_u:     .byte 'U'
+button_str_d:     .byte 'D'
+button_str_l:     .byte 'L'
+button_str_r:     .byte 'R'
 
 ; =============================================================================
 ; NESPHP_NES_SPRITE: sprite 0 の OAM shadow を更新

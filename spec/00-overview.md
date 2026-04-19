@@ -54,15 +54,43 @@
 
 詳細は [05-toolchain](./05-toolchain.md)。
 
-## 忠実度レベル: L3
+### L3S (self-hosted) バリアント
+
+**L3S はホスト側の層 0-2 を NES 側に取り込む**。PHP ソースを生テキストのまま ROM に焼き、電源 ON で 6502 自身が lex/parse/codegen する:
+
+```
+[ホスト (macOS)]                              [ターゲット (NES)]
+ input.php
+   │
+   ▼ tools/pack_src.php (~15 行、薄皮)
+   │    u16 length を前置するだけ
+ input.src.bin
+   │
+   ▼ ca65 + ld65
+   │    src.bin を .segment "PHPSRC" に焼く
+ output.nes ────────────────────────────▶  reset
+                                              │
+                                              ▼ compile_and_emit (6502)
+                                              │  - lex <?php echo "..." ;
+                                              │  - emit 24B zend_op / 16B zval
+                                              │    (zend_string は使わず zval に
+                                              │     ROM offset + length を直接埋め込む)
+                                              │
+                                              ▼ VM main_loop で実行
+```
+
+層 0-2 が NES 側の `vm/compiler.s` に集約される。zend_string 省略の理由や byte レベル仕様は [13-compiler](./13-compiler.md) と [12-zend-diff](./12-zend-diff.md) 改変 10 を参照。
+
+## 忠実度レベル: L3 / L3S
 
 | 段階 | 内容 | 採用 |
 |------|------|------|
 | L1 | 独自 nesphp-bc に翻訳。opcode 番号・operand 符号化・zval 全て独自 | × (ロマン不足) |
-| **L3** | **Zend の `zend_op` 構造体を handler 抜きで ROM にそのまま焼く。literals は 16B zval のまま。6502 VM が Zend のフィールドオフセットを直読み** | **○** |
+| **L3** | **Zend の `zend_op` 構造体を handler 抜きで ROM にそのまま焼く。literals は 16B zval のまま。6502 VM が Zend のフィールドオフセットを直読み**。PHP ソースはホスト側 `serializer.php` が opcode にコンパイルして ROM に焼く | **○** (host-compile 経路) |
+| **L3S** | **L3 の発展。PHP ソースを ROM に生で焼き、NES 起動時に 6502 自身が lex/parse/codegen。zend_string 構造体は省略し、zval に (ROM offset, length) を直接埋め込む**。詳細は [13-compiler](./13-compiler.md) | **○** (self-hosted 経路、`make build/X.nes` がデフォルト) |
 | L4 | L3 + zval 16B もそのまま RAM、IS_LONG 64bit 完全再現 | × (2KB RAM 不足) |
 
-詳細は [01-rom-format](./01-rom-format.md) と [02-ram-layout](./02-ram-layout.md)。
+L3 と L3S は**並存**。ホスト側 `serializer.php` は検証オラクルとして残置し、`make build/X.host.nes` で L3 経路のビルドも可能。詳細は [01-rom-format](./01-rom-format.md) と [02-ram-layout](./02-ram-layout.md) と [13-compiler](./13-compiler.md)。
 
 ## やらないこと (明示的に諦めるもの)
 

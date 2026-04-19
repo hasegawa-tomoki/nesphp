@@ -108,6 +108,8 @@ offset  size  field              備考
 
 ## 4. zend_string (24B ヘッダ + content)
 
+**注記**: この節は **L3 (host `serializer.php` 経路)** の ROM レイアウトを記述する。**L3S (on-NES コンパイラ経路、spec/13-compiler.md) では文字列リテラルは zend_string を使わず**、zval の value フィールドに (ROM offset, length) を直接埋め込む。L3S の詳細は [13-compiler](./13-compiler.md)、設計意図は [12-zend-diff](./12-zend-diff.md) 改変 10 参照。
+
 Zend `struct _zend_string` の先頭レイアウトを保持:
 
 ```

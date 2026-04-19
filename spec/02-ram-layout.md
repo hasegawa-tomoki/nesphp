@@ -65,22 +65,26 @@ $0700-$07FF  予備
 byte 0: type ID    (Zend 互換)
 byte 1: payload lo
 byte 2: payload hi
-byte 3: payload ext (STRING 時は未使用, 将来拡張用)
+byte 3: payload ext (type により意味が変わる、下表)
 ```
 
 ### type ID (Zend `zend_types.h` と互換)
 
-| 値 | 名前 | payload の意味 |
-|----|------|---------------|
-| 0 | IS_UNDEF | 未定義 (ゼロ埋め) |
-| 1 | IS_NULL | なし |
-| 2 | IS_FALSE | なし |
-| 3 | IS_TRUE | なし |
-| 4 | IS_LONG | **16bit 符号付き整数** (lo/hi のみ有効、ext は符号拡張) |
-| 5 | IS_DOUBLE | **未対応** |
-| 6 | IS_STRING | ROM 内 `zend_string` への **16bit オフセット** (lo/hi) |
-| 7 | IS_ARRAY | **未対応** |
-| 8 | IS_OBJECT | **未対応** |
+| 値 | 名前 | byte 1-2 の意味 | byte 3 の意味 |
+|----|------|----------------|----------------|
+| 0 | IS_UNDEF | 0 | 0 |
+| 1 | IS_NULL | 0 | 0 |
+| 2 | IS_FALSE | 0 | 0 |
+| 3 | IS_TRUE | 0 | 0 |
+| 4 | IS_LONG | **16bit 符号付き整数** | 0 (将来符号拡張用) |
+| 5 | IS_DOUBLE | **未対応** | — |
+| 6 | IS_STRING | val[] への 16bit OPS_BASE 相対 offset | **L3S では文字列長 (下位 1B)**、L3 では 0 |
+| 7 | IS_ARRAY | **未対応** | — |
+| 8 | IS_OBJECT | **未対応** | — |
+
+**L3 (host serializer 経路)**: IS_STRING の byte 1-2 は ROM 内 `zend_string` 構造体への offset。length は `zend_string` の offset 16 から読む。byte 3 は未使用 (0)。
+
+**L3S (on-NES コンパイラ経路、spec/13-compiler.md)**: IS_STRING の byte 1-2 は ROM 内 val[] (生バイト列) への offset。length は byte 3 に格納 (255B 上限)。zend_string 構造体は持たない。
 
 ### narrow のルール
 
@@ -88,12 +92,13 @@ byte 3: payload ext (STRING 時は未使用, 将来拡張用)
 |---|---|
 | `IS_LONG` (8B lval) 範囲 -32768..32767 | そのまま 16bit に |
 | `IS_LONG` 範囲外 | serializer で compile error (実行時には発生しない) |
-| `IS_STRING` (8B str pointer) | 下位 16bit をそのまま (ROM offset) |
+| `IS_STRING` value 下位 2B | byte 1-2 にコピー (ROM offset) |
+| `IS_STRING` value offset 2 (L3S のみ) | byte 3 にコピー (length) |
 | `IS_TRUE/FALSE/NULL` | type ID だけコピー、payload 0 |
 
 ### narrow は誰がやるか
 
-**VM 側のハンドラ**がフェッチ時に narrow する。serializer は ROM に Zend 互換の 16B zval を書くだけで、narrow を事前に行わない。これは「ROM は Zend のレイアウトそのまま」という L3 方針の帰結。
+**VM 側のハンドラ** (`resolve_op1` / `resolve_op2`) がフェッチ時に narrow する。コンパイラ (host の serializer または NES の compiler) は ROM に Zend 互換の 16B zval を書くだけで、narrow を事前に行わない。これは「ROM は Zend のレイアウトそのまま」という L3 方針の帰結。
 
 ---
 
