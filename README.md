@@ -43,7 +43,7 @@ make clean
   PRG-RAM $6000-$7FFF に op_array 完成 → main_loop で実行
 ```
 
-ホスト側でやっているのは「ASCII チェック + 長さ前置」だけ。`<?php` タグも文字列リテラルも ROM にそのまま残り、**NES 側の `vm/compiler.s` が唯一の PHP パーサ**。
+ホスト側でやっているのは「u16 長さを前置 + 16382B サイズ上限チェック」だけで、中身は non-ASCII も含めてそのまま pass through (文字列 / コメント内の日本語等は NES lexer が透過)。`<?php` タグも文字列リテラルも ROM に生で残り、**NES 側の `vm/compiler.s` が唯一の PHP パーサ**。
 
 L3 (host-compile) オラクルは `make build/foo.host.ops.bin` で取得可能 (L3S の出力を Zend 原本と突き合わせるとき用)。詳細: [`spec/05-toolchain.md`](./spec/05-toolchain.md) と [`spec/13-compiler.md`](./spec/13-compiler.md)。
 
