@@ -19,6 +19,8 @@
 ZEND_NOP              = 0
 ZEND_ADD              = 1
 ZEND_SUB              = 2
+ZEND_BW_OR            = 9
+ZEND_BW_AND           = 10
 ZEND_IS_IDENTICAL     = 16
 ZEND_IS_NOT_IDENTICAL = 17
 ZEND_IS_EQUAL         = 18
@@ -47,6 +49,8 @@ NESPHP_NES_CHR_BG   = $F6   ; MMC1 CHR bank 0 ($0000, BG 用 4KB bank)
 NESPHP_NES_BG_COLOR = $F7   ; PPU $3F00 背景色
 NESPHP_NES_PALETTE  = $F8   ; パレット設定 (id, c1, c2, c3)
 NESPHP_NES_ATTR     = $F9   ; attribute table 設定 (x, y, pal)
+NESPHP_NES_VSYNC    = $FA   ; 次 VBlank まで spin (sprite_mode 未設定時は自動 enable)
+NESPHP_NES_BTN      = $FB   ; コントローラ状態を IS_LONG (下位 1B = buttons bitmask) で返す
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -180,6 +184,9 @@ pi_count:       .res 1    ; print_int16 が書いたバイト数
 ; nes_puts は動く (NMI キュー経由)。nes_cls だけは依然として forced_blanking
 ; 専用 (1024B を 1 VBlank 予算 ~2273 cycle に収められないため)。
 sprite_mode_on: .res 1
+
+; NMI が VBlank ごとに INC するフレームカウンタ (nes_vsync 同期用、8bit wrap OK)
+vblank_frame:   .res 1
 
 ; --- On-NES コンパイラ状態 (compile_and_emit 実行中のみ valid) ---
 ; コンパイル完了後は全て未使用。以降 reset が WRAM を既読のまま VM に引き渡す。
@@ -474,6 +481,14 @@ main_loop:
     BNE :+
     JMP handle_nesphp_nes_attr
 :
+    CMP #NESPHP_NES_VSYNC
+    BNE :+
+    JMP handle_nesphp_nes_vsync
+:
+    CMP #NESPHP_NES_BTN
+    BNE :+
+    JMP handle_nesphp_nes_btn
+:
     CMP #ZEND_ECHO
     BNE :+
     JMP handle_zend_echo
@@ -493,6 +508,14 @@ main_loop:
     CMP #ZEND_SUB
     BNE :+
     JMP handle_zend_sub
+:
+    CMP #ZEND_BW_AND
+    BNE :+
+    JMP handle_zend_bw_and
+:
+    CMP #ZEND_BW_OR
+    BNE :+
+    JMP handle_zend_bw_or
 :
     CMP #ZEND_QM_ASSIGN
     BNE :+
@@ -1056,6 +1079,58 @@ handle_zend_sub:
     JSR write_result
     JMP advance
 sub_type_err:
+    JMP handle_unimpl
+
+; -----------------------------------------------------------------------------
+; ZEND_BW_AND: result = op1 & op2 (16bit bitwise AND)
+; ZEND_BW_OR:  result = op1 | op2 (16bit bitwise OR)
+;   両 operand とも IS_LONG 前提 (mask 演算の実用上の想定)
+; -----------------------------------------------------------------------------
+handle_zend_bw_and:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE bw_type_err
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE bw_type_err
+    LDA OP1_VAL+1
+    AND OP2_VAL+1
+    STA RESULT_VAL+1
+    LDA OP1_VAL+2
+    AND OP2_VAL+2
+    STA RESULT_VAL+2
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+handle_zend_bw_or:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE bw_type_err
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE bw_type_err
+    LDA OP1_VAL+1
+    ORA OP2_VAL+1
+    STA RESULT_VAL+1
+    LDA OP1_VAL+2
+    ORA OP2_VAL+2
+    STA RESULT_VAL+2
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+bw_type_err:
     JMP handle_unimpl
 
 ; -----------------------------------------------------------------------------
@@ -2357,6 +2432,45 @@ attr_err:
     JMP handle_unimpl
 
 ; =============================================================================
+; NESPHP_NES_VSYNC (0xFA): 次 VBlank まで spin
+;
+; sprite_mode が off (NMI 未有効) なら enable_sprite_mode を自動で呼ぶ。
+; OAM shadow は reset で $FF (= y 座標 offscreen) に初期化済みなので、
+; nes_sprite を呼ばずに rendering を有効化してもスプライトは見えない。
+; =============================================================================
+handle_nesphp_nes_vsync:
+    LDA sprite_mode_on
+    BNE vsync_nmi_ok
+    JSR enable_sprite_mode
+vsync_nmi_ok:
+    LDA vblank_frame
+    STA TMP0
+vsync_spin:
+    LDA vblank_frame
+    CMP TMP0
+    BEQ vsync_spin
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_BTN (0xFB): コントローラ状態を読み、buttons bitmask を IS_LONG 返却
+;
+; 0 引数 (op1/op2 未使用)。result = IS_LONG(buttons) where
+;   bit 7=A, 6=B, 5=Select, 4=Start, 3=U, 2=D, 1=L, 0=R
+; 呼び出し側 (PHP) が `$b & 0x80` などで bitmask 判定を行う。
+; =============================================================================
+handle_nesphp_nes_btn:
+    JSR read_controller          ; buttons ZP に現状態を更新
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA buttons
+    STA RESULT_VAL+1             ; 下位 1B = ボタン状態
+    LDA #0
+    STA RESULT_VAL+2
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+; =============================================================================
 ; Pre-baked 1 文字 zend_string (ボタン対応)
 ;
 ; 各ブロックは spec/01-rom-format.md の zend_string 24B ヘッダ + content + null
@@ -2503,6 +2617,9 @@ nmi:
 
     ; sprite_mode 中に積まれた nametable 書き込みを VBlank 中に反映
     JSR flush_nmi_queue
+
+    ; フレームカウンタを進める (nes_vsync が差分を spin wait する)
+    INC vblank_frame
 
     ; scroll をリセット (PPUADDR 書き込みで v レジスタが汚染される可能性への対策)
     BIT PPUSTATUS

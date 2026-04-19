@@ -34,8 +34,11 @@
 | P3 (M-C) | `while { }` + `if { }` + 比較 `===/!==/==/!=/<` + `$k = fgets(STDIN)` + `true` + backpatch | `loop.nes`, `button.nes`, `iftest.nes` (self-hosted) | ✅ **完了** |
 | P4 | コメント (`// # /* */`)、文字列内 non-ASCII (UTF-8 日本語など) 透過 | `comments.nes` | ✅ **完了** |
 | Q1-Q4 | 残り intrinsic 3 種 (nes_put / nes_sprite / nes_attr)、16 進リテラル、`++` / `--` (PRE/POST INC/DEC)、`for` ループ、if/while 単文 body | `move.nes` `sprite.nes` `livetext.nes` `livereset.nes` `color.nes` `for.nes` | ✅ **完了** |
-| **examples/* 全通** | 現リポジトリの **17 example すべて on-NES self-host で動作** (err_syntax は意図的 compile-error 検証) | — | ✅ **完了** |
-| 次 | `else` / `elseif` / `<=` / `>` / `&&` / `\|\|` / `!` / 単項 `-` | — | 未着手 |
+| R1 | `nes_vsync()` + `nes_btn($mask)` (初期版、mask AND 方式) | — | ✅ **完了** |
+| R2 | `nes_btn()` を 0 引数化し、コントローラ状態を IS_LONG で返す仕様に変更 | `poll.nes` | ✅ **完了** |
+| R3 | ビット演算子 `&` `\|` (ZEND_BW_AND/OR)、2 進リテラル `0b..` | `bintest.nes` | ✅ **完了** |
+| **examples/* 全通** | 現リポジトリの **18 example すべて on-NES self-host で動作** (err_syntax は意図的 compile-error 検証) | — | ✅ **完了** |
+| 次 | `else` / `elseif` / `<=` / `>` / `>=` / `&&` / `\|\|` / `!` / 単項 `-` / `^` (BW_XOR) / `<<` `>>` (SL/SR) | — | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | — | L3 方針 |
 
 各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。

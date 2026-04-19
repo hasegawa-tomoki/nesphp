@@ -21,6 +21,8 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 | `ZEND_NOP` | **0 (0x00)** | ✓ | — | 何もせず PC を進める (intrinsic 畳み込みのプレースホルダ) |
 | `ZEND_ADD` | **1 (0x01)** | ✓ | ✓ (P2) | op1+op2 (IS_LONG 前提) → result。16bit 符号付き加算 |
 | `ZEND_SUB` | **2 (0x02)** | ✓ | ✓ (P2) | op1-op2 → result。16bit 符号付き減算 |
+| `ZEND_BW_OR` | **9 (0x09)** | ✓ | ✓ (R3) | op1 \| op2 → result。16bit bitwise OR (IS_LONG) |
+| `ZEND_BW_AND` | **10 (0x0A)** | ✓ | ✓ (R3) | op1 & op2 → result。16bit bitwise AND (IS_LONG) |
 | `ZEND_IS_IDENTICAL` | **16 (0x10)** | ✓ | ✓ (P3) | 同じ型 + 同じ値。文字列は `values_equal_content` で len + val[] content 比較 |
 | `ZEND_IS_NOT_IDENTICAL` | **17 (0x11)** | ✓ | ✓ (P3) | 否定版 |
 | `ZEND_IS_EQUAL` | **18 (0x12)** | ✓ | ✓ (P3) | `IS_IDENTICAL` と同じ実装を共用 (PHP の type juggling は未対応) |
@@ -52,6 +54,8 @@ L3S で emit 対象の nesphp カスタム opcode (intrinsic 畳み込み):
 | `NESPHP_NES_BG_COLOR` | 0xF7 | ✓ (P1) |
 | `NESPHP_NES_PALETTE` | 0xF8 | ✓ (P1) |
 | `NESPHP_NES_ATTR` | 0xF9 | ✓ (Q1) |
+| `NESPHP_NES_VSYNC` | 0xFA | ✓ (R1) — 次 VBlank まで spin、sprite_mode 自動有効化 |
+| `NESPHP_NES_BTN` | 0xFB | ✓ (R2) — **0 引数**、コントローラ状態を IS_LONG (下位 1B = bitmask) で返す。呼び出し側で `$b & 0x80` 等でビット演算 |
 
 Q2: 16 進リテラル `0x..` 対応 (lexer)。Q3: `ZEND_PRE_INC` (34) / `ZEND_PRE_DEC` (35) / `ZEND_POST_INC` (36) / `ZEND_POST_DEC` (37) を L3S で emit 可能 (`++$x` / `$x++` / `--$x` / `$x--`)。Q4: `for (init; cond; update) body` を double-JMP で展開して emit。
 | `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 (forced_blanking 時) → 無限ループ |

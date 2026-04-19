@@ -52,6 +52,8 @@ TK_TRUE    = 22
 TK_INC     = 23
 TK_DEC     = 24
 TK_FOR     = 25
+TK_AMP     = 26
+TK_PIPE    = 27
 
 ; --- Intrinsic ID ---
 INT_CLS       = 0
@@ -64,6 +66,8 @@ INT_FGETS     = 6
 INT_PUT       = 7
 INT_SPRITE    = 8
 INT_ATTR      = 9
+INT_VSYNC     = 10
+INT_BTN       = 11
 INT_NOT_FOUND = $FF
 
 ARG_STDIN_SENTINEL = $FE
@@ -860,8 +864,18 @@ cpa_loop:
     JMP cpa_binop
 :
     CMP #TK_MINUS
-    BNE cpa_done
+    BNE :+
     LDA #ZEND_SUB
+    JMP cpa_binop
+:
+    CMP #TK_AMP
+    BNE :+
+    LDA #ZEND_BW_AND
+    JMP cpa_binop
+:
+    CMP #TK_PIPE
+    BNE cpa_done
+    LDA #ZEND_BW_OR
 cpa_binop:
     STA CMP_INTRINSIC_ID
     LDA CMP_EXPR_TYPE
@@ -1006,13 +1020,34 @@ cpp_true:
     JSR cmp_lex_next
     RTS
 
-; IDENT 式 — 現状 fgets(STDIN) のみ対応 (戻り値 TMP)
+; IDENT 式 — fgets(STDIN) と nes_btn($mask) に対応 (戻り値 TMP)
 cpp_ident:
     JSR cmp_match_intrinsic
     CMP #INT_FGETS
+    BEQ cpp_ident_fgets
+    CMP #INT_BTN
+    BEQ cpp_ident_btn
+    JMP cmp_error
+
+cpp_ident_btn:
+    ; '(' ')' をパース (0 引数)、NESPHP_NES_BTN result=TMP を emit
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_LPAREN
     BEQ :+
     JMP cmp_error
 :
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_RPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_emit_btn_tmp             ; result = 新 TMP、CMP_EXPR = TMP
+    JSR cmp_lex_next                 ; peek next
+    RTS
+
+cpp_ident_fgets:
     JSR cmp_lex_next
     LDA CMP_TOK_KIND
     CMP #TK_LPAREN
@@ -1100,6 +1135,40 @@ cmp_emit_fgets_tmp:
     STA CMP_EXPR_TYPE
     INC CMP_TMP_COUNT
     JSR cmp_op_finish
+    RTS
+
+; cmp_emit_btn_tmp: nes_btn() (expr 文脈、0 引数)
+;   NESPHP_NES_BTN を result=新 TMP で emit、CMP_EXPR を TMP に更新
+;   出力: CMP_EXPR_TYPE/VAL = 新 TMP (実行時に IS_LONG(buttons bitmask) が入る)
+cmp_emit_btn_tmp:
+    JSR cmp_op24_zero
+    ; result = 新 TMP
+    LDX CMP_TMP_COUNT
+    CPX #64
+    BCC :+
+    JMP cmp_error
+:
+    JSR cmp_lit_idx_to_offset
+    LDY #8
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #23
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #NESPHP_NES_BTN
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    INC CMP_TMP_COUNT
     RTS
 
 ; =============================================================================
@@ -1228,6 +1297,14 @@ cln_not_eof:
     BNE :+
     JMP cln_minus
 :
+    CMP #'&'
+    BNE :+
+    JMP cln_amp
+:
+    CMP #'|'
+    BNE :+
+    JMP cln_pipe
+:
     CMP #'0'
     BCC cln_try_ident
     CMP #'9'+1
@@ -1306,6 +1383,36 @@ cln_minus:
     RTS
 cln_minus_one:
     LDA #TK_MINUS
+    STA CMP_TOK_KIND
+    RTS
+
+; ビット演算 &: 2 個連続 (&&) は未対応 (compile error)
+cln_amp:
+    JSR cmp_advance1
+    JSR cmp_at_eof
+    BEQ cln_amp_single
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'&'
+    BNE cln_amp_single
+    JMP cmp_error                   ; && 未対応
+cln_amp_single:
+    LDA #TK_AMP
+    STA CMP_TOK_KIND
+    RTS
+
+; ビット演算 |: 2 個連続 (||) は未対応
+cln_pipe:
+    JSR cmp_advance1
+    JSR cmp_at_eof
+    BEQ cln_pipe_single
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'|'
+    BNE cln_pipe_single
+    JMP cmp_error                   ; || 未対応
+cln_pipe_single:
+    LDA #TK_PIPE
     STA CMP_TOK_KIND
     RTS
 
@@ -1426,7 +1533,7 @@ cln_int:
     LDA #0
     STA CMP_TOK_VALUE
     STA CMP_TOK_VALUE+1
-    ; 先頭 '0' の後が 'x' / 'X' なら hex 解析に分岐
+    ; 先頭 '0' の後が 'x' / 'X' なら hex、'b' / 'B' なら binary に分岐
     LDY #0
     LDA (CMP_SRC_PTR), Y
     CMP #'0'
@@ -1438,6 +1545,14 @@ cln_int:
     BEQ cln_hex_consume_prefix
     CMP #'X'
     BEQ cln_hex_consume_prefix
+    CMP #'b'
+    BNE :+
+    JMP cln_bin_consume_prefix
+:
+    CMP #'B'
+    BNE :+
+    JMP cln_bin_consume_prefix
+:
     ; 10 進で続行
 cln_int_loop:
     JSR cmp_at_eof
@@ -1566,6 +1681,48 @@ hd_lower:
 hd_no:
     SEC
     RTS
+
+; --- 2 進リテラル: 先頭 '0b' / '0B' を消費してから '0' / '1' を解析 ---
+cln_bin_consume_prefix:
+    JSR cmp_advance1              ; '0'
+    JSR cmp_advance1              ; 'b' / 'B'
+    ; 少なくとも 1 桁必須
+    JSR cmp_at_eof
+    BNE :+
+    JMP cmp_error
+:
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'0'
+    BCC cln_bin_err
+    CMP #'2'
+    BCS cln_bin_err
+cln_bin_loop:
+    JSR cmp_at_eof
+    BEQ cln_int_done_bin
+    LDY #0
+    LDA (CMP_SRC_PTR), Y
+    CMP #'0'
+    BCC cln_int_done_bin
+    CMP #'2'
+    BCS cln_int_done_bin
+    SEC
+    SBC #'0'                      ; A = 0 または 1
+    PHA
+    ; value <<= 1 (16bit)
+    ASL CMP_TOK_VALUE
+    ROL CMP_TOK_VALUE+1
+    PLA
+    ORA CMP_TOK_VALUE
+    STA CMP_TOK_VALUE
+    JSR cmp_advance1
+    JMP cln_bin_loop
+cln_int_done_bin:
+    LDA #TK_INT
+    STA CMP_TOK_KIND
+    RTS
+cln_bin_err:
+    JMP cmp_error
 
 cln_ident:
     LDA CMP_SRC_PTR
@@ -1916,6 +2073,22 @@ cmp_match_intrinsic:
     LDA #INT_ATTR
     RTS
 :
+    LDA #<intrinsic_name_nes_vsync
+    LDX #>intrinsic_name_nes_vsync
+    LDY #9
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_VSYNC
+    RTS
+:
+    LDA #<intrinsic_name_nes_btn
+    LDX #>intrinsic_name_nes_btn
+    LDY #7
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_BTN
+    RTS
+:
     LDA #INT_NOT_FOUND
     RTS
 
@@ -1950,6 +2123,8 @@ intrinsic_name_fgets:         .byte "fgets"
 intrinsic_name_nes_put:       .byte "nes_put"
 intrinsic_name_nes_sprite:    .byte "nes_sprite"
 intrinsic_name_nes_attr:      .byte "nes_attr"
+intrinsic_name_nes_vsync:     .byte "nes_vsync"
+intrinsic_name_nes_btn:       .byte "nes_btn"
 
 ; =============================================================================
 ; intrinsic 発行 (statement context、戻り値破棄)
@@ -1975,6 +2150,8 @@ cmp_emit_jmp_table:
     .word cmp_emit_put
     .word cmp_emit_sprite
     .word cmp_emit_attr
+    .word cmp_emit_vsync
+    .word cmp_emit_btn_stmt
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -2170,6 +2347,32 @@ cmp_emit_attr:
     JSR cmp_set_extended_from_arg
     LDY #20
     LDA #NESPHP_NES_ATTR
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_vsync() — 0 引数、戻り値なし
+cmp_emit_vsync:
+    LDA CMP_ARG_COUNT
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDY #20
+    LDA #NESPHP_NES_VSYNC
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_btn() stmt 形式 — 0 引数、戻り値破棄 (result_type = IS_UNUSED)
+cmp_emit_btn_stmt:
+    LDA CMP_ARG_COUNT
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDY #20
+    LDA #NESPHP_NES_BTN
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     RTS

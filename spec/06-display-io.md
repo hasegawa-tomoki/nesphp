@@ -283,6 +283,79 @@ nmi:
 
 ---
 
+## リアルタイム入力 API (`nes_vsync` + `nes_btn`)
+
+`fgets(STDIN)` は release→press を待つ blocking 仕様で「押した瞬間」を 1 文字返す。対して L3S コンパイラは **poll 型 API** も持つ:
+
+### intrinsic
+
+| 関数 | 動作 |
+|------|------|
+| `nes_vsync()` | 次の VBlank (NMI) まで spin wait。sprite_mode が off なら `enable_sprite_mode` を自動で呼び、NMI + rendering を有効化する。1 フレーム = 1/60 秒を同期単位にしたい時に呼ぶ |
+| `nes_btn()` | **0 引数**。現在のコントローラ状態を IS_LONG で返す (下位 1B = bitmask)。呼び出し側でビット演算 (`&` / `\|`) でボタンを判定する |
+
+### ビットマスク対応表
+
+```
+A     = 0x80   (bit 7)
+B     = 0x40
+Select= 0x20
+Start = 0x10
+Up    = 0x08
+Down  = 0x04
+Left  = 0x02
+Right = 0x01
+```
+
+ビット演算 (`&`) で個別検査。複数 bit の OR で「A or L」同時検出:
+```php
+$b = nes_btn();
+if ($b & 0x82) { /* A または L */ }
+```
+
+### 典型的な game loop
+
+```php
+<?php
+$x = 120; $y = 120;
+nes_sprite($x, $y, 88);
+while (true) {
+    nes_vsync();                   // 1 フレーム待つ
+    $b = nes_btn();                // コントローラ状態を 1 回取得
+    if ($b & 0x02) { $x = $x - 1; }  // L
+    if ($b & 0x01) { $x = $x + 1; }  // R
+    if ($b & 0x08) { $y = $y - 1; }  // U
+    if ($b & 0x04) { $y = $y + 1; }  // D
+    nes_sprite($x, $y, 88);        // 座標反映
+}
+```
+
+押しっぱなしで毎フレーム座標が変わる = 60 px/sec の連続移動。`fgets` での release-press 方式では不可能だったゲーム的な UX が実現する (`examples/poll.php`)。
+
+### VM 側の実装
+
+`handle_nesphp_nes_vsync` (`vm/nesphp.s`) は、まず `sprite_mode_on` が 0 なら `enable_sprite_mode` を呼んで NMI を有効化。その後:
+
+```asm
+LDA vblank_frame         ; NMI で INC される 8bit カウンタ
+STA TMP0
+:
+LDA vblank_frame
+CMP TMP0
+BEQ :-                   ; 値が変わる = NMI が 1 回発火した
+```
+
+`handle_nesphp_nes_btn` は `read_controller` でコントローラ状態を更新し、`buttons` ZP の値を `IS_LONG` の下位 1B として result スロットへ書く (0 引数)。ビット検査は呼び出し側が `ZEND_BW_AND` (`&` 演算子) で行う。
+
+### `fgets` との使い分け
+
+- **`fgets(STDIN)`**: モーダル UI (メニュー、スライド遷移)、1 回押したら確定
+- **`nes_vsync()` + `nes_btn($mask)`**: ゲームループ、アニメーション、押しっぱなし連続移動
+
+両方を同じプログラム内で混在させることも可能 (`nes_sprite` 呼出で sprite_mode に入れば NMI が回るので、`fgets` も `nes_vsync` も動く)。
+
+---
+
 ## 延長ゴール: コントローラ入力 (`fgets(STDIN)` マッピング)
 
 ### PHP 側の書き方
