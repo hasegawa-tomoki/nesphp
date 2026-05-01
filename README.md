@@ -56,6 +56,7 @@ L3 (host-compile) のオラクルが欲しいときは `make build/foo.host.ops.
 | カテゴリ | 対応 |
 |---|---|
 | 整数リテラル | 10 進 / 16 進 `0x..` / 2 進 `0b..`、16bit 符号付き narrow (`-32768..32767`) |
+| 配列 | 整数キーのみ: `$a = [1,2,3]` リテラル (ネスト可 `[[1,2],[3,4]]`)、`$a[i]` 読取 (チェーン可 `$a[i][j]`)、`$a[i] = v` 書換、`$a[] = v` 追加、`count($a)`。`foreach` / 連想 は未対応。2KB pool、**shared-pointer 意味論** (`$b = $a; $b[0]=99;` で `$a[0]` にも波及) |
 | 文字列 | double-quoted リテラルのみ、連結 (`.`) 未対応。non-ASCII byte pass through + `\xHH` / `\\` / `\"` エスケープ対応。decoded 結果は PRG-RAM pool ($7800-$7FFF) に置く |
 | 変数 | CV / TMP / VAR スロット、`$a = ...` / `$a = $b + 1` |
 | 算術 | `+` / `-` |
@@ -74,7 +75,7 @@ L3 (host-compile) のオラクルが欲しいときは `make build/foo.host.ops.
 
 ### できないこと (明示的に諦めたもの)
 
-配列 / オブジェクト / 例外 / generator / closure / double / 64bit int / 文字列連結 / 動的文字列生成 / ユーザ定義関数 / `else` / `elseif` / `<=` / `>` / `>=` / 単項 `-` / `!` / `^` (BW_XOR)。 詳細は [`spec/00-overview.md`](./spec/00-overview.md) の「やらないこと」と [`spec/13-compiler.md`](./spec/13-compiler.md) の制約節。
+連想配列 (string キー) / `foreach` / オブジェクト / 例外 / generator / closure / double / 64bit int / 文字列連結 / 動的文字列生成 / ユーザ定義関数 / `else` / `elseif` / `<=` / `>` / `>=` / 単項 `-` / `!` / `^` (BW_XOR)。 詳細は [`spec/00-overview.md`](./spec/00-overview.md) の「やらないこと」と [`spec/13-compiler.md`](./spec/13-compiler.md) の制約節。
 
 ---
 
@@ -141,6 +142,8 @@ while (true) {
 | [`examples/bintest.php`](./examples/bintest.php) | 2 進 / 16 進 / 10 進混在 + `&` `\|` | `0b..`, `0x..`, ビット演算 |
 | [`examples/logtest.php`](./examples/logtest.php) | `&&` `\|\|` `<<` `>>` の挙動確認 | 短絡評価、シフト |
 | [`examples/strescape.php`](./examples/strescape.php) | `"\xHH"` / `"\\"` / `"\""` エスケープの動作確認 | 任意 byte 埋込 (日本語タイル index 等) |
+| [`examples/arrtest.php`](./examples/arrtest.php) | 配列リテラル + `$a[i]` + `count($a)` + `for` | `ZEND_INIT_ARRAY` / `ZEND_FETCH_DIM_R` / `ZEND_COUNT` |
+| [`examples/arrwrite.php`](./examples/arrwrite.php) | `$a[i]=v` 書換 + `$a[]=v` append + ネスト `[[1,2],[3,4]]` + `$m[i][j]` | `ZEND_ASSIGN_DIM` + `ZEND_OP_DATA`、FETCH_DIM_R チェーン |
 | [`examples/button.php`](./examples/button.php) | 押したボタン文字を表示 (blocking) | `fgets(STDIN)` |
 | [`examples/poll.php`](./examples/poll.php) | 十字キーで `X` を 60fps 連続移動 | `nes_vsync` + `nes_btn` + `&` |
 | [`examples/move.php`](./examples/move.php) | 十字キーで `X` をタイル単位移動 | `nes_put`, `===` |

@@ -132,6 +132,8 @@ stmt         ::= echo_stmt | call_stmt | assign_stmt | inc_stmt | while_stmt
 echo_stmt    ::= "echo" expr ";"
 call_stmt    ::= IDENT "(" args? ")" ";"
 assign_stmt  ::= CV "=" expr ";"
+             |   CV "[" expr "]" "=" expr ";"  (配列の index 書換)
+             |   CV "[" "]" "=" expr ";"        (配列への append)
              |   CV ("++" | "--") ";"      (post-inc/dec as stmt)
 inc_stmt     ::= ("++" | "--") CV ";"      (pre-inc/dec as stmt)
 while_stmt   ::= "while" "(" expr ")" body
@@ -147,7 +149,9 @@ add_expr     ::= primary (("+" | "-" | "&" | "|" | "<<" | ">>") primary)*
 primary      ::= INT | STRING | CV | "true" | call_expr
              |   ("++" | "--") CV           (prefix inc/dec in expr)
              |   CV ("++" | "--")           (postfix inc/dec in expr)
-call_expr    ::= IDENT "(" args? ")"        (現状 fgets(STDIN) のみ、戻り値 TMP)
+             |   CV ("[" expr "]")+         (チェーン読取、ネスト可: $a[i][j][k])
+             |   "[" (expr ("," expr)*)? "]"  (配列リテラル、ネスト可、最大 15 要素)
+call_expr    ::= IDENT "(" args? ")"        (fgets(STDIN) / nes_btn() / count($a) 等)
 args         ::= arg ("," arg)*
 arg          ::= expr | "STDIN"
 CV           ::= "$" IDENT
@@ -188,6 +192,7 @@ COMMENT      ::= "//" [^\n]* "\n"
 | `TK_AMP` / `TK_PIPE` | `&` / `\|` | bitwise AND / OR |
 | `TK_AMPAMP` / `TK_PIPEPIPE` | `&&` / `\|\|` | **論理 AND / OR (短絡評価)**。両オペランドを bool に正規化して 0/1 を返す |
 | `TK_SL` / `TK_SR` | `<<` / `>>` | 16bit 論理左 / 算術右シフト。単体 `>` は未対応でエラー |
+| `TK_LBRACKET` / `TK_RBRACKET` | `[` / `]` | 配列リテラル / 配列要素アクセス用 |
 
 ### マイルストーン進行
 
@@ -204,7 +209,9 @@ COMMENT      ::= "//" [^\n]* "\n"
 | **R3** | ビット演算子 `&` / `\|` (`ZEND_BW_AND` / `ZEND_BW_OR`)、2 進リテラル `0b..` | ✅ |
 | **S1-S4** | 論理演算 `&&` / `\|\|` (短絡評価、JMPZ/JMPNZ + QM_ASSIGN パターン)、シフト `<<` / `>>` (`ZEND_SL` / `ZEND_SR`) | ✅ |
 | **T1** | 文字列リテラルに `\xHH` / `\\` / `\"` エスケープ追加。decoded bytes を PRG-RAM pool ($7800-$7FFF) に書き zval は pool 内 offset を指す。本物の PHP 互換構文で任意 byte を埋めこめる (CHR タイル index 直接指定で非 ASCII テキストを扱うため) | ✅ |
-| 次 | `else` / `elseif`、`<=` / `>` / `>=`、単項 `-` / `!`、`^` (BW_XOR) | 未着手 |
+| **U1** | 整数キー配列 MVP: `[expr,...]` リテラル + `$a[idx]` 読取 + `count($a)`。IS_ARRAY=7、2KB runtime array pool ($7000-$77FF)。ZEND_INIT_ARRAY / ZEND_ADD_ARRAY_ELEMENT / ZEND_FETCH_DIM_R / ZEND_COUNT opcode | ✅ |
+| **V1-V4** | 配列: **書換 `$a[i] = v`** + **append `$a[] = v`** (ZEND_ASSIGN_DIM + ZEND_OP_DATA、2-op sequence)、**ネスト読取 `$a[i][j]...`** (FETCH_DIM_R チェーン)、**ネストリテラル `[[1,2],[3,4]]`** (CMP_ARR_* を stack で退避)。連想配列/foreach は未対応 | ✅ |
+| 次 | `foreach`、`else` / `elseif`、`<=` / `>` / `>=`、単項 `-` / `!`、`^` (BW_XOR) | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | L3 方針 |
 
 ### 数値リテラル
@@ -257,6 +264,13 @@ $i = 0; while ($i < 10) { $i = $i + 1; }
 | `nes_vsync();` | `NESPHP_NES_VSYNC` (戻り値なし、sprite_mode 自動有効化 → NMI 待ち) |
 | `nes_btn();` 単独 | `NESPHP_NES_BTN` (0 引数、result_type = IS_UNUSED、副作用のみ = read_controller) |
 | `nes_btn()` (expr) | `NESPHP_NES_BTN` result = TMP (IS_LONG = buttons bitmask)。呼び出し側で `$b & mask` 等で検査 |
+| `[expr, expr, ...]` | `ZEND_INIT_ARRAY` (op1 = 要素数 raw、result = 新 TMP) + 要素ごとに `ZEND_ADD_ARRAY_ELEMENT` (op1 = array TMP、op2 = element)。結果は IS_ARRAY TMP、pool 内 ptr 保持 |
+| `$a[idx]` | `ZEND_FETCH_DIM_R` (op1 = CV array, op2 = index、result = 新 TMP)。element 16B zval を 4B tagged に展開 |
+| `count($a)` | `ZEND_COUNT` (op1 = array、result = 新 TMP、IS_LONG = 要素数) |
+| `$a[i] = v;` | `ZEND_ASSIGN_DIM` (op1=CV array, op2=index) + `ZEND_OP_DATA` (op1=value)。ハンドラは 2-op セットで array[i] に 16B zval 書込、count = max(count, i+1) |
+| `$a[] = v;` | 上と同じだが op2_type = IS_UNUSED (append)。slot = 現在 count、書込後 count++ |
+| `$a[i][j]...` | `ZEND_FETCH_DIM_R` を必要なだけチェーン emit。途中 TMP を次の op1 として再利用 |
+| `[[1,2],[3,4]]` | 外側 INIT_ARRAY → 内側 INIT_ARRAY + ADD × 2 → 外側 ADD → ... (再帰、CMP_ARR_* の stack 退避で対応) |
 
 ### 比較式の精度
 
@@ -323,6 +337,7 @@ END:   (backpatch pop)
 
 - `$7000-$77FF`: コンパイル中、literal zval の一時バッファ (CMP_LIT_STAGE)。cmp_finalize で $6000 + literals_off に memcpy 後は未使用
 - `$7800-$7FFF`: 文字列 pool (STR_POOL_BASE、2KB)。cln_string が decoded bytes をここに書き、zval の IS_STRING value は pool 内アドレスを指す OPS_BASE 相対 offset (= pool_addr - $6000 = $1800+)。runtime でもそのまま読み出される (memcpy しない)
+- `$7000-$77FF`: runtime では **配列 pool** (ARR_POOL_BASE、2KB) に転用される。compile 中は CMP_LIT_STAGE として zval の一時置き場、cmp_finalize の memcpy 後は未使用になり、main_loop 突入前に ARR_POOL_HEAD を ARR_POOL_BASE にリセット。配列は header 4B (count, cap) + cap × 16B zval を追記型で alloc、GC 無し
 - `$6000-$6FFF`: 最終レイアウト (header + opcodes + literals)。runtime は VM_PC / VM_LITBASE 経由で参照
 
 ### TMP0/TMP1/TMP2 の共有

@@ -26,9 +26,12 @@ if ($src === false) {
 
 // 非 ASCII バイトは pass through する (NES lexer がコメント/文字列内で透過)。
 // 外側に出てきた non-ASCII は NES 側で compile error (ERR L/C 画面表示)。
+//
+// 16366B = 16KB (PRG bank 0) - 2B (u16 length prefix) - 16B (bank 0 末尾の
+// MMC1 reset trampoline + ベクタミラー、vm/nesphp.cfg / vm/nesphp.s 参照)。
 $len = strlen($src);
-if ($len > 16382) {
-    fwrite(STDERR, "pack_src: source too long ({$len}B > 16382B cap)\n");
+if ($len > 16366) {
+    fwrite(STDERR, "pack_src: source too long ({$len}B > 16366B cap)\n");
     exit(1);
 }
 

@@ -58,6 +58,8 @@ TK_AMPAMP  = 28
 TK_PIPEPIPE = 29
 TK_SL      = 30
 TK_SR      = 31
+TK_LBRACKET = 32
+TK_RBRACKET = 33
 
 ; --- Intrinsic ID ---
 INT_CLS       = 0
@@ -72,6 +74,7 @@ INT_SPRITE    = 8
 INT_ATTR      = 9
 INT_VSYNC     = 10
 INT_BTN       = 11
+INT_COUNT     = 12
 INT_NOT_FOUND = $FF
 
 ARG_STDIN_SENTINEL = $FE
@@ -252,6 +255,10 @@ cpp_assign_stmt:
     BEQ cas_post_inc
     CMP #TK_DEC
     BEQ cas_post_dec
+    CMP #TK_LBRACKET
+    BNE :+
+    JMP cas_dim
+:
     JMP cmp_error
 cas_eq:
     JSR cmp_lex_next
@@ -268,6 +275,110 @@ cas_post_inc:
     JMP cas_incdec_stmt
 cas_post_dec:
     LDA #ZEND_POST_DEC
+    JMP cas_incdec_stmt
+
+; $a[idx] = v;  または  $a[] = v;
+; CMP_ASSIGN_SLOT = CV slot (array)、CMP_TOK_KIND = '[' (まだ consume してない)
+cas_dim:
+    JSR cmp_lex_next                 ; '[' を consume、index の先頭 token か ']' を peek
+    LDA CMP_TOK_KIND
+    CMP #TK_RBRACKET
+    BEQ cas_dim_append               ; $a[] = v → append モード
+    ; index expr を parse
+    JSR cmp_parse_expr               ; CMP_EXPR = index、CMP_TOK = ']'
+    LDA CMP_TOK_KIND
+    CMP #TK_RBRACKET
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_lex_next                 ; ']' を consume、次は '=' 期待
+    LDA CMP_TOK_KIND
+    CMP #TK_ASSIGN
+    BEQ :+
+    JMP cmp_error
+:
+    ; --- ASSIGN_DIM emit (index mode) ---
+    JSR cmp_op24_zero
+    ; op1 = CV array
+    LDX CMP_ASSIGN_SLOT
+    JSR cmp_lit_idx_to_offset
+    LDY #0
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA #IS_CV
+    STA (CMP_OP_HEAD), Y
+    ; op2 = index (from CMP_EXPR)
+    LDY #4
+    LDA CMP_EXPR_VAL
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_EXPR_VAL+1
+    STA (CMP_OP_HEAD), Y
+    LDY #22
+    LDA CMP_EXPR_TYPE
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_ASSIGN_DIM
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    JMP cas_dim_emit_value
+
+cas_dim_append:
+    JSR cmp_lex_next                 ; ']' を consume、次は '=' 期待
+    LDA CMP_TOK_KIND
+    CMP #TK_ASSIGN
+    BEQ :+
+    JMP cmp_error
+:
+    ; --- ASSIGN_DIM emit (append、op2_type = IS_UNUSED) ---
+    JSR cmp_op24_zero
+    LDX CMP_ASSIGN_SLOT
+    JSR cmp_lit_idx_to_offset
+    LDY #0
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA #IS_CV
+    STA (CMP_OP_HEAD), Y
+    ; op2_type is IS_UNUSED (zero from op24_zero)
+    LDY #20
+    LDA #ZEND_ASSIGN_DIM
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+
+cas_dim_emit_value:
+    ; value expr を parse
+    JSR cmp_lex_next                 ; '=' を consume、value の先頭 token を peek
+    JSR cmp_parse_expr               ; CMP_EXPR = value、CMP_TOK = ';'
+    LDA CMP_TOK_KIND
+    CMP #TK_SEMI
+    BEQ :+
+    JMP cmp_error
+:
+    ; --- OP_DATA emit (op1 = value) ---
+    JSR cmp_op24_zero
+    LDY #0
+    LDA CMP_EXPR_VAL
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_EXPR_VAL+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA CMP_EXPR_TYPE
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_OP_DATA
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
 cas_incdec_stmt:
     STA TMP2
     ; CMP_ASSIGN_SLOT を CMP_INCDEC_SLOT にコピー
@@ -1077,6 +1188,10 @@ cmp_parse_primary:
     BNE :+
     JMP cpp_pre_dec_expr
 :
+    CMP #TK_LBRACKET
+    BNE :+
+    JMP cpp_array_literal
+:
     JMP cmp_error
 
 ; ++$x (prefix in expression) → PRE_INC with TMP result
@@ -1147,10 +1262,85 @@ cpp_cv:
     JSR cmp_lex_next                ; peek next
     LDA CMP_TOK_KIND
     CMP #TK_INC
-    BEQ cpp_cv_post_inc
+    BNE :+
+    JMP cpp_cv_post_inc
+:
     CMP #TK_DEC
-    BEQ cpp_cv_post_dec
+    BNE :+
+    JMP cpp_cv_post_dec
+:
+    CMP #TK_LBRACKET
+    BEQ cpp_cv_fetch_dim
     RTS                              ; just CV、terminator は CMP_TOK_KIND に残る
+
+; $cv [ idx ] [ idx ] ... → チェーンで FETCH_DIM_R を繰り返し emit
+cpp_cv_fetch_dim:
+cdf_loop:
+    ; CMP_EXPR (CV または前回の TMP) を LHS に退避
+    LDA CMP_EXPR_VAL
+    STA CMP_LHS_VAL
+    LDA CMP_EXPR_VAL+1
+    STA CMP_LHS_VAL+1
+    LDA CMP_EXPR_TYPE
+    STA CMP_LHS_TYPE
+    JSR cmp_lex_next                 ; '[' を consume、index 先頭 token を peek
+    JSR cmp_parse_expr               ; index → CMP_EXPR、終了時 CMP_TOK = ']'
+    LDA CMP_TOK_KIND
+    CMP #TK_RBRACKET
+    BEQ :+
+    JMP cmp_error
+:
+    ; --- FETCH_DIM_R emit ---
+    JSR cmp_op24_zero
+    LDY #0
+    LDA CMP_LHS_VAL
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_LHS_VAL+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA CMP_LHS_TYPE
+    STA (CMP_OP_HEAD), Y
+    LDY #4
+    LDA CMP_EXPR_VAL
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_EXPR_VAL+1
+    STA (CMP_OP_HEAD), Y
+    LDY #22
+    LDA CMP_EXPR_TYPE
+    STA (CMP_OP_HEAD), Y
+    LDX CMP_TMP_COUNT
+    CPX #64
+    BCC :+
+    JMP cmp_error
+:
+    JSR cmp_lit_idx_to_offset
+    LDY #8
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #23
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_FETCH_DIM_R
+    STA (CMP_OP_HEAD), Y
+    INC CMP_TMP_COUNT
+    JSR cmp_op_finish
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    JSR cmp_lex_next                 ; ']' を consume、次 token を peek
+    LDA CMP_TOK_KIND
+    CMP #TK_LBRACKET
+    BEQ cdf_loop                     ; 次も [ ならチェーン
+    RTS
 
 cpp_cv_post_inc:
     LDA #ZEND_POST_INC
@@ -1160,6 +1350,137 @@ cpp_cv_post_dec:
 cpp_cv_post_common:
     JSR cmp_emit_incdec_tmp         ; CMP_INCDEC_SLOT の CV を inc/dec、CMP_EXPR = TMP (旧値)
     JSR cmp_lex_next                ; ++/-- の次の token
+    RTS
+
+; '[' expr (',' expr)* ']' → 配列リテラル
+;   INIT_ARRAY (op1 = capacity、result = 新 TMP) を先に emit し、
+;   op1 の位置を CMP_ARR_PATCH に覚えて backpatch する。
+;   各要素は ADD_ARRAY_ELEMENT (op1 = array TMP, op2 = element expr) を emit。
+;   終了時に要素数を backpatch。CMP_EXPR = array TMP (IS_TMP_VAR)。
+;   ネスト可 ([[...],[...]]): 入口で CMP_ARR_* を stack に退避、出口で復元。
+;   空配列 [] 可 (cap=0)。
+cpp_array_literal:
+    ; 現在の配列 parse 状態を stack に退避 (ネスト対応)
+    LDA CMP_ARR_TMP
+    PHA
+    LDA CMP_ARR_TMP+1
+    PHA
+    LDA CMP_ARR_PATCH
+    PHA
+    LDA CMP_ARR_PATCH+1
+    PHA
+    LDA CMP_ARR_COUNT
+    PHA
+    JSR cmp_lex_next                ; '[' を consume、先頭 token を peek
+    ; --- INIT_ARRAY emit ---
+    JSR cmp_op24_zero
+    ; backpatch 位置 = 現 CMP_OP_HEAD (op の先頭)
+    LDA CMP_OP_HEAD
+    STA CMP_ARR_PATCH
+    LDA CMP_OP_HEAD+1
+    STA CMP_ARR_PATCH+1
+    ; result = 新 TMP
+    LDX CMP_TMP_COUNT
+    CPX #64
+    BCC :+
+    JMP cmp_error
+:
+    JSR cmp_lit_idx_to_offset        ; TMP0 = TMP idx * 4
+    LDY #8
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #23
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_INIT_ARRAY
+    STA (CMP_OP_HEAD), Y
+    INC CMP_TMP_COUNT
+    ; array TMP value を退避
+    LDA TMP0
+    STA CMP_ARR_TMP
+    LDA TMP0+1
+    STA CMP_ARR_TMP+1
+    JSR cmp_op_finish
+    ; 要素 count = 0
+    LDA #0
+    STA CMP_ARR_COUNT
+
+    ; empty array 対応
+    LDA CMP_TOK_KIND
+    CMP #TK_RBRACKET
+    BEQ cpal_end
+
+cpal_element_loop:
+    JSR cmp_parse_expr               ; 要素。終了時 CMP_TOK_KIND = ',' or ']'
+    ; --- ADD_ARRAY_ELEMENT emit ---
+    JSR cmp_op24_zero
+    ; op1 = array TMP (IS_TMP_VAR)
+    LDY #0
+    LDA CMP_ARR_TMP
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_ARR_TMP+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    ; op2 = element (CMP_EXPR)
+    LDY #4
+    LDA CMP_EXPR_VAL
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_EXPR_VAL+1
+    STA (CMP_OP_HEAD), Y
+    LDY #22
+    LDA CMP_EXPR_TYPE
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_ADD_ARRAY_ELEMENT
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    INC CMP_ARR_COUNT
+    ; 次は ',' か ']'
+    LDA CMP_TOK_KIND
+    CMP #TK_COMMA
+    BEQ cpal_next
+    CMP #TK_RBRACKET
+    BEQ cpal_end
+    JMP cmp_error
+cpal_next:
+    JSR cmp_lex_next                 ; ',' を consume、次 element token を peek
+    JMP cpal_element_loop
+
+cpal_end:
+    ; backpatch: INIT_ARRAY の op1 (byte 0-1) に要素数 count を書く
+    LDY #0
+    LDA CMP_ARR_COUNT
+    STA (CMP_ARR_PATCH), Y
+    INY
+    LDA #0
+    STA (CMP_ARR_PATCH), Y
+    ; CMP_EXPR = array TMP (この literal の結果)
+    LDA CMP_ARR_TMP
+    STA CMP_EXPR_VAL
+    LDA CMP_ARR_TMP+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    JSR cmp_lex_next                 ; ']' を consume
+    ; 退避していた親レベルの配列 parse 状態を復元 (ネスト対応)
+    PLA
+    STA CMP_ARR_COUNT
+    PLA
+    STA CMP_ARR_PATCH+1
+    PLA
+    STA CMP_ARR_PATCH
+    PLA
+    STA CMP_ARR_TMP+1
+    PLA
+    STA CMP_ARR_TMP
     RTS
 
 ; true → IS_TRUE zval (literal)
@@ -1176,14 +1497,75 @@ cpp_true:
     JSR cmp_lex_next
     RTS
 
-; IDENT 式 — fgets(STDIN) と nes_btn($mask) に対応 (戻り値 TMP)
+; IDENT 式 — fgets(STDIN) / nes_btn() / count($a) に対応 (戻り値 TMP)
 cpp_ident:
     JSR cmp_match_intrinsic
     CMP #INT_FGETS
-    BEQ cpp_ident_fgets
+    BNE :+
+    JMP cpp_ident_fgets
+:
     CMP #INT_BTN
-    BEQ cpp_ident_btn
+    BNE :+
+    JMP cpp_ident_btn
+:
+    CMP #INT_COUNT
+    BEQ cpp_ident_count
     JMP cmp_error
+
+; count($a) 式: '(' expr ')' をパース、ZEND_COUNT op1=expr、result = 新 TMP
+cpp_ident_count:
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_LPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_lex_next
+    JSR cmp_parse_expr               ; CMP_EXPR = array 式
+    LDA CMP_TOK_KIND
+    CMP #TK_RPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    ; --- ZEND_COUNT emit ---
+    JSR cmp_op24_zero
+    LDY #0
+    LDA CMP_EXPR_VAL
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_EXPR_VAL+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA CMP_EXPR_TYPE
+    STA (CMP_OP_HEAD), Y
+    LDX CMP_TMP_COUNT
+    CPX #64
+    BCC :+
+    JMP cmp_error
+:
+    JSR cmp_lit_idx_to_offset
+    LDY #8
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #23
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #ZEND_COUNT
+    STA (CMP_OP_HEAD), Y
+    INC CMP_TMP_COUNT
+    JSR cmp_op_finish
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    JSR cmp_lex_next                 ; ')' を consume
+    RTS
 
 cpp_ident_btn:
     ; '(' ')' をパース (0 引数)、NESPHP_NES_BTN result=TMP を emit
@@ -1449,6 +1831,14 @@ cln_not_eof:
     BNE :+
     JMP cln_rbrace
 :
+    CMP #'['
+    BNE :+
+    JMP cln_lbracket
+:
+    CMP #']'
+    BNE :+
+    JMP cln_rbracket
+:
     CMP #'+'
     BNE :+
     JMP cln_plus
@@ -1539,6 +1929,16 @@ cln_lbrace:
 cln_rbrace:
     JSR cmp_advance1
     LDA #TK_RBRACE
+    STA CMP_TOK_KIND
+    RTS
+cln_lbracket:
+    JSR cmp_advance1
+    LDA #TK_LBRACKET
+    STA CMP_TOK_KIND
+    RTS
+cln_rbracket:
+    JSR cmp_advance1
+    LDA #TK_RBRACKET
     STA CMP_TOK_KIND
     RTS
 cln_plus:
@@ -2405,6 +2805,14 @@ cmp_match_intrinsic:
     LDA #INT_BTN
     RTS
 :
+    LDA #<intrinsic_name_count
+    LDX #>intrinsic_name_count
+    LDY #5
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_COUNT
+    RTS
+:
     LDA #INT_NOT_FOUND
     RTS
 
@@ -2441,6 +2849,7 @@ intrinsic_name_nes_sprite:    .byte "nes_sprite"
 intrinsic_name_nes_attr:      .byte "nes_attr"
 intrinsic_name_nes_vsync:     .byte "nes_vsync"
 intrinsic_name_nes_btn:       .byte "nes_btn"
+intrinsic_name_count:         .byte "count"
 
 ; =============================================================================
 ; intrinsic 発行 (statement context、戻り値破棄)
@@ -2468,6 +2877,7 @@ cmp_emit_jmp_table:
     .word cmp_emit_attr
     .word cmp_emit_vsync
     .word cmp_emit_btn_stmt
+    .word cmp_emit_count_stmt
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -2689,6 +3099,22 @@ cmp_emit_btn_stmt:
     JSR cmp_op24_zero
     LDY #20
     LDA #NESPHP_NES_BTN
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; count($a); 単独 stmt (結果破棄) — argは arg[0] に配置済、result_type = IS_UNUSED
+cmp_emit_count_stmt:
+    LDA CMP_ARG_COUNT
+    CMP #1
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDY #20
+    LDA #ZEND_COUNT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     RTS

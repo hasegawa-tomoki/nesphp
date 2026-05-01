@@ -37,6 +37,12 @@ ZEND_POST_DEC         = 37
 ZEND_JMP              = 42
 ZEND_JMPZ             = 43
 ZEND_JMPNZ            = 44
+ZEND_INIT_ARRAY       = 71
+ZEND_ADD_ARRAY_ELEMENT = 72
+ZEND_FETCH_DIM_R      = 81
+ZEND_COUNT            = 90
+ZEND_OP_DATA          = 138
+ZEND_ASSIGN_DIM       = 147
 ZEND_RETURN           = 62
 ZEND_ECHO             = 136
 
@@ -72,6 +78,7 @@ TYPE_FALSE      = 2
 TYPE_TRUE       = 3
 TYPE_LONG       = 4
 TYPE_STRING     = 6
+TYPE_ARRAY      = 7
 
 ; --- PPU レジスタ ---
 PPUCTRL      = $2000
@@ -125,6 +132,14 @@ CMP_LIT_STAGE    = $7000
 ; この領域はそのまま読み出し対象として残る。
 STR_POOL_BASE    = $7800
 STR_POOL_END     = $8000
+
+; Array runtime プール: コンパイル中は CMP_LIT_STAGE ($7000-$77FF) に zval 一時領域
+; として使われるが、cmp_finalize の memcpy 後は未使用。runtime phase でこの 2KB を
+; 配列ヘッダ + 要素ストレージに転用する。各配列は header 4B (count, capacity) +
+; 要素 (capacity × 16B zval)。ARR_POOL_HEAD は main_loop 前に ARR_POOL_BASE に
+; リセットされ、追記型で成長、ARR_POOL_END に達したら err_screen。
+ARR_POOL_BASE    = $7000
+ARR_POOL_END     = $7800
 
 ; CV シンボル表: WRAM の $0700 以降。1 エントリ 4B ([len, name_ptr_lo, name_ptr_hi, pad])
 ; VM runtime では $0700-$07FF は予備 (spec/02-ram-layout.md)。コンパイル完了後は
@@ -230,6 +245,10 @@ CMP_FOR_UPD_START: .res 2   ; for: update 部の先頭 op_index
 CMP_LOGIC_SLOT:    .res 1   ; &&/|| の結果を受ける TMP slot
 CMP_LOGIC_DONE:    .res 2   ; &&/|| 終端 JMP の patch 対象アドレス
 CMP_STRPOOL_HEAD:  .res 2   ; 文字列 pool の次書込アドレス (STR_POOL_BASE から成長)
+CMP_ARR_TMP:       .res 2   ; 配列リテラル parse 中: 最新 INIT_ARRAY が返す TMP の value
+CMP_ARR_PATCH:     .res 2   ; 配列リテラル parse 中: INIT_ARRAY の op1 を backpatch する位置
+CMP_ARR_COUNT:     .res 1   ; 配列リテラル parse 中: 要素カウンタ (capacity として op1 に書く)
+ARR_POOL_HEAD:     .res 2   ; runtime array pool の次 alloc アドレス (ARR_POOL_BASE から成長、compile_and_emit 後に init_array_pool が初期化)
 
 ; PPUCTRL シャドウ (書き込み専用レジスタなので直前値を RAM に保持する)
 ;   bit 7 = NMI enable、bit 4 = BG pattern table ($0000 / $1000)、bit 3 = sprite PT
@@ -440,6 +459,12 @@ clear_nt_inner:
     LDA PPU_CURSOR
     STA PPUADDR
 
+    ; runtime array pool 初期化 (compile 中の CMP_LIT_STAGE は memcpy 済みで未使用)
+    LDA #<ARR_POOL_BASE
+    STA ARR_POOL_HEAD
+    LDA #>ARR_POOL_BASE
+    STA ARR_POOL_HEAD+1
+
     JMP main_loop
 
 ; -----------------------------------------------------------------------------
@@ -588,6 +613,30 @@ main_loop:
     CMP #ZEND_IS_NOT_IDENTICAL
     BNE :+
     JMP handle_zend_is_not_equal
+:
+    CMP #ZEND_INIT_ARRAY
+    BNE :+
+    JMP handle_zend_init_array
+:
+    CMP #ZEND_ADD_ARRAY_ELEMENT
+    BNE :+
+    JMP handle_zend_add_array_element
+:
+    CMP #ZEND_FETCH_DIM_R
+    BNE :+
+    JMP handle_zend_fetch_dim_r
+:
+    CMP #ZEND_COUNT
+    BNE :+
+    JMP handle_zend_count
+:
+    CMP #ZEND_ASSIGN_DIM
+    BNE :+
+    JMP handle_zend_assign_dim
+:
+    CMP #ZEND_OP_DATA
+    BNE :+
+    JMP advance                    ; OP_DATA 単独は no-op (通常は ASSIGN_DIM が skip)
 :
     JMP handle_unimpl
 
@@ -2841,6 +2890,332 @@ epn_wait:
     ; NMI が flush_nmi_queue で read を進めてくれるのを待つ
     JMP epn_check
 
+; =============================================================================
+; ZEND_INIT_ARRAY / ZEND_ADD_ARRAY_ELEMENT / ZEND_FETCH_DIM_R / ZEND_COUNT
+;
+; 配列は ARR_POOL_BASE ($7000) から ARR_POOL_END ($7800) の 2KB pool に追記型で
+; allocate。各配列の layout:
+;   offset 0-1: count (u16、現在の要素数)
+;   offset 2-3: capacity (u16、確保済みスロット数)
+;   offset 4+:  capacity × 16 bytes (zval 配列)
+; 配列 zval (4B tagged) は [TYPE_ARRAY, ptr_lo, ptr_hi, 0]。
+; pool 枯渇で handle_unimpl へジャンプ。GC 無しで追記のみ。
+; =============================================================================
+
+; handle_zend_init_array: op1 = capacity (raw u16, IS_UNUSED type)。
+; 新配列を alloc し、count=0/cap=capacity で初期化、RESULT に TYPE_ARRAY + pool
+; 内 ptr を返す。MVP: cap < 16 を想定。
+handle_zend_init_array:
+    LDY #0
+    LDA (VM_PC), Y             ; op1 lo = cap
+    STA TMP0
+    ; needed = 4 + cap*16
+    LDA TMP0
+    ASL A
+    ASL A
+    ASL A
+    ASL A                      ; A = (cap*16) & $FF
+    CLC
+    ADC #4
+    STA TMP1                   ; needed lo
+    LDA #0
+    ADC #0                     ; carry from +4
+    STA TMP1+1
+    LDA TMP0
+    LSR A
+    LSR A
+    LSR A
+    LSR A                      ; A = cap >> 4 (cap*16 の上位 byte)
+    CLC
+    ADC TMP1+1
+    STA TMP1+1
+    ; 終端判定: new_head = head + needed
+    CLC
+    LDA ARR_POOL_HEAD
+    ADC TMP1
+    STA TMP2
+    LDA ARR_POOL_HEAD+1
+    ADC TMP1+1
+    STA TMP2+1
+    ; new_head >= ARR_POOL_END -> err
+    LDA TMP2+1
+    CMP #>ARR_POOL_END
+    BCC ia_have_space
+    BNE ia_overflow
+    LDA TMP2
+    CMP #<ARR_POOL_END
+    BCC ia_have_space
+ia_overflow:
+    JMP handle_unimpl
+ia_have_space:
+    ; RESULT = [TYPE_ARRAY, head_lo, head_hi, 0]
+    LDA #TYPE_ARRAY
+    STA RESULT_VAL
+    LDA ARR_POOL_HEAD
+    STA RESULT_VAL+1
+    LDA ARR_POOL_HEAD+1
+    STA RESULT_VAL+2
+    LDA #0
+    STA RESULT_VAL+3
+    ; header: count=0, cap=cap
+    LDY #0
+    LDA #0
+    STA (ARR_POOL_HEAD), Y
+    INY
+    STA (ARR_POOL_HEAD), Y
+    INY
+    LDA TMP0
+    STA (ARR_POOL_HEAD), Y
+    INY
+    LDA #0
+    STA (ARR_POOL_HEAD), Y
+    ; advance pool head
+    LDA TMP2
+    STA ARR_POOL_HEAD
+    LDA TMP2+1
+    STA ARR_POOL_HEAD+1
+    JSR write_result
+    JMP advance
+
+; handle_zend_add_array_element: op1 = array、op2 = element。
+; array->count 番目に element の 16B zval を書き込み、count++。
+handle_zend_add_array_element:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL+1
+    STA TMP0
+    LDA OP1_VAL+2
+    STA TMP0+1
+    ; TMP1 = count
+    LDY #0
+    LDA (TMP0), Y
+    STA TMP1
+    ; dest = TMP0 + 4 + count*16
+    ASL A
+    ASL A
+    ASL A
+    ASL A                      ; A = (count*16) & $FF
+    CLC
+    ADC #4
+    CLC
+    ADC TMP0
+    STA TMP2                   ; dest lo
+    LDA TMP0+1
+    ADC #0
+    STA TMP2+1                 ; dest hi
+    ; 16B zval を書く (4B tagged -> 16B zval)
+    LDY #0
+    LDA OP2_VAL+1
+    STA (TMP2), Y
+    INY
+    LDA OP2_VAL+2
+    STA (TMP2), Y
+    INY
+    LDA OP2_VAL+3
+    STA (TMP2), Y
+    INY
+    LDA #0
+aae_zero1:
+    STA (TMP2), Y
+    INY
+    CPY #8
+    BNE aae_zero1
+    LDA OP2_VAL                ; type
+    STA (TMP2), Y
+    INY
+    LDA #0
+aae_zero2:
+    STA (TMP2), Y
+    INY
+    CPY #16
+    BNE aae_zero2
+    ; count++
+    LDY #0
+    LDA (TMP0), Y
+    CLC
+    ADC #1
+    STA (TMP0), Y
+    BCC aae_done
+    INY
+    LDA (TMP0), Y
+    ADC #0
+    STA (TMP0), Y
+aae_done:
+    JSR write_result
+    JMP advance
+
+; handle_zend_fetch_dim_r: op1 = array、op2 = index (IS_LONG)。
+; array[index] の 16B zval を RESULT (4B tagged) に展開。
+handle_zend_fetch_dim_r:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL+1
+    STA TMP0
+    LDA OP1_VAL+2
+    STA TMP0+1
+    LDA OP2_VAL+1              ; index lo
+    ASL A
+    ASL A
+    ASL A
+    ASL A                      ; A = (index*16) & $FF
+    CLC
+    ADC #4
+    CLC
+    ADC TMP0
+    STA TMP1                   ; src lo
+    LDA TMP0+1
+    ADC #0
+    STA TMP1+1                 ; src hi
+    ; zval[0..2] → RESULT_VAL+1..+3
+    LDY #0
+    LDA (TMP1), Y
+    STA RESULT_VAL+1
+    INY
+    LDA (TMP1), Y
+    STA RESULT_VAL+2
+    INY
+    LDA (TMP1), Y
+    STA RESULT_VAL+3
+    LDY #8
+    LDA (TMP1), Y
+    STA RESULT_VAL
+    JSR write_result
+    JMP advance
+
+; handle_zend_count: op1 = array、RESULT = IS_LONG(count)。
+handle_zend_count:
+    JSR resolve_op1
+    LDA OP1_VAL+1
+    STA TMP0
+    LDA OP1_VAL+2
+    STA TMP0+1
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDY #0
+    LDA (TMP0), Y
+    STA RESULT_VAL+1
+    INY
+    LDA (TMP0), Y
+    STA RESULT_VAL+2
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+; -----------------------------------------------------------------------------
+; handle_zend_assign_dim: $a[key] = value (または append $a[] = value)
+;   op1 = array, op2 = key (IS_UNUSED なら append)
+;   value は次の opcode (ZEND_OP_DATA) の op1 から取る
+;   VM_PC を +48 進める (ASSIGN_DIM + OP_DATA の 2 op を消費)
+;   count は max(count, slot+1) に更新 (任意 index への直接書換も count に反映)
+; -----------------------------------------------------------------------------
+handle_zend_assign_dim:
+    JSR resolve_op1                ; OP1_VAL = array (ptr in +1/+2)
+    ; array ptr を stack に退避 (push hi, lo の順。pop は lo, hi)
+    LDA OP1_VAL+2
+    PHA
+    LDA OP1_VAL+1
+    PHA
+    ; slot 決定: op2_type が IS_UNUSED (= 0) なら append、それ以外は index
+    LDY #22
+    LDA (VM_PC), Y
+    BNE asd_use_index
+    ; append: slot = count (header[0])
+    ; ptr を pop → TMP0、slot を取る、ptr を push し直す
+    PLA
+    STA TMP0
+    PLA
+    STA TMP0+1
+    LDY #0
+    LDA (TMP0), Y
+    STA TMP1                       ; TMP1 = slot
+    LDA TMP0+1
+    PHA
+    LDA TMP0
+    PHA
+    JMP asd_slot_ready
+asd_use_index:
+    JSR resolve_op2                ; OP2_VAL = index (TMP0 は clobber される)
+    LDA OP2_VAL+1
+    STA TMP1                       ; TMP1 = slot
+asd_slot_ready:
+    ; 現時点で stack 最上位 = [lo, hi] (array ptr)
+    ; ptr を pop → TMP0 (+1)、ここで dest を計算。ptr は push し直す (count 更新用)
+    PLA
+    STA TMP0
+    PLA
+    STA TMP0+1
+    LDA TMP0+1
+    PHA
+    LDA TMP0
+    PHA
+    ; dest = TMP0 + 4 + slot*16 (MVP: slot < 16)
+    LDA TMP1
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    CLC
+    ADC #4
+    CLC
+    ADC TMP0
+    STA TMP2                       ; dest lo
+    LDA TMP0+1
+    ADC #0
+    STA TMP2+1                     ; dest hi
+    ; VM_PC を +24 して OP_DATA を指す
+    CLC
+    LDA VM_PC
+    ADC #24
+    STA VM_PC
+    BCC :+
+    INC VM_PC+1
+:
+    JSR resolve_op1                ; OP1_VAL = value (TMP0 clobber される)
+    ; 16B zval を (TMP2) に書込
+    LDY #0
+    LDA OP1_VAL+1
+    STA (TMP2), Y
+    INY
+    LDA OP1_VAL+2
+    STA (TMP2), Y
+    INY
+    LDA OP1_VAL+3
+    STA (TMP2), Y
+    INY
+    LDA #0
+asd_zero1:
+    STA (TMP2), Y
+    INY
+    CPY #8
+    BNE asd_zero1
+    LDA OP1_VAL                    ; type
+    STA (TMP2), Y
+    INY
+    LDA #0
+asd_zero2:
+    STA (TMP2), Y
+    INY
+    CPY #16
+    BNE asd_zero2
+    ; array ptr を stack から復元して count 更新
+    PLA
+    STA TMP0
+    PLA
+    STA TMP0+1
+    LDA TMP1
+    CLC
+    ADC #1                         ; A = slot + 1
+    LDY #0
+    CMP (TMP0), Y
+    BCC asd_no_update
+    STA (TMP0), Y                  ; count_lo = slot+1
+    LDA #0
+    INY
+    STA (TMP0), Y                  ; count_hi = 0
+asd_no_update:
+    JMP advance
+
 irq:
     RTI
 
@@ -2864,12 +3239,48 @@ palette_data:
 .include "compiler.s"
 
 ; =============================================================================
-; VECTORS
+; PRG bank 1 trampoline + 割り込みベクタ ($FFF0-$FFFF)
+;
+; bank1_boot は $FFF0 に置く小さな MMC1 reset スタブ。BANK0_BOOT として
+; bank 0 末尾 ($BFF0) にバイト単位で同じ内容をミラーする。これは EverDrive
+; N8 など実機系フラッシュカートで MMC1 が mode 3 以外で電源投入された場合の
+; 保険:
+;
+;   1. EverDrive が bank 0 を $C000-$FFFF にマップした状態で起動 → CPU が
+;      $FFFC のリセットベクタを読むと bank 0 末尾 6B がベクタとして見える
+;   2. ベクタは $FFF0 を指すので CPU は bank 0 のミラー ($BFF0 にあるバイト
+;      列) を $FFF0 として実行
+;   3. STA $8000 で MMC1 を mode 3 にリセット → bank 1 が $C000-$FFFF
+;   4. 直後の JMP operand fetch は新しく差し変わった bank 1 から行われるが
+;      両 bank が byte-identical なのでシームレスに JMP $C000 (=reset) へ
+;
+; 実機 MMC1 は power-on で mode 3 に落ち着くのでこの trampoline は no-op
+; だが、フラッシュカート向け defensive bootstrap の標準パターン
+; (commercial MMC1 ゲームも同じ対策をしている)。
+;
+; BANK0_BOOT / BANK0_VECTORS は BANK1_BOOT / VECTORS と byte-for-byte 一致
+; させる必要がある (JMP の operand fetch が bank 切替を跨ぐため)。
 ; =============================================================================
+.segment "BANK1_BOOT"
+bank1_boot:
+    LDA #$80
+    STA $8000          ; MMC1 reset → mode 3 (last 16KB bank fixed at $C000)
+    JMP reset
+
 .segment "VECTORS"
     .word nmi
-    .word reset
+    .word bank1_boot   ; reset は必ず trampoline 経由で MMC1 を正規化
     .word irq
+
+.segment "BANK0_BOOT"
+    LDA #$80
+    STA $8000
+    JMP reset
+
+.segment "BANK0_VECTORS"
+    .word nmi          ; bank 0 が $C000 に居る間 NMI は disabled なので未使用
+    .word bank1_boot   ; CPU が $FFFC を読むと $FFF0 → bank 0 ミラー実行
+    .word irq          ; I=1 なので IRQ も bank 0 が $C000 に居る間は発火しない
 
 ; =============================================================================
 ; CHARS

@@ -36,6 +36,12 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 | `ZEND_PRE_DEC` | **35 (0x23)** | ✓ | ✓ (Q3) | `--$x`。op1 を −1 し result に新値 |
 | `ZEND_POST_INC` | **36 (0x24)** | ✓ | ✓ (Q3) | `$x++`。op1 を +1、result に旧値 |
 | `ZEND_POST_DEC` | **37 (0x25)** | ✓ | ✓ (Q3) | `$x--`。op1 を −1、result に旧値 |
+| `ZEND_INIT_ARRAY` | **71 (0x47)** | ✓ | ✓ (U1) | op1 = capacity (raw u16)、result に新 array の TYPE_ARRAY zval。2KB pool ($7000-$77FF) から alloc |
+| `ZEND_ADD_ARRAY_ELEMENT` | **72 (0x48)** | ✓ | ✓ (U1) | op1 = array TMP、op2 = 要素。array の count 位置に 16B zval として append、count++ |
+| `ZEND_FETCH_DIM_R` | **81 (0x51)** | ✓ | ✓ (U1) | op1 = array、op2 = index (IS_LONG)、result = 読取要素を 4B tagged に展開 |
+| `ZEND_COUNT` | **90 (0x5A)** | ✓ | ✓ (U1) | op1 = array、result = IS_LONG(count) |
+| `ZEND_OP_DATA` | **138 (0x8A)** | ✓ | ✓ (V1) | 単独実行は no-op。ASSIGN_DIM 等が value を次 op の op1 から読むための payload |
+| `ZEND_ASSIGN_DIM` | **147 (0x93)** | ✓ | ✓ (V1) | op1 = array、op2 = key (IS_UNUSED で append)。value は次の ZEND_OP_DATA の op1 から取得。VM_PC +48 で 2-op sequence を消費。count = max(count, slot+1) 更新 |
 | `ZEND_JMP` | **42 (0x2A)** | ✓ | ✓ (P3) | op1.num (op_index) に無条件分岐 |
 | `ZEND_JMPZ` | **43 (0x2B)** | ✓ | ✓ (P3) | op1 が falsy のとき op2.num に分岐 |
 | `ZEND_JMPNZ` | **44 (0x2C)** | ✓ | — | op1 が truthy のとき op2.num に分岐 |
