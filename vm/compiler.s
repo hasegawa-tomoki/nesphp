@@ -60,6 +60,11 @@ TK_SL      = 30
 TK_SR      = 31
 TK_LBRACKET = 32
 TK_RBRACKET = 33
+TK_LE      = 34   ; <=
+TK_GT      = 35   ; >
+TK_GE      = 36   ; >=
+TK_ELSE    = 37
+TK_ELSEIF  = 38
 
 ; --- Intrinsic ID ---
 INT_CLS         = 0
@@ -549,7 +554,7 @@ cpp_if_stmt:
     JMP cmp_error
 :
     LDA #ZEND_JMPZ
-    JSR cmp_emit_jmpxx_with_bp
+    JSR cmp_emit_jmpxx_with_bp   ; bp1 = JMPZ で飛ぶ先 (= else 開始 or end)
 
     ; body: ブロック or 単文
     JSR cmp_lex_next
@@ -557,11 +562,86 @@ cpp_if_stmt:
     CMP #TK_LBRACE
     BNE cpif_single
     JSR cmp_parse_block_body
-    JMP cpif_patch
+    JMP cpif_after_body
 cpif_single:
     JSR cmp_dispatch_stmt
-cpif_patch:
-    JSR cmp_bp_pop_patch
+cpif_after_body:
+    ; --- else / elseif の lookahead (rollback 可能) ---
+    ; cpp_if_stmt の RTS 時の契約: CMP_TOK_KIND は body 終端 ('}' / ';')。
+    ; ここで lex_next すると次トークンを消費してしまうので、SRC_PTR/LINE/COL を
+    ; 6502 stack に退避し、else/elseif でなかったら巻き戻す。
+    LDA CMP_SRC_PTR
+    PHA
+    LDA CMP_SRC_PTR+1
+    PHA
+    LDA CMP_LINE
+    PHA
+    LDA CMP_LINE+1
+    PHA
+    LDA CMP_COL
+    PHA
+    LDA CMP_COL+1
+    PHA
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_ELSE
+    BEQ cpif_has_else
+    CMP #TK_ELSEIF
+    BEQ cpif_has_elseif
+    ; --- else 無し: lex を巻き戻して bp1 を end に patch ---
+    PLA
+    STA CMP_COL+1
+    PLA
+    STA CMP_COL
+    PLA
+    STA CMP_LINE+1
+    PLA
+    STA CMP_LINE
+    PLA
+    STA CMP_SRC_PTR+1
+    PLA
+    STA CMP_SRC_PTR
+    JSR cmp_bp_pop_patch         ; bp1 → 現在 (end of if)
+    RTS
+
+cpif_has_else:
+    ; else / elseif 共通の前処理:
+    ;   1. 退避していた lex 状態を破棄 (consumed)
+    ;   2. JMP placeholder を emit して bp2 push (else 全体の終端)
+    ;   3. bp1 を pop して patch (= else block の開始 = 現在)
+    PLA
+    PLA
+    PLA
+    PLA
+    PLA
+    PLA
+    JSR cmp_emit_jmp_with_bp     ; bp2 = JMP の飛び先 (else 終端)
+    JSR cmp_bp_pop_patch_top2    ; pop & patch bp1 (else 開始 = 現在)
+    ; else body: ブロック or 単文
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_LBRACE
+    BNE cpif_else_single
+    JSR cmp_parse_block_body
+    JMP cpif_else_done
+cpif_else_single:
+    JSR cmp_dispatch_stmt
+cpif_else_done:
+    JSR cmp_bp_pop_patch         ; bp2 → 現在 (else 全体の終端)
+    RTS
+
+cpif_has_elseif:
+    ; elseif: bp1 を else 開始に patch、再帰で if-stmt を呼んで連鎖を処理
+    PLA
+    PLA
+    PLA
+    PLA
+    PLA
+    PLA
+    JSR cmp_emit_jmp_with_bp     ; bp2 = JMP の飛び先 (elseif 連鎖の終端)
+    JSR cmp_bp_pop_patch_top2    ; pop & patch bp1 (elseif 開始 = 現在)
+    JSR cpp_if_stmt              ; 再帰: 内側の if (= elseif の本体) を処理
+    JSR cmp_bp_pop_patch         ; bp2 → 現在 (連鎖全体の終端)
     RTS
 
 ; -----------------------------------------------------------------------------
@@ -859,6 +939,38 @@ cmp_bp_pop_patch:
     STA (TMP0), Y
     RTS
 
+; cmp_bp_pop_patch_top2: stack の **上から 2 番目** のエントリを patch して
+; 取り除く。最上位はそのまま残る (else / elseif の bp1 patch 用)。
+;   入力: stack = [..., bp1, bp2] (bp2 が最上位)
+;   結果: stack = [..., bp2]、bp1 のアドレスに CMP_OP_COUNT を書込
+; 実装: 最上位を一時 TMP1 に退避 → cmp_bp_pop_patch (= bp1 を patch) → TMP1 を再 push。
+cmp_bp_pop_patch_top2:
+    LDA CMP_BP_TOP
+    CMP #2
+    BCS :+
+    JMP cmp_error
+:
+    ; 最上位 (bp2) を TMP1 に退避し、TOP を 1 減らす (= bp2 を pop した形に)
+    DEC CMP_BP_TOP
+    LDX CMP_BP_TOP
+    TXA
+    ASL A
+    TAY
+    LDA CMP_BP_STACK, Y
+    STA TMP1
+    INY
+    LDA CMP_BP_STACK, Y
+    STA TMP1+1
+    ; ここで bp1 が新しい最上位なので、cmp_bp_pop_patch で bp1 を patch
+    JSR cmp_bp_pop_patch
+    ; TMP1 (= bp2) を push し直す
+    LDA TMP1
+    STA TMP0
+    LDA TMP1+1
+    STA TMP0+1
+    JSR cmp_bp_push
+    RTS
+
 ; =============================================================================
 ; parse_arg (function call)
 ; =============================================================================
@@ -930,8 +1042,22 @@ cpa_expr:
 ; parse_cmp_expr: add_expr (cmp_op add_expr)?
 ; parse_add_expr: primary (+/-/&/|/<</>> primary)*
 ; parse_primary: INT | STRING | CV | TRUE | fgets(...) | nes_btn() | ++/-- etc.
+;
+; 入口で CMP_LHS_VAL/TYPE と CMP_INTRINSIC_ID を 6502 stack に退避し、出口で
+; 復元する。これらは cpa_binop / cpe_cmp が「現在処理中の binop の LHS と
+; opcode」を保持するためのグローバル変数で、parse_expr が再帰的に呼ばれると
+; (例: `1 + (2 << 3)`、`$x + $a[$i + 1]` 等) 内側の binop 処理で外側の状態が
+; 上書きされてしまう。entry/exit の対称的な save/restore で safe にする。
 ; =============================================================================
 cmp_parse_expr:
+    LDA CMP_LHS_VAL
+    PHA
+    LDA CMP_LHS_VAL+1
+    PHA
+    LDA CMP_LHS_TYPE
+    PHA
+    LDA CMP_INTRINSIC_ID
+    PHA
     JSR cmp_parse_cmp_expr
 cle_loop:
     LDA CMP_TOK_KIND
@@ -943,6 +1069,14 @@ cle_loop:
     BNE :+
     JMP cle_oror
 :
+    PLA
+    STA CMP_INTRINSIC_ID
+    PLA
+    STA CMP_LHS_TYPE
+    PLA
+    STA CMP_LHS_VAL+1
+    PLA
+    STA CMP_LHS_VAL
     RTS
 
 ; --- && 短絡評価 (両 operand truthy なら 1、一つでも falsy なら 0) ---
@@ -1096,6 +1230,21 @@ cmp_parse_cmp_expr:
     LDA #ZEND_IS_SMALLER
     JMP cpe_cmp
 :
+    CMP #TK_LE
+    BNE :+
+    LDA #ZEND_IS_SMALLER_OR_EQUAL
+    JMP cpe_cmp
+:
+    CMP #TK_GT
+    BNE :+
+    LDA #ZEND_IS_SMALLER
+    JMP cpe_cmp_swap             ; a > b ⇔ b < a (operand swap)
+:
+    CMP #TK_GE
+    BNE :+
+    LDA #ZEND_IS_SMALLER_OR_EQUAL
+    JMP cpe_cmp_swap             ; a >= b ⇔ b <= a (operand swap)
+:
     RTS                          ; no cmp, return
 
 cpe_cmp:
@@ -1109,6 +1258,38 @@ cpe_cmp:
     JSR cmp_lex_next
     JSR cmp_parse_add_expr
     JSR cmp_emit_binary          ; 比較は二項演算と同じ形式 (result=TMP)
+    RTS
+
+; cpe_cmp_swap: > / >= 用に op1/op2 を入れ替えて emit。
+; LHS は CMP_EXPR、RHS をパースしたあと:
+;   標準: op1 = LHS (CMP_LHS), op2 = RHS (CMP_EXPR)
+;   swap:  op1 = RHS, op2 = LHS  ← こちらに組み替えて emit
+cpe_cmp_swap:
+    STA CMP_INTRINSIC_ID
+    ; LHS (= 現在の CMP_EXPR) を 6502 stack に退避
+    LDA CMP_EXPR_VAL
+    PHA
+    LDA CMP_EXPR_VAL+1
+    PHA
+    LDA CMP_EXPR_TYPE
+    PHA
+    JSR cmp_lex_next
+    JSR cmp_parse_add_expr       ; CMP_EXPR = RHS
+    ; CMP_EXPR (RHS) → CMP_LHS (= emit 時の op1)
+    LDA CMP_EXPR_VAL
+    STA CMP_LHS_VAL
+    LDA CMP_EXPR_VAL+1
+    STA CMP_LHS_VAL+1
+    LDA CMP_EXPR_TYPE
+    STA CMP_LHS_TYPE
+    ; 退避していた LHS → CMP_EXPR (= emit 時の op2)
+    PLA
+    STA CMP_EXPR_TYPE
+    PLA
+    STA CMP_EXPR_VAL+1
+    PLA
+    STA CMP_EXPR_VAL
+    JSR cmp_emit_binary
     RTS
 
 cmp_parse_add_expr:
@@ -1192,7 +1373,28 @@ cmp_parse_primary:
     BNE :+
     JMP cpp_array_literal
 :
+    CMP #TK_LPAREN
+    BNE :+
+    JMP cpp_paren_expr
+:
     JMP cmp_error
+
+; (expr) — 括弧式。内側の expr を parse して、閉じ ')' を消費するだけ。
+; 結果 (CMP_EXPR_VAL/TYPE) はそのまま外に伝搬する。primary なので、終了時に
+; 次のトークンを peek しておく (cmp_lex_next で ')' の次へ進める)。
+;
+; 外側 binop の状態 (CMP_LHS_VAL/TYPE / CMP_INTRINSIC_ID) は cmp_parse_expr が
+; 入口で save、出口で restore してくれるので、ここでは何もしなくて良い。
+cpp_paren_expr:
+    JSR cmp_lex_next                 ; '(' を consume、expr 先頭 token を peek
+    JSR cmp_parse_expr               ; CMP_EXPR = 内側 expr、CMP_TOK = ')'
+    LDA CMP_TOK_KIND
+    CMP #TK_RPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_lex_next                 ; ')' を consume、次トークンを peek
+    RTS
 
 ; ++$x (prefix in expression) → PRE_INC with TMP result
 cpp_pre_inc_expr:
@@ -1948,9 +2150,16 @@ cln_lt:
     LDY #0
     LDA (CMP_SRC_PTR), Y
     CMP #'<'
-    BNE cln_lt_single
+    BNE :+
     JSR cmp_advance1                ; '<<'
     LDA #TK_SL
+    STA CMP_TOK_KIND
+    RTS
+:
+    CMP #'='
+    BNE cln_lt_single
+    JSR cmp_advance1                ; '<='
+    LDA #TK_LE
     STA CMP_TOK_KIND
     RTS
 cln_lt_single:
@@ -1958,21 +2167,28 @@ cln_lt_single:
     STA CMP_TOK_KIND
     RTS
 
-; '>' 単体は比較演算として未対応 (エラー)。'>>' のみ TK_SR として emit。
+; '>' は単独で TK_GT、'>=' で TK_GE、'>>' で TK_SR
 cln_gt:
-    JSR cmp_advance1
+    JSR cmp_advance1                ; 最初の '>'
     JSR cmp_at_eof
-    BNE :+
-    JMP cmp_error
-:
+    BEQ cln_gt_single
     LDY #0
     LDA (CMP_SRC_PTR), Y
     CMP #'>'
-    BEQ :+
-    JMP cmp_error                    ; `>` 単独は未対応
-:
-    JSR cmp_advance1                 ; '>>'
+    BNE :+
+    JSR cmp_advance1                ; '>>'
     LDA #TK_SR
+    STA CMP_TOK_KIND
+    RTS
+:
+    CMP #'='
+    BNE cln_gt_single
+    JSR cmp_advance1                ; '>='
+    LDA #TK_GE
+    STA CMP_TOK_KIND
+    RTS
+cln_gt_single:
+    LDA #TK_GT
     STA CMP_TOK_KIND
     RTS
 cln_lbrace:
@@ -2561,14 +2777,32 @@ cmp_check_keyword:
     LDA #TK_FOR
     RTS
 :
+    LDA #<kw_elseif
+    LDX #>kw_elseif
+    LDY #6
+    JSR cmi_try_match
+    BCS :+
+    LDA #TK_ELSEIF
+    RTS
+:
+    LDA #<kw_else
+    LDX #>kw_else
+    LDY #4
+    JSR cmi_try_match
+    BCS :+
+    LDA #TK_ELSE
+    RTS
+:
     LDA #TK_IDENT
     RTS
 
-kw_echo:  .byte "echo"
-kw_while: .byte "while"
-kw_if:    .byte "if"
-kw_true:  .byte "true"
-kw_for:   .byte "for"
+kw_echo:   .byte "echo"
+kw_while:  .byte "while"
+kw_if:     .byte "if"
+kw_true:   .byte "true"
+kw_for:    .byte "for"
+kw_else:   .byte "else"
+kw_elseif: .byte "elseif"
 
 ; -----------------------------------------------------------------------------
 ; char classification

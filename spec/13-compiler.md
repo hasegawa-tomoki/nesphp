@@ -213,7 +213,8 @@ COMMENT      ::= "//" [^\n]* "\n"
 | **V1-V4** | 配列: **書換 `$a[i] = v`** + **append `$a[] = v`** (ZEND_ASSIGN_DIM + ZEND_OP_DATA、2-op sequence)、**ネスト読取 `$a[i][j]...`** (FETCH_DIM_R チェーン)、**ネストリテラル `[[1,2],[3,4]]`** (CMP_ARR_* を stack で退避)。連想配列/foreach は未対応 | ✅ |
 | **W1** | マルチスプライト: `nes_sprite_at($idx, $x, $y, $tile)` (4 引数、$idx は runtime int 可)、`nes_sprite_attr($idx, $attr)`。NESPHP_NES_SPRITE (0xF2) の意味を「OAM[0] 固定」→「OAM[$idx]」に拡張、result スロットを 3 番目の入力 ($y) として流用。NESPHP_NES_SPRITE_ATTR (0xFC) を新設 | ✅ |
 | **W2** | `nes_rand()` (戻り値 IS_LONG) / `nes_srand($seed)`。16-bit Galois LFSR (周期 65535)。あわせて `$xs[$i] = $xs[$i] + 1` パターンの ASSIGN_DIM bug を修正 (RHS パースを ASSIGN_DIM emit より先にして、間に sub-op が挟まらないようにした) | ✅ |
-| 次 | `foreach`、`else` / `elseif`、`<=` / `>` / `>=`、単項 `-` / `!`、`^` (BW_XOR)、括弧式 `(expr)` | 未着手 |
+| **W3** | parser 拡張: `else` / `elseif` チェーン、`<=` (新 ZEND_IS_SMALLER_OR_EQUAL handler)、`>` / `>=` (operand swap で `<` / `<=` に畳み込み)、括弧式 `(expr)`。あわせて `cmp_parse_expr` 入口/出口で CMP_LHS_VAL/TYPE / CMP_INTRINSIC_ID を 6502 stack に save/restore する修正 (`1 + (2 << 3)` 等の再帰 expr で外側 binop 状態が clobber されていた潜在 bug を解消) | ✅ |
+| 次 | `foreach`、単項 `-` / `!`、`^` (BW_XOR) | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | L3 方針 |
 
 ### 数値リテラル
@@ -359,7 +360,7 @@ END:   (backpatch pop)
 7. **PRG-RAM 8KB** がコンパイル出力の上限 (opcode + literal zval、文字列は ROM 常駐)
 8. **CV 最大 32 スロット**、**TMP 最大 64 スロット**、**関数引数 ≤ 4**、**関数呼出ネスト無し** (call expr は `fgets` / `nes_btn` のみ)
 9. **比較式は非連鎖** (`$a < $b < $c` は compile error)
-10. **`else` / `elseif` 未対応**、**`!` / 単項 `-` 未対応**、**`<=` `>` `>=` 未対応**、**`^` (BW_XOR) 未対応**、**括弧式 `(expr)` 未対応** (parse_primary が `(` を受けない、複雑な式は中間 CV を経由)
+10. **`!` / 単項 `-` 未対応**、**`^` (BW_XOR) 未対応**
 11. **if / while / for のボディ**: `{ ... }` または単文どちらも可
 12. **ネスト深さ**: backpatch stack 8 段、6502 HW stack 256B (for ネスト 1 段で 4B 消費)、CV table 32 エントリ
 13. **対応 intrinsic** (合計 15 種): `nes_cls` / `nes_put` / `nes_puts` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn` / `nes_rand` / `nes_srand`

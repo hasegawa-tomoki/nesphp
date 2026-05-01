@@ -62,9 +62,10 @@ L3 (host-compile) のオラクルが欲しいときは `make build/foo.host.ops.
 | 算術 | `+` / `-` |
 | ビット | `&` / `\|` / `<<` / `>>` (16bit、`>>` は算術右シフト) |
 | 論理 | `&&` / `\|\|` (短絡評価、結果は 0 or 1 の IS_LONG) |
-| 比較 | `===` / `!==` / `==` / `!=` / `<` (`===` と `==` は同じ実装) |
+| 比較 | `===` / `!==` / `==` / `!=` / `<` / `<=` / `>` / `>=` (`===` と `==` は同じ実装、`>` / `>=` は operand swap で `<` / `<=` に畳み込み) |
 | インクリメント | `$x++` / `$x--` / `++$x` / `--$x` (stmt / expr 両方) |
-| 制御 | `if` / `while` / `while(true)` / `for (init; cond; upd)`、単文 body 可 |
+| 括弧式 | `(expr)` で precedence override |
+| 制御 | `if` / `if-else` / `if-elseif-else` / `while` / `while(true)` / `for (init; cond; upd)`、単文 body 可 |
 | コメント | `//` / `#` / `/* */` (non-ASCII OK) |
 | 出力 | `echo` (forced_blanking 中 or sprite_mode の NMI 同期キュー経由で透過的に動く) |
 | 入力 (旧 API) | `fgets(STDIN)` → 押されたボタン 1 文字の文字列 (blocking) |
@@ -75,7 +76,7 @@ L3 (host-compile) のオラクルが欲しいときは `make build/foo.host.ops.
 
 ### できないこと (明示的に諦めたもの)
 
-連想配列 (string キー) / `foreach` / オブジェクト / 例外 / generator / closure / double / 64bit int / 文字列連結 / 動的文字列生成 / ユーザ定義関数 / `else` / `elseif` / `<=` / `>` / `>=` / 単項 `-` / `!` / `^` (BW_XOR)。 詳細は [`spec/00-overview.md`](./spec/00-overview.md) の「やらないこと」と [`spec/13-compiler.md`](./spec/13-compiler.md) の制約節。
+連想配列 (string キー) / `foreach` / オブジェクト / 例外 / generator / closure / double / 64bit int / 文字列連結 / 動的文字列生成 / ユーザ定義関数 / 単項 `-` / `!` / `^` (BW_XOR)。 詳細は [`spec/00-overview.md`](./spec/00-overview.md) の「やらないこと」と [`spec/13-compiler.md`](./spec/13-compiler.md) の制約節。
 
 ---
 
@@ -153,6 +154,7 @@ while (true) {
 | [`examples/sprite.php`](./examples/sprite.php) | 十字キーで `A` をピクセル単位移動 | `nes_sprite_at`, NMI |
 | [`examples/multi.php`](./examples/multi.php) | 8 個のスプライトを `for` で並べて連動移動、各色違い | `nes_sprite_at` (runtime $idx), `nes_sprite_attr`, `nes_palette` |
 | [`examples/random.php`](./examples/random.php) | 8 個のスプライトがランダムウォーク (LFSR で方向決定) | `nes_rand`, `nes_srand`, 配列の自己参照書込 |
+| [`examples/elsetest.php`](./examples/elsetest.php) | `else` / `elseif` チェーン、`<=` / `>` / `>=`、括弧式の動作確認 | parser 拡張 W3 |
 | [`examples/slides.php`](./examples/slides.php) | ボタンで 1 行ずつ進むプレゼン | `nes_puts`, `nes_cls` |
 | [`examples/presen.php`](./examples/presen.php) | マルチスライド長尺プレゼン | `nes_puts`, CHR バンク切替 |
 | [`examples/presen_cv.php`](./examples/presen_cv.php) | CV で状態管理するプレゼン | CV + `if` + `while` |

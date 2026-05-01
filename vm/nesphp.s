@@ -28,6 +28,7 @@ ZEND_IS_NOT_IDENTICAL = 17
 ZEND_IS_EQUAL         = 18
 ZEND_IS_NOT_EQUAL     = 19
 ZEND_IS_SMALLER       = 20
+ZEND_IS_SMALLER_OR_EQUAL = 21
 ZEND_ASSIGN           = 22
 ZEND_QM_ASSIGN        = 31
 ZEND_PRE_INC          = 34
@@ -623,6 +624,10 @@ main_loop:
     CMP #ZEND_IS_SMALLER
     BNE :+
     JMP handle_zend_is_smaller
+:
+    CMP #ZEND_IS_SMALLER_OR_EQUAL
+    BNE :+
+    JMP handle_zend_is_smaller_or_equal
 :
     CMP #ZEND_IS_EQUAL
     BNE :+
@@ -1652,6 +1657,47 @@ is_smaller_store:
     JSR write_result
     JMP advance
 is_smaller_err:
+    JMP handle_unimpl
+
+; -----------------------------------------------------------------------------
+; ZEND_IS_SMALLER_OR_EQUAL: result = (op1 <= op2) ? TYPE_TRUE : TYPE_FALSE
+;
+; 実装手抜き: op1 <= op2 ⇔ !(op2 < op1) ⇔ op2 - op1 が non-negative。
+; 既存の IS_SMALLER と同じ「16bit signed 減算 + N flag + V flag 補正」の
+; ロジックを op2 - op1 で適用し、BMI/BPL の意味を反転させる。
+; -----------------------------------------------------------------------------
+handle_zend_is_smaller_or_equal:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE is_le_err
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE is_le_err
+    ; 16bit signed: op2 - op1
+    SEC
+    LDA OP2_VAL+1
+    SBC OP1_VAL+1
+    LDA OP2_VAL+2
+    SBC OP1_VAL+2
+    BVC is_le_no_ov
+    EOR #$80
+is_le_no_ov:
+    BMI is_le_false           ; op2 < op1 → op1 > op2 → false
+    LDA #TYPE_TRUE             ; op2 >= op1 → op1 <= op2 → true
+    JMP is_le_store
+is_le_false:
+    LDA #TYPE_FALSE
+is_le_store:
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+1
+    STA RESULT_VAL+2
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+is_le_err:
     JMP handle_unimpl
 
 ; -----------------------------------------------------------------------------
