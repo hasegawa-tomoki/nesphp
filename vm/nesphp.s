@@ -3239,48 +3239,12 @@ palette_data:
 .include "compiler.s"
 
 ; =============================================================================
-; PRG bank 1 trampoline + 割り込みベクタ ($FFF0-$FFFF)
-;
-; bank1_boot は $FFF0 に置く小さな MMC1 reset スタブ。BANK0_BOOT として
-; bank 0 末尾 ($BFF0) にバイト単位で同じ内容をミラーする。これは EverDrive
-; N8 など実機系フラッシュカートで MMC1 が mode 3 以外で電源投入された場合の
-; 保険:
-;
-;   1. EverDrive が bank 0 を $C000-$FFFF にマップした状態で起動 → CPU が
-;      $FFFC のリセットベクタを読むと bank 0 末尾 6B がベクタとして見える
-;   2. ベクタは $FFF0 を指すので CPU は bank 0 のミラー ($BFF0 にあるバイト
-;      列) を $FFF0 として実行
-;   3. STA $8000 で MMC1 を mode 3 にリセット → bank 1 が $C000-$FFFF
-;   4. 直後の JMP operand fetch は新しく差し変わった bank 1 から行われるが
-;      両 bank が byte-identical なのでシームレスに JMP $C000 (=reset) へ
-;
-; 実機 MMC1 は power-on で mode 3 に落ち着くのでこの trampoline は no-op
-; だが、フラッシュカート向け defensive bootstrap の標準パターン
-; (commercial MMC1 ゲームも同じ対策をしている)。
-;
-; BANK0_BOOT / BANK0_VECTORS は BANK1_BOOT / VECTORS と byte-for-byte 一致
-; させる必要がある (JMP の operand fetch が bank 切替を跨ぐため)。
+; VECTORS
 ; =============================================================================
-.segment "BANK1_BOOT"
-bank1_boot:
-    LDA #$80
-    STA $8000          ; MMC1 reset → mode 3 (last 16KB bank fixed at $C000)
-    JMP reset
-
 .segment "VECTORS"
     .word nmi
-    .word bank1_boot   ; reset は必ず trampoline 経由で MMC1 を正規化
+    .word reset
     .word irq
-
-.segment "BANK0_BOOT"
-    LDA #$80
-    STA $8000
-    JMP reset
-
-.segment "BANK0_VECTORS"
-    .word nmi          ; bank 0 が $C000 に居る間 NMI は disabled なので未使用
-    .word bank1_boot   ; CPU が $FFFC を読むと $FFF0 → bank 0 ミラー実行
-    .word irq          ; I=1 なので IRQ も bank 0 が $C000 に居る間は発火しない
 
 ; =============================================================================
 ; CHARS
