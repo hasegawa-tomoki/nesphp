@@ -4,6 +4,7 @@
 # 使い方:
 #   make                     デフォルト: build/hello.nes を作る
 #   make build/NAME.nes      examples/NAME.php から build/NAME.nes を作る
+#   make examples            examples/ 配下の全 *.php を一括ビルド
 #   make verify              hello.nes に対する L3 ロマン検証
 #   make clean               build/ を消す
 
@@ -27,12 +28,17 @@ endif
 
 EMULATOR   := fceux
 
-.PHONY: all verify clean run
+.PHONY: all examples verify clean run
 .DELETE_ON_ERROR:
 # 中間ファイル (.ops.txt / .ops.bin / .o) を自動削除させない
 .SECONDARY:
 
 all: $(BUILD_DIR)/hello.nes
+
+# --- examples: 全 *.php を一括ビルド ---
+EXAMPLES_NES := $(patsubst examples/%.php,$(BUILD_DIR)/%.nes,$(wildcard examples/*.php))
+examples: $(EXAMPLES_NES)
+	@echo "[make] examples: $(words $(EXAMPLES_NES)) ROM built"
 
 $(BUILD_DIR):
 	@mkdir -p $@
