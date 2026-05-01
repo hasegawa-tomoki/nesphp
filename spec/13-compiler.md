@@ -215,6 +215,7 @@ COMMENT      ::= "//" [^\n]* "\n"
 | **W2** | `nes_rand()` (戻り値 IS_LONG) / `nes_srand($seed)`。16-bit Galois LFSR (周期 65535)。あわせて `$xs[$i] = $xs[$i] + 1` パターンの ASSIGN_DIM bug を修正 (RHS パースを ASSIGN_DIM emit より先にして、間に sub-op が挟まらないようにした) | ✅ |
 | **W3** | parser 拡張: `else` / `elseif` チェーン、`<=` (新 ZEND_IS_SMALLER_OR_EQUAL handler)、`>` / `>=` (operand swap で `<` / `<=` に畳み込み)、括弧式 `(expr)`。あわせて `cmp_parse_expr` 入口/出口で CMP_LHS_VAL/TYPE / CMP_INTRINSIC_ID を 6502 stack に save/restore する修正 (`1 + (2 << 3)` 等の再帰 expr で外側 binop 状態が clobber されていた潜在 bug を解消) | ✅ |
 | **W4** | `nes_putint($x, $y, $value)` (NESPHP_NES_PUTINT 0xFF)。5-char 右詰め unsigned int 表示 (スコア HUD 用)、3 引数全て runtime int 可。div_tmp0_by_10 の X clobber を回避するため Y register で loop counter を持つ | ✅ |
+| **W5** | 算術演算子拡張: `*` (ZEND_MUL 3) / `/` (ZEND_DIV 4) / `%` (ZEND_MOD 5)。16bit signed、divide-by-0 は silent 0 fallback。`parse_mul_expr` レイヤー新設で `* / %` が `+ -` より優先。あわせて `parse_add_expr` / `parse_mul_expr` 両方で CMP_LHS / CMP_INTRINSIC_ID を save/restore (W3 の parse_expr 修正と同じ動機の latent bug を解消)。`print_int16` の負数時 X clobber bug も修正 | ✅ |
 | 次 | `foreach`、単項 `-` / `!`、`^` (BW_XOR) | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | L3 方針 |
 

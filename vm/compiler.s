@@ -65,6 +65,9 @@ TK_GT      = 35   ; >
 TK_GE      = 36   ; >=
 TK_ELSE    = 37
 TK_ELSEIF  = 38
+TK_STAR    = 39   ; *
+TK_SLASH   = 40   ; /
+TK_PERCENT = 41   ; %
 
 ; --- Intrinsic ID ---
 INT_CLS         = 0
@@ -1293,8 +1296,22 @@ cpe_cmp_swap:
     JSR cmp_emit_binary
     RTS
 
+; cmp_parse_add_expr: + - & | << >> 演算子レベル。* / % よりは緩い (= 後で結合)。
+;
+; entry/exit で CMP_LHS_VAL/TYPE / CMP_INTRINSIC_ID を 6502 stack に save/restore
+; する。これは「`1 < 2 + 3` のように cmp_expr の RHS に add_expr を呼ぶケース」
+; などで、外側 binop の状態が内側で上書きされるのを防ぐため (parse_expr の W3
+; 修正と同じ動機、レイヤー違い)。
 cmp_parse_add_expr:
-    JSR cmp_parse_primary
+    LDA CMP_LHS_VAL
+    PHA
+    LDA CMP_LHS_VAL+1
+    PHA
+    LDA CMP_LHS_TYPE
+    PHA
+    LDA CMP_INTRINSIC_ID
+    PHA
+    JSR cmp_parse_mul_expr
 cpa_loop:
     LDA CMP_TOK_KIND
     CMP #TK_PLUS
@@ -1334,10 +1351,69 @@ cpa_binop:
     LDA CMP_EXPR_VAL+1
     STA CMP_LHS_VAL+1
     JSR cmp_lex_next
-    JSR cmp_parse_primary
+    JSR cmp_parse_mul_expr
     JSR cmp_emit_binary
     JMP cpa_loop
 cpa_done:
+    PLA
+    STA CMP_INTRINSIC_ID
+    PLA
+    STA CMP_LHS_TYPE
+    PLA
+    STA CMP_LHS_VAL+1
+    PLA
+    STA CMP_LHS_VAL
+    RTS
+
+; cmp_parse_mul_expr: * / % 演算子レベル。primary より緩く add_expr より厳しい
+; (PHP/C 慣習)。entry/exit で CMP_LHS / CMP_INTRINSIC_ID を save/restore する
+; (parse_add_expr と同じ理由)。
+cmp_parse_mul_expr:
+    LDA CMP_LHS_VAL
+    PHA
+    LDA CMP_LHS_VAL+1
+    PHA
+    LDA CMP_LHS_TYPE
+    PHA
+    LDA CMP_INTRINSIC_ID
+    PHA
+    JSR cmp_parse_primary
+cpm_loop:
+    LDA CMP_TOK_KIND
+    CMP #TK_STAR
+    BNE :+
+    LDA #ZEND_MUL
+    JMP cpm_binop
+:
+    CMP #TK_SLASH
+    BNE :+
+    LDA #ZEND_DIV
+    JMP cpm_binop
+:
+    CMP #TK_PERCENT
+    BNE cpm_done
+    LDA #ZEND_MOD
+cpm_binop:
+    STA CMP_INTRINSIC_ID
+    LDA CMP_EXPR_TYPE
+    STA CMP_LHS_TYPE
+    LDA CMP_EXPR_VAL
+    STA CMP_LHS_VAL
+    LDA CMP_EXPR_VAL+1
+    STA CMP_LHS_VAL+1
+    JSR cmp_lex_next
+    JSR cmp_parse_primary
+    JSR cmp_emit_binary
+    JMP cpm_loop
+cpm_done:
+    PLA
+    STA CMP_INTRINSIC_ID
+    PLA
+    STA CMP_LHS_TYPE
+    PLA
+    STA CMP_LHS_VAL+1
+    PLA
+    STA CMP_LHS_VAL
     RTS
 
 cmp_parse_primary:
@@ -2104,6 +2180,18 @@ cln_not_eof:
     BNE :+
     JMP cln_minus
 :
+    CMP #'*'
+    BNE :+
+    JMP cln_star
+:
+    CMP #'/'
+    BNE :+
+    JMP cln_slash
+:
+    CMP #'%'
+    BNE :+
+    JMP cln_percent
+:
     CMP #'&'
     BNE :+
     JMP cln_amp
@@ -2243,6 +2331,28 @@ cln_minus:
     RTS
 cln_minus_one:
     LDA #TK_MINUS
+    STA CMP_TOK_KIND
+    RTS
+
+; * 単独 (掛け算)
+cln_star:
+    JSR cmp_advance1
+    LDA #TK_STAR
+    STA CMP_TOK_KIND
+    RTS
+
+; / 単独 (割り算)。`//` `/* */` は cmp_skip_ws が先に消費するので、ここに来る
+; のは演算子としての `/` のみ。
+cln_slash:
+    JSR cmp_advance1
+    LDA #TK_SLASH
+    STA CMP_TOK_KIND
+    RTS
+
+; % 単独 (剰余)
+cln_percent:
+    JSR cmp_advance1
+    LDA #TK_PERCENT
     STA CMP_TOK_KIND
     RTS
 

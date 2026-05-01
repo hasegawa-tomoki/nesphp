@@ -19,6 +19,9 @@
 ZEND_NOP              = 0
 ZEND_ADD              = 1
 ZEND_SUB              = 2
+ZEND_MUL              = 3
+ZEND_DIV              = 4
+ZEND_MOD              = 5
 ZEND_SL               = 6
 ZEND_SR               = 7
 ZEND_BW_OR            = 9
@@ -577,6 +580,18 @@ main_loop:
     CMP #ZEND_SUB
     BNE :+
     JMP handle_zend_sub
+:
+    CMP #ZEND_MUL
+    BNE :+
+    JMP handle_zend_mul
+:
+    CMP #ZEND_DIV
+    BNE :+
+    JMP handle_zend_div
+:
+    CMP #ZEND_MOD
+    BNE :+
+    JMP handle_zend_mod
 :
     CMP #ZEND_BW_AND
     BNE :+
@@ -1298,6 +1313,261 @@ sub_type_err:
     JMP handle_unimpl
 
 ; -----------------------------------------------------------------------------
+; ZEND_MUL: result = op1 * op2 (16bit signed × signed → 16bit truncated)
+;
+; 16-bit unsigned shift-and-add で実装。signed の結果は下位 16 bit を取る形で
+; 自然に正しくなる (signed × signed の low 16 bit は unsigned × unsigned の
+; low 16 bit と一致する)。
+; -----------------------------------------------------------------------------
+handle_zend_mul:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE mul_type_err
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE mul_type_err
+    ; TMP0 = result accumulator (= 0)
+    LDA #0
+    STA TMP0
+    STA TMP0+1
+    ; TMP1 = a (multiplicand、シフトされて消費)
+    LDA OP1_VAL+1
+    STA TMP1
+    LDA OP1_VAL+2
+    STA TMP1+1
+    ; TMP2 = b (multiplier、左シフトしながら累加)
+    LDA OP2_VAL+1
+    STA TMP2
+    LDA OP2_VAL+2
+    STA TMP2+1
+    LDX #16
+mul_bit_loop:
+    ; a の最下位 bit を C に出してテスト
+    LSR TMP1+1
+    ROR TMP1
+    BCC mul_skip_add
+    ; result += b
+    CLC
+    LDA TMP0
+    ADC TMP2
+    STA TMP0
+    LDA TMP0+1
+    ADC TMP2+1
+    STA TMP0+1
+mul_skip_add:
+    ; b <<= 1
+    ASL TMP2
+    ROL TMP2+1
+    DEX
+    BNE mul_bit_loop
+    ; result を RESULT_VAL に
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA TMP0
+    STA RESULT_VAL+1
+    LDA TMP0+1
+    STA RESULT_VAL+2
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+mul_type_err:
+    JMP handle_unimpl
+
+; -----------------------------------------------------------------------------
+; ZEND_DIV: result = op1 / op2 (16bit signed integer divide、truncate-toward-zero)
+;
+; PHP/C 流の signed div: 商の符号 = sign(a) XOR sign(b)、|q| = |a| / |b|。
+; b == 0 は silent fallback で 0 を返す (PHP は例外、NES では halt 大袈裟)。
+; -----------------------------------------------------------------------------
+handle_zend_div:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE div_type_err
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE div_type_err
+    ; quotient sign を 6502 stack に push (bit 7 が立っていれば負)
+    LDA OP1_VAL+2
+    EOR OP2_VAL+2
+    PHA
+    ; |a| → TMP0
+    JSR div_abs_a_to_tmp0
+    ; |b| → TMP2
+    JSR div_abs_b_to_tmp2
+    ; b == 0 チェック
+    LDA TMP2
+    ORA TMP2+1
+    BEQ div_by_zero
+    JSR udiv16              ; TMP0 = |q|, TMP1 = |r| (使わない)
+    ; quotient sign を見て必要なら negate
+    PLA
+    AND #$80
+    BEQ div_pos
+    JSR neg16_tmp0
+div_pos:
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA TMP0
+    STA RESULT_VAL+1
+    LDA TMP0+1
+    STA RESULT_VAL+2
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+div_by_zero:
+    PLA                     ; discard saved sign
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+1
+    STA RESULT_VAL+2
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+div_type_err:
+    JMP handle_unimpl
+
+; -----------------------------------------------------------------------------
+; ZEND_MOD: result = op1 % op2 (16bit signed modulo)
+;
+; PHP/C 流: 剰余の符号 = sign(a) (= 被除数の符号)。b == 0 は 0 fallback。
+; -----------------------------------------------------------------------------
+handle_zend_mod:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL
+    CMP #TYPE_LONG
+    BNE mod_type_err
+    LDA OP2_VAL
+    CMP #TYPE_LONG
+    BNE mod_type_err
+    ; remainder sign = sign(a)、stack に push
+    LDA OP1_VAL+2
+    PHA
+    ; |a| → TMP0、|b| → TMP2
+    JSR div_abs_a_to_tmp0
+    JSR div_abs_b_to_tmp2
+    LDA TMP2
+    ORA TMP2+1
+    BEQ mod_by_zero
+    JSR udiv16              ; TMP1 = |r|
+    ; remainder を TMP0 に移して符号調整 (write_result 系 helper を流用しやすくする)
+    LDA TMP1
+    STA TMP0
+    LDA TMP1+1
+    STA TMP0+1
+    PLA
+    AND #$80
+    BEQ mod_pos
+    JSR neg16_tmp0
+mod_pos:
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA TMP0
+    STA RESULT_VAL+1
+    LDA TMP0+1
+    STA RESULT_VAL+2
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+mod_by_zero:
+    PLA
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+1
+    STA RESULT_VAL+2
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+mod_type_err:
+    JMP handle_unimpl
+
+; -----------------------------------------------------------------------------
+; div_abs_a_to_tmp0: OP1_VAL の signed 16bit value を絶対値化して TMP0 に
+; -----------------------------------------------------------------------------
+div_abs_a_to_tmp0:
+    LDA OP1_VAL+1
+    STA TMP0
+    LDA OP1_VAL+2
+    STA TMP0+1
+    BPL :+              ; 正なら何もしない
+    JSR neg16_tmp0
+:
+    RTS
+
+; div_abs_b_to_tmp2: OP2_VAL を絶対値化して TMP2 に
+div_abs_b_to_tmp2:
+    LDA OP2_VAL+1
+    STA TMP2
+    LDA OP2_VAL+2
+    STA TMP2+1
+    LDA TMP2+1
+    BPL :+
+    ; negate TMP2
+    SEC
+    LDA #0
+    SBC TMP2
+    STA TMP2
+    LDA #0
+    SBC TMP2+1
+    STA TMP2+1
+:
+    RTS
+
+; neg16_tmp0: TMP0 を 2's complement で negate
+neg16_tmp0:
+    SEC
+    LDA #0
+    SBC TMP0
+    STA TMP0
+    LDA #0
+    SBC TMP0+1
+    STA TMP0+1
+    RTS
+
+; -----------------------------------------------------------------------------
+; udiv16: unsigned 16-bit divide、TMP0 / TMP2 → TMP0 = quotient, TMP1 = remainder
+;
+; 16-bit shift-and-subtract。X register を 16 step counter に使う。
+; 呼び出し側は TMP0 (dividend), TMP2 (divisor) をセットしてから JSR。
+; 結果: TMP0 = quotient, TMP1 = remainder。TMP2 は保持 (divisor)。
+; -----------------------------------------------------------------------------
+udiv16:
+    LDA #0
+    STA TMP1
+    STA TMP1+1
+    LDX #16
+udiv16_loop:
+    ASL TMP0                ; dividend << 1, MSB → C
+    ROL TMP0+1
+    ROL TMP1                ; remainder << 1 (with new bit from dividend MSB)
+    ROL TMP1+1
+    ; remainder >= divisor かテスト (= remainder - divisor が non-negative)
+    SEC
+    LDA TMP1
+    SBC TMP2
+    TAY                     ; tentative new remainder lo
+    LDA TMP1+1
+    SBC TMP2+1
+    BCC udiv16_no_sub        ; remainder < divisor
+    ; remainder >= divisor: subtract で確定、商の bit を立てる
+    STY TMP1
+    STA TMP1+1
+    INC TMP0                 ; quotient |= 1 (LSB)
+udiv16_no_sub:
+    DEX
+    BNE udiv16_loop
+    RTS
+
+; -----------------------------------------------------------------------------
 ; ZEND_BW_AND: result = op1 & op2 (16bit bitwise AND)
 ; ZEND_BW_OR:  result = op1 | op2 (16bit bitwise OR)
 ;   両 operand とも IS_LONG 前提 (mask 演算の実用上の想定)
@@ -1941,9 +2211,12 @@ print_int16:
     STA TMP0+1
 
 pi_positive:
+    ; X (= 0 or 1、'-' を書いた直後の buffer 位置) を退避。div_tmp0_by_10 は
+    ; X を内部 16 step counter に使うので JSR を跨ぐと壊れる。
+    STX TMP1
     LDY #0                 ; 桁数カウンタ
 pi_div_loop:
-    JSR div_tmp0_by_10     ; A = 余り, TMP0 = 商
+    JSR div_tmp0_by_10     ; A = 余り, TMP0 = 商, X clobber
     PHA
     INY
     LDA TMP0
@@ -1956,6 +2229,8 @@ pi_div_loop:
     ADC pi_count
     STA pi_count
 
+    ; X を復元してから pop loop へ
+    LDX TMP1
     ; スタックを逆順に pop して '0'+digit を INT_PRINT_BUFFER へ
 pi_pop_loop:
     PLA

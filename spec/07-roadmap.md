@@ -42,7 +42,8 @@
 | W2 | `nes_rand()` / `nes_srand($seed)` (16-bit Galois LFSR、周期 65535)。あわせて `$xs[$i] = $xs[$i] + 1` パターンの ASSIGN_DIM bug を発見・修正 (RHS パースを ASSIGN_DIM emit より先に行うよう変更) | `random.nes` (8 sprite ランダムウォーク) | ✅ **完了** |
 | W3 | parser 拡張: `else` / `elseif` チェーン、`<=` / `>` / `>=`、括弧式 `(expr)`。`cmp_parse_expr` で CMP_LHS / CMP_INTRINSIC_ID を save/restore する潜在 bug 修正も含む | `elsetest.nes` `parentest.nes` | ✅ **完了** |
 | W4 | `nes_putint($x, $y, $value)`: 5-char 右詰め unsigned int 表示 (スコア HUD)。sprite_mode でも NMI 同期キュー経由で動く | `putint.nes` `score.nes` | ✅ **完了** |
-| 次 | `!` / 単項 `-` / `^` (BW_XOR) / `foreach` / APU intrinsic (nes_beep) | — | 未着手 |
+| W5 | 算術演算子拡張 `*` / `/` / `%` (signed 16bit、divide-by-0 は 0 fallback)。`parse_mul_expr` レイヤー新設で precedence 適用。print_int16 の負数 X clobber bug も合わせて修正 | `multest.nes` | ✅ **完了** |
+| 次 | テトリス実装 / `!` / 単項 `-` / `^` (BW_XOR) / `foreach` / APU intrinsic (nes_beep) | — | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | — | L3 方針 |
 
 各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。
