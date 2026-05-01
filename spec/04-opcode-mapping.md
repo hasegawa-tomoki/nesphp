@@ -64,7 +64,9 @@ L3S で emit 対象の nesphp カスタム opcode (intrinsic 畳み込み):
 | `NESPHP_NES_ATTR` | 0xF9 | ✓ (Q1) |
 | `NESPHP_NES_VSYNC` | 0xFA | ✓ (R1) — 次 VBlank まで spin、sprite_mode 自動有効化 |
 | `NESPHP_NES_BTN` | 0xFB | ✓ (R2) — **0 引数**、コントローラ状態を IS_LONG (下位 1B = bitmask) で返す。呼び出し側で `$b & 0x80` 等でビット演算 |
-| `NESPHP_NES_SPRITE_ATTR` | 0xFC | ✓ (S1) — `nes_sprite_attr($idx, $attr)`。OAM[$idx*4+2] を更新 |
+| `NESPHP_NES_SPRITE_ATTR` | 0xFC | ✓ (W1) — `nes_sprite_attr($idx, $attr)`。OAM[$idx*4+2] を更新 |
+| `NESPHP_NES_RAND` | 0xFD | ✓ (W2) — `nes_rand()`。16-bit Galois LFSR (tap = $B400、周期 65535) を 1 step |
+| `NESPHP_NES_SRAND` | 0xFE | ✓ (W2) — `nes_srand($seed)`。LFSR 状態を $seed に設定 ($seed = 0 は 1 に置換) |
 
 Q2: 16 進リテラル `0x..` 対応 (lexer)。Q3: `ZEND_PRE_INC` (34) / `ZEND_PRE_DEC` (35) / `ZEND_POST_INC` (36) / `ZEND_POST_DEC` (37) を L3S で emit 可能 (`++$x` / `$x++` / `--$x` / `$x--`)。Q4: `for (init; cond; update) body` を double-JMP で展開して emit。
 | `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 (forced_blanking 時) → 無限ループ |
@@ -87,6 +89,8 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 | `NESPHP_NES_PALETTE` | **0xF8** | パレットの色 1-3 を設定。4 引数 (id, c1, c2, c3) で op1/op2/result/extended_value を全て使用 |
 | `NESPHP_NES_ATTR` | **0xF9** | attribute table の 2×2 タイルブロックにパレット番号 (0-3) を設定。64B RAM shadow 経由で read-modify-write |
 | `NESPHP_NES_SPRITE_ATTR` | **0xFC** | OAM[$idx] (0-63) の attribute byte を設定。bit 0-1=palette / bit 5=priority / bit 6=hflip / bit 7=vflip。両引数とも runtime int 可 |
+| `NESPHP_NES_RAND` | **0xFD** | 16-bit Galois LFSR (tap = `$B400`、polynomial `x^16 + x^14 + x^13 + x^11 + 1`、周期 65535) を 1 step。戻り値は IS_LONG (16-bit、result スロットに書き込み)。0 引数 |
+| `NESPHP_NES_SRAND` | **0xFE** | LFSR 状態を `$seed` で上書き。`$seed == 0` は LFSR の退化点なので内部で 1 に置換 |
 
 ### serializer のパターン畳み込み
 

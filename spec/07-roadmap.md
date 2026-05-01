@@ -38,8 +38,9 @@
 | R2 | `nes_btn()` を 0 引数化し、コントローラ状態を IS_LONG で返す仕様に変更 | `poll.nes` | ✅ **完了** |
 | R3 | ビット演算子 `&` `\|` (ZEND_BW_AND/OR)、2 進リテラル `0b..` | `bintest.nes` | ✅ **完了** |
 | **examples/* 全通** | 現リポジトリの **18 example すべて on-NES self-host で動作** (err_syntax は意図的 compile-error 検証) | — | ✅ **完了** |
-| W1 | マルチスプライト: `nes_sprite_at($idx, $x, $y, $tile)` (4 引数、$idx は runtime int 可)、`nes_sprite_attr($idx, $attr)` (palette / flip / 優先度)。NESPHP_NES_SPRITE (0xF2) を OAM[$idx] 任意化、NESPHP_NES_SPRITE_ATTR (0xFC) 新設 | 既存 `sprite.nes` `livetext.nes` `livereset.nes` `poll.nes` を nes_sprite_at に移行 | ✅ **完了** |
-| 次 | `else` / `elseif` / `<=` / `>` / `>=` / `&&` / `\|\|` / `!` / 単項 `-` / `^` (BW_XOR) / `<<` `>>` (SL/SR)、`nes_rand()` (xorshift16) | — | 未着手 |
+| W1 | マルチスプライト: `nes_sprite_at($idx, $x, $y, $tile)` (4 引数、$idx は runtime int 可)、`nes_sprite_attr($idx, $attr)` (palette / flip / 優先度)。NESPHP_NES_SPRITE (0xF2) を OAM[$idx] 任意化、NESPHP_NES_SPRITE_ATTR (0xFC) 新設 | 既存 `sprite.nes` `livetext.nes` `livereset.nes` `poll.nes` を nes_sprite_at に移行、`multi.nes` 追加 | ✅ **完了** |
+| W2 | `nes_rand()` / `nes_srand($seed)` (16-bit Galois LFSR、周期 65535)。あわせて `$xs[$i] = $xs[$i] + 1` パターンの ASSIGN_DIM bug を発見・修正 (RHS パースを ASSIGN_DIM emit より先に行うよう変更) | `random.nes` (8 sprite ランダムウォーク) | ✅ **完了** |
+| 次 | `else` / `elseif` / `<=` / `>` / `>=` / `!` / 単項 `-` / `^` (BW_XOR) / 括弧式 `(expr)` | — | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | — | L3 方針 |
 
 各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。

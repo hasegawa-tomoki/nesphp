@@ -60,6 +60,8 @@ NESPHP_NES_ATTR     = $F9   ; attribute table 設定 (x, y, pal)
 NESPHP_NES_VSYNC    = $FA   ; 次 VBlank まで spin (sprite_mode 未設定時は自動 enable)
 NESPHP_NES_BTN      = $FB   ; コントローラ状態を IS_LONG (下位 1B = buttons bitmask) で返す
 NESPHP_NES_SPRITE_ATTR = $FC ; OAM[$idx*4+2] = attr (palette / flip / 優先度)
+NESPHP_NES_RAND     = $FD   ; 16-bit Galois LFSR を 1 step 進めて IS_LONG で返す
+NESPHP_NES_SRAND    = $FE   ; LFSR 状態を $seed に設定 ($seed = 0 は内部で 1 に置換)
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -213,6 +215,10 @@ sprite_mode_on: .res 1
 ; NMI が VBlank ごとに INC するフレームカウンタ (nes_vsync 同期用、8bit wrap OK)
 vblank_frame:   .res 1
 
+; nes_rand 用 16-bit Galois LFSR 状態 (周期 65535、tap = $B400)
+; reset で 1 に初期化、nes_srand($seed = 0) は内部で 1 に置換 (0 は退化点)
+rand_state:     .res 2
+
 ; --- On-NES コンパイラ状態 (compile_and_emit 実行中のみ valid) ---
 ; コンパイル完了後は全て未使用。以降 reset が WRAM を既読のまま VM に引き渡す。
 CMP_SRC_PTR:      .res 2    ; ソース現在位置 (PHP_SRC_BODY..)
@@ -354,6 +360,13 @@ clear_wram_loop:
     STA $0700, X
     INX
     BNE clear_wram_loop
+
+    ; nes_rand の LFSR 初期値を 1 にする (0 は退化点で永遠に 0 を返すため)。
+    ; ユーザが nes_srand を呼ばずに nes_rand を使ってもとりあえず動く決定列を出す。
+    LDA #1
+    STA rand_state
+    LDA #0
+    STA rand_state+1
 
     ; OAM shadow ($0200-$02FF) の y を全て $FF にして全スプライトを画面外に隠す
     ; 1 スプライト 4 バイト × 64 個 = 256B、X は y オフセットだけをたどる
@@ -530,6 +543,14 @@ main_loop:
     CMP #NESPHP_NES_SPRITE_ATTR
     BNE :+
     JMP handle_nesphp_nes_sprite_attr
+:
+    CMP #NESPHP_NES_RAND
+    BNE :+
+    JMP handle_nesphp_nes_rand
+:
+    CMP #NESPHP_NES_SRAND
+    BNE :+
+    JMP handle_nesphp_nes_srand
 :
     CMP #ZEND_ECHO
     BNE :+
@@ -2834,6 +2855,69 @@ handle_nesphp_nes_sprite_attr:
     LDA OP2_VAL+1
     STA OAM_SHADOW + 2, X  ; attr
 
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_RAND (0xFD): nes_rand() — 0 引数、戻り値 IS_LONG
+;
+; 16-bit Galois LFSR (tap = $B400、polynomial x^16 + x^14 + x^13 + x^11 + 1、
+; 周期 65535) を 1 step 進めて結果を IS_LONG として result スロットに書く。
+;
+;   if (state & 1) { state = (state >> 1) ^ $B400 }
+;   else           { state = (state >> 1)          }
+;
+; 6502 では LSR/ROR で 16-bit 右シフトしつつ「シフト前の bit 0」を C に拾い、
+; BCC で XOR 分岐させると 8 byte で書ける。
+; rand_state = 0 だと永遠に 0 を返すので reset で 1 に初期化済み。
+; =============================================================================
+handle_nesphp_nes_rand:
+    LSR rand_state+1       ; hi >>= 1, C = old hi bit 0
+    ROR rand_state         ; lo = (lo>>1) | (C<<7), C = old lo bit 0
+    BCC :+
+    LDA rand_state+1
+    EOR #$B4
+    STA rand_state+1
+:
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA rand_state
+    STA RESULT_VAL+1       ; lo
+    LDA rand_state+1
+    STA RESULT_VAL+2       ; hi
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_SRAND (0xFE): nes_srand($seed) — 1 引数、戻り値なし
+;
+; LFSR 状態を $seed で上書きする。$seed = 0 は LFSR の退化点なので内部で 1 に
+; 置換 (ユーザが事故で 0 を渡しても破綻しない)。
+;
+; シード源パターン (典型):
+;   nes_srand(1);                // 初期化 (適当な非 0)
+;   while (true) {
+;       nes_vsync();
+;       nes_rand();              // 毎フレーム空回し
+;       $b = nes_btn();
+;       if ($b & 0x10) { ... }   // Start で抜ける
+;   }
+;   // 抜けた時点で rand_state は「待機フレーム数」依存の値
+; =============================================================================
+handle_nesphp_nes_srand:
+    JSR resolve_op1        ; OP1_VAL = $seed
+    LDA OP1_VAL+1
+    STA rand_state         ; lo
+    LDA OP1_VAL+2
+    STA rand_state+1       ; hi
+    ; if (state == 0) state = 1
+    LDA rand_state
+    ORA rand_state+1
+    BNE :+
+    LDA #1
+    STA rand_state
+:
     JMP advance
 
 ; -----------------------------------------------------------------------------

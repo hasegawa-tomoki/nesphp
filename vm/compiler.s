@@ -76,6 +76,8 @@ INT_VSYNC       = 10
 INT_BTN         = 11
 INT_COUNT       = 12
 INT_SPRITE_ATTR = 13    ; nes_sprite_attr($idx, $attr)
+INT_RAND        = 14    ; nes_rand() — 0 引数、IS_LONG 返却
+INT_SRAND       = 15    ; nes_srand($seed) — 1 引数、戻り値なし
 INT_NOT_FOUND   = $FF
 
 ARG_STDIN_SENTINEL = $FE
@@ -280,11 +282,21 @@ cas_post_dec:
 
 ; $a[idx] = v;  または  $a[] = v;
 ; CMP_ASSIGN_SLOT = CV slot (array)、CMP_TOK_KIND = '[' (まだ consume してない)
+;
+; 重要: VM の handle_zend_assign_dim は OP_DATA を「直後の op (PC+24)」として
+; 読むので、ASSIGN_DIM と OP_DATA の間に他の op が挟まると壊れる。RHS の
+; パース ($xs[$i] + 1 等で FETCH_DIM_R / ADD が emit される) はこの 2 op
+; emit より前に行う必要がある。
+;
+; 流れ:
+;   1. index expr (or append sentinel) を parse、6502 stack に push
+;   2. value expr を parse (sub-op が emit されてもこのタイミング)
+;   3. ASSIGN_DIM + OP_DATA を連続で emit (間に何も挟まらない)
 cas_dim:
     JSR cmp_lex_next                 ; '[' を consume、index の先頭 token か ']' を peek
     LDA CMP_TOK_KIND
     CMP #TK_RBRACKET
-    BEQ cas_dim_append               ; $a[] = v → append モード
+    BEQ cas_dim_append_mode
     ; index expr を parse
     JSR cmp_parse_expr               ; CMP_EXPR = index、CMP_TOK = ']'
     LDA CMP_TOK_KIND
@@ -292,13 +304,37 @@ cas_dim:
     BEQ :+
     JMP cmp_error
 :
+    ; index を 6502 stack に push (push 順: lo, hi, type)
+    LDA CMP_EXPR_VAL
+    PHA
+    LDA CMP_EXPR_VAL+1
+    PHA
+    LDA CMP_EXPR_TYPE
+    PHA
+    JMP cas_dim_after_index
+
+cas_dim_append_mode:
+    ; append: op2_type = IS_UNUSED, op2 = 0 をスタックに積んでおく
+    LDA #0
+    PHA                              ; lo (未使用)
+    PHA                              ; hi (未使用)
+    PHA                              ; type = IS_UNUSED
+
+cas_dim_after_index:
     JSR cmp_lex_next                 ; ']' を consume、次は '=' 期待
     LDA CMP_TOK_KIND
     CMP #TK_ASSIGN
     BEQ :+
     JMP cmp_error
 :
-    ; --- ASSIGN_DIM emit (index mode) ---
+    JSR cmp_lex_next                 ; '=' を consume、value の先頭 token を peek
+    JSR cmp_parse_expr               ; CMP_EXPR = value (sub-op が emit される可能性あり)
+    LDA CMP_TOK_KIND
+    CMP #TK_SEMI
+    BEQ :+
+    JMP cmp_error
+:
+    ; --- ASSIGN_DIM emit (index は stack から pop) ---
     JSR cmp_op24_zero
     ; op1 = CV array
     LDX CMP_ASSIGN_SLOT
@@ -312,58 +348,21 @@ cas_dim:
     LDY #21
     LDA #IS_CV
     STA (CMP_OP_HEAD), Y
-    ; op2 = index (from CMP_EXPR)
-    LDY #4
-    LDA CMP_EXPR_VAL
-    STA (CMP_OP_HEAD), Y
-    INY
-    LDA CMP_EXPR_VAL+1
-    STA (CMP_OP_HEAD), Y
+    ; op2 = popped index (pop 順: type, hi, lo)
+    PLA
     LDY #22
-    LDA CMP_EXPR_TYPE
+    STA (CMP_OP_HEAD), Y
+    PLA
+    LDY #5
+    STA (CMP_OP_HEAD), Y
+    PLA
+    LDY #4
     STA (CMP_OP_HEAD), Y
     LDY #20
     LDA #ZEND_ASSIGN_DIM
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
-    JMP cas_dim_emit_value
-
-cas_dim_append:
-    JSR cmp_lex_next                 ; ']' を consume、次は '=' 期待
-    LDA CMP_TOK_KIND
-    CMP #TK_ASSIGN
-    BEQ :+
-    JMP cmp_error
-:
-    ; --- ASSIGN_DIM emit (append、op2_type = IS_UNUSED) ---
-    JSR cmp_op24_zero
-    LDX CMP_ASSIGN_SLOT
-    JSR cmp_lit_idx_to_offset
-    LDY #0
-    LDA TMP0
-    STA (CMP_OP_HEAD), Y
-    INY
-    LDA TMP0+1
-    STA (CMP_OP_HEAD), Y
-    LDY #21
-    LDA #IS_CV
-    STA (CMP_OP_HEAD), Y
-    ; op2_type is IS_UNUSED (zero from op24_zero)
-    LDY #20
-    LDA #ZEND_ASSIGN_DIM
-    STA (CMP_OP_HEAD), Y
-    JSR cmp_op_finish
-
-cas_dim_emit_value:
-    ; value expr を parse
-    JSR cmp_lex_next                 ; '=' を consume、value の先頭 token を peek
-    JSR cmp_parse_expr               ; CMP_EXPR = value、CMP_TOK = ';'
-    LDA CMP_TOK_KIND
-    CMP #TK_SEMI
-    BEQ :+
-    JMP cmp_error
-:
-    ; --- OP_DATA emit (op1 = value) ---
+    ; --- OP_DATA emit (op1 = value、ASSIGN_DIM の直後に必須) ---
     JSR cmp_op24_zero
     LDY #0
     LDA CMP_EXPR_VAL
@@ -1498,7 +1497,7 @@ cpp_true:
     JSR cmp_lex_next
     RTS
 
-; IDENT 式 — fgets(STDIN) / nes_btn() / count($a) に対応 (戻り値 TMP)
+; IDENT 式 — fgets(STDIN) / nes_btn() / count($a) / nes_rand() に対応 (戻り値 TMP)
 cpp_ident:
     JSR cmp_match_intrinsic
     CMP #INT_FGETS
@@ -1511,6 +1510,10 @@ cpp_ident:
 :
     CMP #INT_COUNT
     BEQ cpp_ident_count
+    CMP #INT_RAND
+    BNE :+
+    JMP cpp_ident_rand
+:
     JMP cmp_error
 
 ; count($a) 式: '(' expr ')' をパース、ZEND_COUNT op1=expr、result = 新 TMP
@@ -1583,6 +1586,24 @@ cpp_ident_btn:
     JMP cmp_error
 :
     JSR cmp_emit_btn_tmp             ; result = 新 TMP、CMP_EXPR = TMP
+    JSR cmp_lex_next                 ; peek next
+    RTS
+
+cpp_ident_rand:
+    ; '(' ')' をパース (0 引数)、NESPHP_NES_RAND result=TMP を emit
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_LPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_RPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_emit_rand_tmp            ; result = 新 TMP、CMP_EXPR = TMP
     JSR cmp_lex_next                 ; peek next
     RTS
 
@@ -1699,6 +1720,38 @@ cmp_emit_btn_tmp:
     STA (CMP_OP_HEAD), Y
     LDY #20
     LDA #NESPHP_NES_BTN
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    INC CMP_TMP_COUNT
+    RTS
+
+; cmp_emit_rand_tmp: nes_rand() (expr 文脈、0 引数)
+;   NESPHP_NES_RAND を result=新 TMP で emit、CMP_EXPR を TMP に更新
+cmp_emit_rand_tmp:
+    JSR cmp_op24_zero
+    LDX CMP_TMP_COUNT
+    CPX #64
+    BCC :+
+    JMP cmp_error
+:
+    JSR cmp_lit_idx_to_offset
+    LDY #8
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #23
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    LDY #20
+    LDA #NESPHP_NES_RAND
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     LDA TMP0
@@ -2822,6 +2875,22 @@ cmp_match_intrinsic:
     LDA #INT_COUNT
     RTS
 :
+    LDA #<intrinsic_name_nes_srand
+    LDX #>intrinsic_name_nes_srand
+    LDY #9
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_SRAND
+    RTS
+:
+    LDA #<intrinsic_name_nes_rand
+    LDX #>intrinsic_name_nes_rand
+    LDY #8
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_RAND
+    RTS
+:
     LDA #INT_NOT_FOUND
     RTS
 
@@ -2856,6 +2925,8 @@ intrinsic_name_fgets:         .byte "fgets"
 intrinsic_name_nes_put:       .byte "nes_put"
 intrinsic_name_nes_sprite_at:   .byte "nes_sprite_at"
 intrinsic_name_nes_sprite_attr: .byte "nes_sprite_attr"
+intrinsic_name_nes_rand:        .byte "nes_rand"
+intrinsic_name_nes_srand:       .byte "nes_srand"
 intrinsic_name_nes_attr:      .byte "nes_attr"
 intrinsic_name_nes_vsync:     .byte "nes_vsync"
 intrinsic_name_nes_btn:       .byte "nes_btn"
@@ -2889,6 +2960,8 @@ cmp_emit_jmp_table:
     .word cmp_emit_btn_stmt
     .word cmp_emit_count_stmt
     .word cmp_emit_sprite_attr      ; INT_SPRITE_ATTR (13)
+    .word cmp_emit_rand_stmt        ; INT_RAND (14) — stmt context (結果破棄、LFSR は進む)
+    .word cmp_emit_srand            ; INT_SRAND (15)
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -3148,6 +3221,36 @@ cmp_emit_count_stmt:
     JSR cmp_set_op1_from_arg
     LDY #20
     LDA #ZEND_COUNT
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_rand() stmt 形式 — 0 引数、戻り値破棄 (result_type = IS_UNUSED)
+; LFSR は進むので「シード撹乱のための空回し」用途で意味がある
+cmp_emit_rand_stmt:
+    LDA CMP_ARG_COUNT
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDY #20
+    LDA #NESPHP_NES_RAND
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_srand($seed) — 1 引数 (any operand type、IS_LONG)、戻り値なし
+cmp_emit_srand:
+    LDA CMP_ARG_COUNT
+    CMP #1
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDY #20
+    LDA #NESPHP_NES_SRAND
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     RTS
