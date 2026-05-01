@@ -203,7 +203,7 @@ COMMENT      ::= "//" [^\n]* "\n"
 | **P2** | CV、`=` 代入、`+` `-`、echo $var、CV as intrinsic arg、**エラー画面表示** | ✅ |
 | **P3 (M-C)** | `while { }`、`if { }`、比較演算 (`===` `!==` `==` `!=` `<`)、`$k = fgets(STDIN)`、`true` リテラル、backpatch stack | ✅ |
 | **P4 (コメント + non-ASCII)** | `//`, `#`, `/* */`、文字列内の non-ASCII byte pass through | ✅ |
-| **Q1-Q4** | 残り intrinsic (nes_put / nes_sprite / nes_attr)、16 進リテラル `0x..`、`++` / `--` (PRE/POST INC/DEC)、`for` ループ、if/while の単文 body | ✅ |
+| **Q1-Q4** | 残り intrinsic (nes_put / nes_sprite (1-sprite 版、後に W1 で nes_sprite_at に拡張) / nes_attr)、16 進リテラル `0x..`、`++` / `--` (PRE/POST INC/DEC)、`for` ループ、if/while の単文 body | ✅ |
 | **R1** | リアルタイム入力: `nes_vsync()` (VBlank 同期 + sprite_mode 自動有効化) | ✅ |
 | **R2** | `nes_btn()` を 0 引数化。コントローラ状態 (下位 1B = bitmask) を IS_LONG で返す | ✅ |
 | **R3** | ビット演算子 `&` / `\|` (`ZEND_BW_AND` / `ZEND_BW_OR`)、2 進リテラル `0b..` | ✅ |
@@ -211,7 +211,8 @@ COMMENT      ::= "//" [^\n]* "\n"
 | **T1** | 文字列リテラルに `\xHH` / `\\` / `\"` エスケープ追加。decoded bytes を PRG-RAM pool ($7800-$7FFF) に書き zval は pool 内 offset を指す。本物の PHP 互換構文で任意 byte を埋めこめる (CHR タイル index 直接指定で非 ASCII テキストを扱うため) | ✅ |
 | **U1** | 整数キー配列 MVP: `[expr,...]` リテラル + `$a[idx]` 読取 + `count($a)`。IS_ARRAY=7、2KB runtime array pool ($7000-$77FF)。ZEND_INIT_ARRAY / ZEND_ADD_ARRAY_ELEMENT / ZEND_FETCH_DIM_R / ZEND_COUNT opcode | ✅ |
 | **V1-V4** | 配列: **書換 `$a[i] = v`** + **append `$a[] = v`** (ZEND_ASSIGN_DIM + ZEND_OP_DATA、2-op sequence)、**ネスト読取 `$a[i][j]...`** (FETCH_DIM_R チェーン)、**ネストリテラル `[[1,2],[3,4]]`** (CMP_ARR_* を stack で退避)。連想配列/foreach は未対応 | ✅ |
-| 次 | `foreach`、`else` / `elseif`、`<=` / `>` / `>=`、単項 `-` / `!`、`^` (BW_XOR) | 未着手 |
+| **W1** | マルチスプライト: `nes_sprite_at($idx, $x, $y, $tile)` (4 引数、$idx は runtime int 可)、`nes_sprite_attr($idx, $attr)`。NESPHP_NES_SPRITE (0xF2) の意味を「OAM[0] 固定」→「OAM[$idx]」に拡張、result スロットを 3 番目の入力 ($y) として流用。NESPHP_NES_SPRITE_ATTR (0xFC) を新設 | ✅ |
+| 次 | `foreach`、`else` / `elseif`、`<=` / `>` / `>=`、単項 `-` / `!`、`^` (BW_XOR)、括弧式 `(expr)`、`nes_rand()` (xorshift16) | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | L3 方針 |
 
 ### 数値リテラル
@@ -357,10 +358,10 @@ END:   (backpatch pop)
 7. **PRG-RAM 8KB** がコンパイル出力の上限 (opcode + literal zval、文字列は ROM 常駐)
 8. **CV 最大 32 スロット**、**TMP 最大 64 スロット**、**関数引数 ≤ 4**、**関数呼出ネスト無し** (call expr は `fgets` / `nes_btn` のみ)
 9. **比較式は非連鎖** (`$a < $b < $c` は compile error)
-10. **`else` / `elseif` 未対応**、**`!` / 単項 `-` 未対応**、**`<=` `>` `>=` 未対応**、**`^` (BW_XOR) 未対応**
+10. **`else` / `elseif` 未対応**、**`!` / 単項 `-` 未対応**、**`<=` `>` `>=` 未対応**、**`^` (BW_XOR) 未対応**、**括弧式 `(expr)` 未対応** (parse_primary が `(` を受けない、複雑な式は中間 CV を経由)
 11. **if / while / for のボディ**: `{ ... }` または単文どちらも可
 12. **ネスト深さ**: backpatch stack 8 段、6502 HW stack 256B (for ネスト 1 段で 4B 消費)、CV table 32 エントリ
-13. **対応 intrinsic** (合計 12 種): `nes_cls` / `nes_put` / `nes_puts` / `nes_sprite` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn`
+13. **対応 intrinsic** (合計 13 種): `nes_cls` / `nes_put` / `nes_puts` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn`
 14. **整数リテラル**: 10 進 (`42`)、16 進 (`0xFF` / `0X0A`)、2 進 (`0b1010` / `0B11`)。16bit signed narrow、overflow 検出なし
 15. **ビット演算**: `&` (BW_AND) / `|` (BW_OR) / `<<` (SL) / `>>` (SR、算術右シフト = 符号保持)。`^` (BW_XOR) / `~` (BW_NOT) は未対応
 16. **論理演算**: `&&` / `||` は短絡評価、結果は 0 or 1 の IS_LONG。`!` (NOT) は未対応

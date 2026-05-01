@@ -62,20 +62,21 @@ TK_LBRACKET = 32
 TK_RBRACKET = 33
 
 ; --- Intrinsic ID ---
-INT_CLS       = 0
-INT_CHR_BG    = 1
-INT_CHR_SPR   = 2
-INT_BG_COLOR  = 3
-INT_PALETTE   = 4
-INT_PUTS      = 5
-INT_FGETS     = 6
-INT_PUT       = 7
-INT_SPRITE    = 8
-INT_ATTR      = 9
-INT_VSYNC     = 10
-INT_BTN       = 11
-INT_COUNT     = 12
-INT_NOT_FOUND = $FF
+INT_CLS         = 0
+INT_CHR_BG      = 1
+INT_CHR_SPR     = 2
+INT_BG_COLOR    = 3
+INT_PALETTE     = 4
+INT_PUTS        = 5
+INT_FGETS       = 6
+INT_PUT         = 7
+INT_SPRITE_AT   = 8     ; nes_sprite_at($idx, $x, $y, $tile)
+INT_ATTR        = 9
+INT_VSYNC       = 10
+INT_BTN         = 11
+INT_COUNT       = 12
+INT_SPRITE_ATTR = 13    ; nes_sprite_attr($idx, $attr)
+INT_NOT_FOUND   = $FF
 
 ARG_STDIN_SENTINEL = $FE
 
@@ -2773,12 +2774,20 @@ cmp_match_intrinsic:
     LDA #INT_PUT
     RTS
 :
-    LDA #<intrinsic_name_nes_sprite
-    LDX #>intrinsic_name_nes_sprite
-    LDY #10
+    LDA #<intrinsic_name_nes_sprite_attr
+    LDX #>intrinsic_name_nes_sprite_attr
+    LDY #15
     JSR cmi_try_match
     BCS :+
-    LDA #INT_SPRITE
+    LDA #INT_SPRITE_ATTR
+    RTS
+:
+    LDA #<intrinsic_name_nes_sprite_at
+    LDX #>intrinsic_name_nes_sprite_at
+    LDY #13
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_SPRITE_AT
     RTS
 :
     LDA #<intrinsic_name_nes_attr
@@ -2845,7 +2854,8 @@ intrinsic_name_nes_palette:   .byte "nes_palette"
 intrinsic_name_nes_puts:      .byte "nes_puts"
 intrinsic_name_fgets:         .byte "fgets"
 intrinsic_name_nes_put:       .byte "nes_put"
-intrinsic_name_nes_sprite:    .byte "nes_sprite"
+intrinsic_name_nes_sprite_at:   .byte "nes_sprite_at"
+intrinsic_name_nes_sprite_attr: .byte "nes_sprite_attr"
 intrinsic_name_nes_attr:      .byte "nes_attr"
 intrinsic_name_nes_vsync:     .byte "nes_vsync"
 intrinsic_name_nes_btn:       .byte "nes_btn"
@@ -2873,11 +2883,12 @@ cmp_emit_jmp_table:
     .word cmp_emit_puts
     .word cmp_emit_fgets_stmt
     .word cmp_emit_put
-    .word cmp_emit_sprite
+    .word cmp_emit_sprite_at        ; INT_SPRITE_AT (8)
     .word cmp_emit_attr
     .word cmp_emit_vsync
     .word cmp_emit_btn_stmt
     .word cmp_emit_count_stmt
+    .word cmp_emit_sprite_attr      ; INT_SPRITE_ATTR (13)
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -3025,15 +3036,16 @@ cmp_emit_put:
     JSR cmp_op_finish
     RTS
 
-; nes_sprite($x, $y, tile)
-; op1 = $x, op2 = $y, extended_value = tile literal (IS_CONST、int 想定)
-cmp_emit_sprite:
+; nes_sprite_at($idx, $x, $y, $tile)
+; op1 = $idx, op2 = $x, result = $y, extended_value = tile literal
+; $idx/$x/$y は any operand type (CV/TMP/CONST)、$tile は IS_CONST 必須
+cmp_emit_sprite_at:
     LDA CMP_ARG_COUNT
-    CMP #3
+    CMP #4
     BEQ :+
     JMP cmp_error
 :
-    LDA CMP_ARG_TYPES+2
+    LDA CMP_ARG_TYPES+3
     CMP #IS_CONST
     BEQ :+
     JMP cmp_error
@@ -3044,9 +3056,30 @@ cmp_emit_sprite:
     LDX #1
     JSR cmp_set_op2_from_arg
     LDX #2
+    JSR cmp_set_result_from_arg
+    LDX #3
     JSR cmp_set_extended_from_arg
     LDY #20
     LDA #NESPHP_NES_SPRITE
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_sprite_attr($idx, $attr) — どちらも any operand type
+; op1 = $idx, op2 = $attr
+cmp_emit_sprite_attr:
+    LDA CMP_ARG_COUNT
+    CMP #2
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDY #20
+    LDA #NESPHP_NES_SPRITE_ATTR
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     RTS

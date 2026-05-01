@@ -19,7 +19,7 @@ nes_puts(3, 4, "PRESS A TO CLEAR");
 nes_puts(3, 5, "ARROWS MOVE SPRITE");
 
 // sprite_mode に突入
-nes_sprite($x, $y, 88);  // tile 88 = 'X'
+nes_sprite_at(0, $x, $y, 88);  // tile 88 = 'X'
 
 while (true) {
     $k = fgets(STDIN);
@@ -28,7 +28,7 @@ while (true) {
     if ($k === "R") $x = $x + 2;
     if ($k === "U") $y = $y - 2;
     if ($k === "D") $y = $y + 2;
-    nes_sprite($x, $y, 88);
+    nes_sprite_at(0, $x, $y, 88);
 
     if ($k === "A") {
         $p = $p + 1;

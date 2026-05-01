@@ -53,7 +53,7 @@
                │  └────────────────────────────────────────────┘
                │                                        │
                │                                        │
-               │        最初の nes_sprite 呼び出し       │
+               │        最初の nes_sprite_at 呼び出し       │
                └────────────────────────────────────────┘
 ```
 
@@ -68,9 +68,9 @@
   4. button 対応の `button_str_X` の ROM offset を result に書き戻し
 - ユーザから見ると「ボタン押してる間だけ画面が見える」体験
 
-### sprite_mode (初回 nes_sprite 後)
+### sprite_mode (初回 nes_sprite_at 後)
 
-初回 `nes_sprite` 呼び出しで `enable_sprite_mode` ルーチンが走る:
+初回 `nes_sprite_at` 呼び出しで `enable_sprite_mode` ルーチンが走る:
 
 1. VBlank 待ち (`BIT PPUSTATUS` / `BPL :-`)
 2. 初回 OAM DMA (`STA $4014`) で隠しスプライト (y=$FF) を反映
@@ -81,7 +81,7 @@
 
 以降:
 
-- `nes_sprite` は OAM shadow `$0200-$0203` に (y, tile, attr, x) を書くだけ。NMI が毎 VBlank で DMA
+- `nes_sprite_at` は OAM shadow `$0200 + $idx*4` 先頭から (y, tile, x) を書く (attr は触らない、`nes_sprite_attr` で別途設定)。NMI が毎 VBlank で全 64 sprite 分を OAM に DMA
 - `fgets` は rendering を切らずにボタン待ち (NMI が走り続けるので画面表示継続)
 - `echo` / `nes_put` / `nes_puts` は **Phase 3 (NMI 同期書き込みキュー) により動く**。実際の PPU 書き込みは NMI ハンドラが VBlank 中に行う (下記参照)
 - `nes_cls` は **Phase 3.1 (brief force-blanking) により動く**。1024 バイトは 1 VBlank 予算 (~2273 cycle) に入らないため NMI キュー経由ではなく、呼び出し時に一時的に `PPUMASK = 0` で rendering を止めて clear し、次 VBlank 同期で rendering を再開する方式。可視効果は 1-2 フレームの黒フラッシュで、スライド遷移のトランジションとして自然
@@ -318,7 +318,7 @@ if ($b & 0x82) { /* A または L */ }
 ```php
 <?php
 $x = 120; $y = 120;
-nes_sprite($x, $y, 88);
+nes_sprite_at(0, $x, $y, 88);
 while (true) {
     nes_vsync();                   // 1 フレーム待つ
     $b = nes_btn();                // コントローラ状態を 1 回取得
@@ -326,7 +326,7 @@ while (true) {
     if ($b & 0x01) { $x = $x + 1; }  // R
     if ($b & 0x08) { $y = $y - 1; }  // U
     if ($b & 0x04) { $y = $y + 1; }  // D
-    nes_sprite($x, $y, 88);        // 座標反映
+    nes_sprite_at(0, $x, $y, 88);  // 座標反映
 }
 ```
 
@@ -352,7 +352,7 @@ BEQ :-                   ; 値が変わる = NMI が 1 回発火した
 - **`fgets(STDIN)`**: モーダル UI (メニュー、スライド遷移)、1 回押したら確定
 - **`nes_vsync()` + `nes_btn($mask)`**: ゲームループ、アニメーション、押しっぱなし連続移動
 
-両方を同じプログラム内で混在させることも可能 (`nes_sprite` 呼出で sprite_mode に入れば NMI が回るので、`fgets` も `nes_vsync` も動く)。
+両方を同じプログラム内で混在させることも可能 (`nes_sprite_at` 呼出で sprite_mode に入れば NMI が回るので、`fgets` も `nes_vsync` も動く)。
 
 ---
 
@@ -453,49 +453,61 @@ read_bit:
 
 ---
 
-## 延長ゴール: スプライト
+## マルチスプライト: `nes_sprite_at` / `nes_sprite_attr`
 
 ### PHP 側
 
 ```php
 <?php
-nes_sprite_set(0, 64, 100, 0xA0);   // sprite id=0, x=64, y=100, tile=0xA0
+// 任意 OAM スロット (0-63) を更新。$idx は runtime int 可
+for ($i = 0; $i < 8; $i = $i + 1) {
+    nes_sprite_at($i, 32 + $i*16, 100, 0xA0);
+}
+
+// 属性を別途設定 (palette / flip / 優先度)
+nes_sprite_attr(0, 0b01000001);   // bit 6=hflip, bit 0-1=palette 1
 ```
 
-### serializer の畳み込み
+`nes_sprite_at($idx, $x, $y, $tile)`:
+- `$idx`: 0-63 (VM 側で `& 0x3F` クランプ)。runtime int 可
+- `$x` / `$y`: runtime int 可
+- `$tile`: コンパイル時リテラル必須 (extended_value に literal 焼込み)
+- `attr` バイトは触らない (= 既存値保持、初期値 0 = palette 0 / no flip / front)
+- 初回呼び出しで sprite_mode に遷移 (rendering ON + NMI ON)
 
-`INIT_FCALL 4 "nes_sprite_set"` + `SEND_VAL × 4` + `DO_FCALL` を検出し、`ZEND_DO_FCALL` の extended_value に `BUILTIN_SPRITE_SET` を埋め込む。
+`nes_sprite_attr($idx, $attr)`:
+- 両引数とも runtime int 可
+- attr バイト構成: bit 0-1=palette / bit 5=priority / bit 6=hflip / bit 7=vflip
+- sprite_mode は本 intrinsic 単独では起動しない (位置を設定する `nes_sprite_at` と組み合わせる前提)
 
 ### VM 側
 
 ```asm
-do_sprite_set:
-    ; VM スタックから 4 引数 (tile, y, x, id) を pop
-    JSR vm_pop            ; tile
+handle_nesphp_nes_sprite:               ; nes_sprite_at
+    LDA sprite_mode_on
+    BNE :+
+    JSR enable_sprite_mode               ; 初回のみ rendering + NMI 有効化
+:
+    JSR resolve_op1                      ; OP1_VAL = $idx
+    JSR resolve_op2                      ; OP2_VAL = $x
+    JSR resolve_result                   ; RESULT_VAL = $y (result スロット流用)
+    ; extended_value から $tile literal を読む (TYPE_LONG チェック)
     ...
-    JSR vm_pop            ; id
-
-    ; OAM シャドウ $0200 + id*4 に (y, tile, attr=0, x) を書く
-    LDA id
-    ASL A                ; id * 2
-    ASL A                ; id * 4
-    TAX
-    LDA y
-    STA $0200,X
-    INX
-    LDA tile
-    STA $0200,X
-    INX
-    LDA #0               ; attr
-    STA $0200,X
-    INX
-    LDA x
-    STA $0200,X
-
+    LDA OP1_VAL+1
+    AND #$3F                             ; 0-63 にクランプ
+    ASL A
+    ASL A                                ; * 4
+    TAX                                  ; X = OAM offset
+    LDA RESULT_VAL+1
+    STA OAM_SHADOW + 0, X                ; y
+    LDA TMP2
+    STA OAM_SHADOW + 1, X                ; tile
+    LDA OP2_VAL+1
+    STA OAM_SHADOW + 3, X                ; x (attr は触らない)
     JMP advance
 ```
 
-OAM シャドウは次の VBlank で NMI ハンドラが `$4014` に書いて OAM DMA でハードウェアに転送する。
+OAM シャドウ ($0200-$02FF) は次の VBlank で NMI ハンドラが `$4014` に書いて OAM DMA でハードウェアに転送する (これは sprite_mode 遷移後ずっと毎フレーム自動)。
 
 ---
 

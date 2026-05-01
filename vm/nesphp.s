@@ -59,6 +59,7 @@ NESPHP_NES_PALETTE  = $F8   ; パレット設定 (id, c1, c2, c3)
 NESPHP_NES_ATTR     = $F9   ; attribute table 設定 (x, y, pal)
 NESPHP_NES_VSYNC    = $FA   ; 次 VBlank まで spin (sprite_mode 未設定時は自動 enable)
 NESPHP_NES_BTN      = $FB   ; コントローラ状態を IS_LONG (下位 1B = buttons bitmask) で返す
+NESPHP_NES_SPRITE_ATTR = $FC ; OAM[$idx*4+2] = attr (palette / flip / 優先度)
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -203,7 +204,7 @@ buttons:        .res 1    ; 現在のボタン状態 (bit 7=A, 6=B, 5=Sel, 4=Sta
 pi_count:       .res 1    ; print_int16 が書いたバイト数
 
 ; スプライトモード (0 = forced blanking, 1 = rendering + NMI on)
-; 初回 nes_sprite で 1 に遷移。
+; 初回 nes_sprite_at で 1 に遷移。
 ; Phase 3 (NMI 同期書き込み) により、sprite_mode 中でも echo / nes_put /
 ; nes_puts は動く (NMI キュー経由)。nes_cls だけは依然として forced_blanking
 ; 専用 (1024B を 1 VBlank 予算 ~2273 cycle に収められないため)。
@@ -525,6 +526,10 @@ main_loop:
     CMP #NESPHP_NES_BTN
     BNE :+
     JMP handle_nesphp_nes_btn
+:
+    CMP #NESPHP_NES_SPRITE_ATTR
+    BNE :+
+    JMP handle_nesphp_nes_sprite_attr
 :
     CMP #ZEND_ECHO
     BNE :+
@@ -882,6 +887,117 @@ res_tmp_to_op2:
     INY
     LDA (TMP0), Y
     STA OP2_VAL+3
+    RTS
+
+; =============================================================================
+; resolve_result: result スロット (offset 8, type at offset 23) を RESULT_VAL に
+; 4B tagged 値として展開する。op1/op2 と同じ tag 形式。4 引数 intrinsic で
+; 「3 番目の引数を runtime int として読みたい」用途のため (例: nes_sprite_at の
+; $y)。result_type が IS_UNUSED の場合は 0 で埋める。
+; =============================================================================
+resolve_result:
+    LDY #23                ; result_type
+    LDA (VM_PC), Y
+    CMP #IS_CONST
+    BNE :+
+    LDY #8
+    JMP res_const_to_result
+:
+    CMP #IS_CV
+    BNE :+
+    LDY #8
+    JMP res_cv_to_result
+:
+    CMP #IS_TMP_VAR
+    BNE :+
+    LDY #8
+    JMP res_tmp_to_result
+:
+    CMP #IS_VAR
+    BNE :+
+    LDY #8
+    JMP res_tmp_to_result
+:
+    LDA #0
+    STA RESULT_VAL
+    STA RESULT_VAL+1
+    STA RESULT_VAL+2
+    STA RESULT_VAL+3
+    RTS
+
+res_const_to_result:
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    CLC
+    LDA VM_LITBASE
+    ADC TMP0
+    STA TMP0
+    LDA VM_LITBASE+1
+    ADC TMP0+1
+    STA TMP0+1
+    LDY #8
+    LDA (TMP0), Y
+    STA RESULT_VAL
+    LDY #0
+    LDA (TMP0), Y
+    STA RESULT_VAL+1
+    LDY #1
+    LDA (TMP0), Y
+    STA RESULT_VAL+2
+    LDY #2
+    LDA (TMP0), Y
+    STA RESULT_VAL+3
+    RTS
+
+res_cv_to_result:
+    LDA (VM_PC), Y         ; result.var lo (= slot * 16)
+    LSR A
+    LSR A
+    CLC
+    ADC VM_CVBASE
+    STA TMP0
+    LDA VM_CVBASE+1
+    ADC #0
+    STA TMP0+1
+    LDY #0
+    LDA (TMP0), Y
+    STA RESULT_VAL
+    INY
+    LDA (TMP0), Y
+    STA RESULT_VAL+1
+    INY
+    LDA (TMP0), Y
+    STA RESULT_VAL+2
+    INY
+    LDA (TMP0), Y
+    STA RESULT_VAL+3
+    RTS
+
+res_tmp_to_result:
+    LDA (VM_PC), Y
+    LSR A
+    LSR A
+    CLC
+    ADC VM_TMPBASE
+    STA TMP0
+    LDA VM_TMPBASE+1
+    ADC #0
+    STA TMP0+1
+    LDY #0
+    LDA (TMP0), Y
+    STA RESULT_VAL
+    INY
+    LDA (TMP0), Y
+    STA RESULT_VAL+1
+    INY
+    LDA (TMP0), Y
+    STA RESULT_VAL+2
+    INY
+    LDA (TMP0), Y
+    STA RESULT_VAL+3
     RTS
 
 ; =============================================================================
@@ -2568,7 +2684,7 @@ attr_err:
 ;
 ; sprite_mode が off (NMI 未有効) なら enable_sprite_mode を自動で呼ぶ。
 ; OAM shadow は reset で $FF (= y 座標 offscreen) に初期化済みなので、
-; nes_sprite を呼ばずに rendering を有効化してもスプライトは見えない。
+; nes_sprite_at を呼ばずに rendering を有効化してもスプライトは見えない。
 ; =============================================================================
 handle_nesphp_nes_vsync:
     LDA sprite_mode_on
@@ -2621,24 +2737,35 @@ button_str_l:     .byte 'L'
 button_str_r:     .byte 'R'
 
 ; =============================================================================
-; NESPHP_NES_SPRITE: sprite 0 の OAM shadow を更新
+; NESPHP_NES_SPRITE (0xF2): nes_sprite_at($idx, $x, $y, $tile)
 ;
-; op1            = x (IS_CV / IS_CONST、IS_LONG 値)
-; op2            = y (IS_CV / IS_CONST、IS_LONG 値)
-; extended_value = tile literal の byte offset (IS_CONST、IS_LONG 想定)
+; OAM[$idx] (0..63) の shadow を更新する。$idx, $x, $y は runtime int 可
+; (CV/TMP/CONST いずれも)、$tile はリテラル必須 (IS_CONST IS_LONG)。
 ;
-; 初回呼び出し時に rendering + NMI を有効化し、以降は OAM shadow 書き込みだけ。
-; NMI ハンドラが毎 VBlank で OAM DMA を実行するので、書き換えは即座に反映される。
+; op1            = $idx (any operand type、IS_LONG)
+; op2            = $x   (any operand type、IS_LONG)
+; result slot    = $y   (any operand type、IS_LONG) — result の field を入力
+;                       3 番目の runtime 値の格納場所として再利用
+; extended_value = $tile literal pointer (IS_CONST IS_LONG)
+;
+; OAM offset = ($idx & 0x3F) * 4
+;   +0 = y, +1 = tile, +2 = attr (touch しない), +3 = x
+;
+; attr バイトは触らない (= 既存値を保持)。属性変更は nes_sprite_attr で別途。
+;
+; 初回呼び出しで rendering + NMI を有効化し、以降は OAM shadow 書き込みだけ。
+; NMI ハンドラが毎 VBlank で OAM DMA を実行するので、書き換えは即座に反映。
 ; =============================================================================
 handle_nesphp_nes_sprite:
     LDA sprite_mode_on
     BNE nss_mode_ready
     JSR enable_sprite_mode
 nss_mode_ready:
-    JSR resolve_op1        ; OP1_VAL = x
-    JSR resolve_op2        ; OP2_VAL = y
+    JSR resolve_op1        ; OP1_VAL = $idx
+    JSR resolve_op2        ; OP2_VAL = $x
+    JSR resolve_result     ; RESULT_VAL = $y
 
-    ; extended_value から tile を decode
+    ; extended_value から $tile を decode (literal 必須)
     LDY #12
     LDA (VM_PC), Y
     STA TMP0
@@ -2659,23 +2786,55 @@ nss_mode_ready:
     BNE nss_type_err       ; tile は IS_LONG (整数リテラル) 前提
     LDY #0
     LDA (TMP0), Y
-    STA TMP2               ; TMP2 = tile
+    STA TMP2               ; TMP2 = tile (lo byte)
 
-    ; OAM shadow (sprite 0) を更新
-    ;   $0200 = y, $0201 = tile, $0202 = attr=0, $0203 = x
-    LDA OP2_VAL+1
-    STA OAM_SHADOW + 0     ; y
+    ; OAM offset = ($idx & 0x3F) * 4 (= idx を 0-63 にクランプして << 2)
+    LDA OP1_VAL+1          ; idx lo byte
+    AND #$3F
+    ASL A
+    ASL A
+    TAX                    ; X = OAM offset (0, 4, 8, ..., 252)
+
+    ; OAM_SHADOW[X..X+3] を更新 (attr は触らない)
+    LDA RESULT_VAL+1
+    STA OAM_SHADOW + 0, X  ; y
     LDA TMP2
-    STA OAM_SHADOW + 1     ; tile
-    LDA #0
-    STA OAM_SHADOW + 2     ; attr (palette 0, front, no flip)
-    LDA OP1_VAL+1
-    STA OAM_SHADOW + 3     ; x
+    STA OAM_SHADOW + 1, X  ; tile
+    LDA OP2_VAL+1
+    STA OAM_SHADOW + 3, X  ; x
 
     JMP advance
 
 nss_type_err:
     JMP handle_unimpl
+
+; =============================================================================
+; NESPHP_NES_SPRITE_ATTR (0xFC): nes_sprite_attr($idx, $attr)
+;
+; OAM[$idx*4+2] = $attr。attr バイトのビット構成:
+;   bit 0-1 : palette (0-3、sprite palette 0/1/2/3 = $3F11/15/19/1D 系)
+;   bit 5   : 優先度 (0 = BG の前 / 1 = BG の後ろ)
+;   bit 6   : 水平反転 (1 で左右反転)
+;   bit 7   : 垂直反転 (1 で上下反転)
+;
+; 両引数とも runtime int 可。$idx は 0-63 にクランプ。
+; sprite_mode は本 intrinsic 単独では起動しない (位置を設定する nes_sprite_at と
+; 組み合わせる前提、属性だけ書き換えても sprite y=$FF のままだと見えない)。
+; =============================================================================
+handle_nesphp_nes_sprite_attr:
+    JSR resolve_op1        ; OP1_VAL = $idx
+    JSR resolve_op2        ; OP2_VAL = $attr
+
+    LDA OP1_VAL+1
+    AND #$3F
+    ASL A
+    ASL A
+    TAX                    ; X = OAM offset
+
+    LDA OP2_VAL+1
+    STA OAM_SHADOW + 2, X  ; attr
+
+    JMP advance
 
 ; -----------------------------------------------------------------------------
 ; enable_sprite_mode: 初回 nes_sprite から呼ばれる遷移処理

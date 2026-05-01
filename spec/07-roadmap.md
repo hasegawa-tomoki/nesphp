@@ -33,12 +33,13 @@
 | P2 | CV + assign + `+ -` + エラー画面表示 | `arith.nes` (self-hosted), `err_syntax.nes` | ✅ **完了** |
 | P3 (M-C) | `while { }` + `if { }` + 比較 `===/!==/==/!=/<` + `$k = fgets(STDIN)` + `true` + backpatch | `loop.nes`, `button.nes`, `iftest.nes` (self-hosted) | ✅ **完了** |
 | P4 | コメント (`// # /* */`)、文字列内 non-ASCII (UTF-8 日本語など) 透過 | `comments.nes` | ✅ **完了** |
-| Q1-Q4 | 残り intrinsic 3 種 (nes_put / nes_sprite / nes_attr)、16 進リテラル、`++` / `--` (PRE/POST INC/DEC)、`for` ループ、if/while 単文 body | `move.nes` `sprite.nes` `livetext.nes` `livereset.nes` `color.nes` `for.nes` | ✅ **完了** |
+| Q1-Q4 | 残り intrinsic 3 種 (nes_put / nes_sprite (1-sprite 版、後に W1 で nes_sprite_at に拡張) / nes_attr)、16 進リテラル、`++` / `--` (PRE/POST INC/DEC)、`for` ループ、if/while 単文 body | `move.nes` `sprite.nes` `livetext.nes` `livereset.nes` `color.nes` `for.nes` | ✅ **完了** |
 | R1 | `nes_vsync()` + `nes_btn($mask)` (初期版、mask AND 方式) | — | ✅ **完了** |
 | R2 | `nes_btn()` を 0 引数化し、コントローラ状態を IS_LONG で返す仕様に変更 | `poll.nes` | ✅ **完了** |
 | R3 | ビット演算子 `&` `\|` (ZEND_BW_AND/OR)、2 進リテラル `0b..` | `bintest.nes` | ✅ **完了** |
 | **examples/* 全通** | 現リポジトリの **18 example すべて on-NES self-host で動作** (err_syntax は意図的 compile-error 検証) | — | ✅ **完了** |
-| 次 | `else` / `elseif` / `<=` / `>` / `>=` / `&&` / `\|\|` / `!` / 単項 `-` / `^` (BW_XOR) / `<<` `>>` (SL/SR) | — | 未着手 |
+| W1 | マルチスプライト: `nes_sprite_at($idx, $x, $y, $tile)` (4 引数、$idx は runtime int 可)、`nes_sprite_attr($idx, $attr)` (palette / flip / 優先度)。NESPHP_NES_SPRITE (0xF2) を OAM[$idx] 任意化、NESPHP_NES_SPRITE_ATTR (0xFC) 新設 | 既存 `sprite.nes` `livetext.nes` `livereset.nes` `poll.nes` を nes_sprite_at に移行 | ✅ **完了** |
+| 次 | `else` / `elseif` / `<=` / `>` / `>=` / `&&` / `\|\|` / `!` / 単項 `-` / `^` (BW_XOR) / `<<` `>>` (SL/SR)、`nes_rand()` (xorshift16) | — | 未着手 |
 | 対象外 | 配列、オブジェクト、foreach、例外、double | — | L3 方針 |
 
 各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。

@@ -1,7 +1,7 @@
 <?php
 // Phase 3 デモ: sprite_mode 中に nes_puts / echo を動的に呼ぶ
 //
-// 従来 (Phase 5B 時点): nes_sprite 呼び出し後は rendering が常時 ON になり、
+// 従来 (Phase 5B 時点): nes_sprite_at 呼び出し後は rendering が常時 ON になり、
 // echo / nes_put / nes_puts は使えなかった (nametable 直書きが PPU latch を
 // 壊す)。
 //
@@ -26,7 +26,7 @@ nes_puts(3, 4, "ARROWS: MOVE SPRITE");
 nes_puts(3, 5, "A: WRITE HIT LINE");
 
 // sprite_mode に突入
-nes_sprite($x, $y, 88);  // tile 88 = 'X'
+nes_sprite_at(0, $x, $y, 88);  // tile 88 = 'X'
 
 while (true) {
     $k = fgets(STDIN);
@@ -35,7 +35,7 @@ while (true) {
     if ($k === "R") $x = $x + 2;
     if ($k === "U") $y = $y - 2;
     if ($k === "D") $y = $y + 2;
-    nes_sprite($x, $y, 88);
+    nes_sprite_at(0, $x, $y, 88);
 
     if ($k === "A") {
         // sprite_mode 中の nes_puts: NMI キュー経由で次 VBlank に反映

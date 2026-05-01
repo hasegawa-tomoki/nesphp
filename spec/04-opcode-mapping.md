@@ -54,7 +54,7 @@ L3S で emit 対象の nesphp カスタム opcode (intrinsic 畳み込み):
 |---|---|:---:|
 | `NESPHP_FGETS` | 0xF0 | ✓ (P1) |
 | `NESPHP_NES_PUT` | 0xF1 | ✓ (Q1) |
-| `NESPHP_NES_SPRITE` | 0xF2 | ✓ (Q1) |
+| `NESPHP_NES_SPRITE` | 0xF2 | ✓ (Q1) — `nes_sprite_at($idx, $x, $y, $tile)` で OAM[$idx] (0-63) を更新 |
 | `NESPHP_NES_PUTS` | 0xF3 | ✓ (P1) |
 | `NESPHP_NES_CLS` | 0xF4 | ✓ (P1) |
 | `NESPHP_NES_CHR_SPR` | 0xF5 | ✓ (P1) |
@@ -64,6 +64,7 @@ L3S で emit 対象の nesphp カスタム opcode (intrinsic 畳み込み):
 | `NESPHP_NES_ATTR` | 0xF9 | ✓ (Q1) |
 | `NESPHP_NES_VSYNC` | 0xFA | ✓ (R1) — 次 VBlank まで spin、sprite_mode 自動有効化 |
 | `NESPHP_NES_BTN` | 0xFB | ✓ (R2) — **0 引数**、コントローラ状態を IS_LONG (下位 1B = bitmask) で返す。呼び出し側で `$b & 0x80` 等でビット演算 |
+| `NESPHP_NES_SPRITE_ATTR` | 0xFC | ✓ (S1) — `nes_sprite_attr($idx, $attr)`。OAM[$idx*4+2] を更新 |
 
 Q2: 16 進リテラル `0x..` 対応 (lexer)。Q3: `ZEND_PRE_INC` (34) / `ZEND_PRE_DEC` (35) / `ZEND_POST_INC` (36) / `ZEND_POST_DEC` (37) を L3S で emit 可能 (`++$x` / `$x++` / `--$x` / `$x--`)。Q4: `for (init; cond; update) body` を double-JMP で展開して emit。
 | `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 (forced_blanking 時) → 無限ループ |
@@ -77,7 +78,7 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 |---|---|---|
 | `NESPHP_FGETS` | **0xF0** | コントローラ待ち → 押されたボタンの `button_str_X` を IS_STRING で result へ |
 | `NESPHP_NES_PUT` | **0xF1** | nametable の (x, y) に 1 文字書く。forced_blanking 前提 |
-| `NESPHP_NES_SPRITE` | **0xF2** | sprite 0 の OAM shadow を更新。初回呼び出しで sprite_mode に遷移 |
+| `NESPHP_NES_SPRITE` | **0xF2** | OAM[$idx] (0-63) の y / tile / x を更新。$idx は runtime int 可、$tile はリテラル必須。attr バイトは触らない (`NESPHP_NES_SPRITE_ATTR` で別途)。初回呼び出しで sprite_mode に遷移 |
 | `NESPHP_NES_PUTS` | **0xF3** | nametable の (x, y) に文字列リテラルを書く。forced_blanking 前提、行折り返しなし |
 | `NESPHP_NES_CLS` | **0xF4** | nametable 0 ($2000-$23FF) を空白で埋めて `PPU_CURSOR` を既定位置に戻す。forced_blanking 前提 |
 | `NESPHP_NES_CHR_SPR` | **0xF5** | sprite 用 4KB CHR bank 切替 (0-7)。MMC1 CHR bank 1 register ($C000) に書く → PPU $1000。詳細は [11-chr-banks](./11-chr-banks.md) |
@@ -85,6 +86,7 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 | `NESPHP_NES_BG_COLOR` | **0xF7** | 背景色 ($3F00) を NES カラーコード (0x00-0x3F) で設定。全パレット共通 |
 | `NESPHP_NES_PALETTE` | **0xF8** | パレットの色 1-3 を設定。4 引数 (id, c1, c2, c3) で op1/op2/result/extended_value を全て使用 |
 | `NESPHP_NES_ATTR` | **0xF9** | attribute table の 2×2 タイルブロックにパレット番号 (0-3) を設定。64B RAM shadow 経由で read-modify-write |
+| `NESPHP_NES_SPRITE_ATTR` | **0xFC** | OAM[$idx] (0-63) の attribute byte を設定。bit 0-1=palette / bit 5=priority / bit 6=hflip / bit 7=vflip。両引数とも runtime int 可 |
 
 ### serializer のパターン畳み込み
 
@@ -98,7 +100,7 @@ SEND_VAL T? ...                 →  ZEND_NOP
 DO_ICALL                        →  NESPHP_FGETS (result スロット継承)
 ```
 
-**`nes_put($x, $y, "X")` / `nes_puts($x, $y, "str")` / `nes_sprite($x, $y, 65)` → `NESPHP_NES_PUT` / `NESPHP_NES_PUTS` / `NESPHP_NES_SPRITE`**
+**`nes_put($x, $y, "X")` / `nes_puts($x, $y, "str")` → `NESPHP_NES_PUT` / `NESPHP_NES_PUTS`**
 ```
 INIT_FCALL_BY_NAME ... "nes_put" →  ZEND_NOP
 SEND_VAR_EX CV0 ... 1            →  ZEND_NOP  (引数を pendingArgs に記録)
@@ -108,7 +110,32 @@ DO_FCALL_BY_NAME                 →  NESPHP_NES_PUT
                                     op1 = $x, op2 = $y, extended_value = char literal
 ```
 
-第 3 引数 (char / string / tile) は **コンパイル時リテラル必須**。非リテラルで呼び出すと serializer がエラー。`nes_puts` は第 3 引数が `TYPE_STRING` リテラルで、VM が `zend_string.len + val[]` を PPUDATA へ流し込む。
+第 3 引数 (char / string) は **コンパイル時リテラル必須**。非リテラルで呼び出すと serializer がエラー。`nes_puts` は第 3 引数が `TYPE_STRING` リテラルで、VM が `zend_string.len + val[]` を PPUDATA へ流し込む。
+
+**`nes_sprite_at($idx, $x, $y, $tile)` → `NESPHP_NES_SPRITE`**
+```
+INIT_FCALL_BY_NAME 4 "nes_sprite_at" →  ZEND_NOP
+SEND_VAL_EX $idx 1                  →  ZEND_NOP
+SEND_VAL_EX $x 2                    →  ZEND_NOP
+SEND_VAL_EX $y 3                    →  ZEND_NOP
+SEND_VAL_EX int($tile) 4            →  ZEND_NOP
+DO_FCALL_BY_NAME                     →  NESPHP_NES_SPRITE
+                                        op1 = $idx, op2 = $x,
+                                        result = $y, extended_value = $tile
+```
+
+`nes_palette` と同じく 4 引数 intrinsic で、result フィールドを「3 番目の入力」として再利用する。`$idx` / `$x` / `$y` は runtime int 可 (CV/TMP/CONST)、`$tile` のみリテラル必須。`$idx` は VM 側で `& 0x3F` クランプして OAM offset に変換する。
+
+**`nes_sprite_attr($idx, $attr)` → `NESPHP_NES_SPRITE_ATTR`**
+```
+INIT_FCALL_BY_NAME 2 "nes_sprite_attr" →  ZEND_NOP
+SEND_VAL_EX $idx 1                    →  ZEND_NOP
+SEND_VAL_EX $attr 2                   →  ZEND_NOP
+DO_FCALL_BY_NAME                       →  NESPHP_NES_SPRITE_ATTR
+                                          op1 = $idx, op2 = $attr
+```
+
+両引数とも runtime int 可。OAM[$idx*4+2] に attribute byte を直接書き込む (palette / flip / priority)。
 
 **`nes_cls()` → `NESPHP_NES_CLS`**
 ```

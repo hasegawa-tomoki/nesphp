@@ -8,7 +8,7 @@
 
 $x = 120;
 $y = 120;
-nes_sprite($x, $y, 88);  // tile 88 = 'X'
+nes_sprite_at(0, $x, $y, 88);  // tile 88 = 'X'
 
 while (true) {
     nes_vsync();
@@ -17,5 +17,5 @@ while (true) {
     if ($b & 0x01) { $x = $x + 1; }  // Right
     if ($b & 0x08) { $y = $y - 1; }  // Up
     if ($b & 0x04) { $y = $y + 1; }  // Down
-    nes_sprite($x, $y, 88);
+    nes_sprite_at(0, $x, $y, 88);
 }
