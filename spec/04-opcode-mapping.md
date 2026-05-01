@@ -67,6 +67,7 @@ L3S で emit 対象の nesphp カスタム opcode (intrinsic 畳み込み):
 | `NESPHP_NES_SPRITE_ATTR` | 0xFC | ✓ (W1) — `nes_sprite_attr($idx, $attr)`。OAM[$idx*4+2] を更新 |
 | `NESPHP_NES_RAND` | 0xFD | ✓ (W2) — `nes_rand()`。16-bit Galois LFSR (tap = $B400、周期 65535) を 1 step |
 | `NESPHP_NES_SRAND` | 0xFE | ✓ (W2) — `nes_srand($seed)`。LFSR 状態を $seed に設定 ($seed = 0 は 1 に置換) |
+| `NESPHP_NES_PUTINT` | 0xFF | ✓ (W4) — `nes_putint($x, $y, $value)`。5-char 右詰め unsigned int を nametable に書く |
 
 Q2: 16 進リテラル `0x..` 対応 (lexer)。Q3: `ZEND_PRE_INC` (34) / `ZEND_PRE_DEC` (35) / `ZEND_POST_INC` (36) / `ZEND_POST_DEC` (37) を L3S で emit 可能 (`++$x` / `$x++` / `--$x` / `$x--`)。Q4: `for (init; cond; update) body` を double-JMP で展開して emit。
 | `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 (forced_blanking 時) → 無限ループ |
@@ -91,6 +92,7 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 | `NESPHP_NES_SPRITE_ATTR` | **0xFC** | OAM[$idx] (0-63) の attribute byte を設定。bit 0-1=palette / bit 5=priority / bit 6=hflip / bit 7=vflip。両引数とも runtime int 可 |
 | `NESPHP_NES_RAND` | **0xFD** | 16-bit Galois LFSR (tap = `$B400`、polynomial `x^16 + x^14 + x^13 + x^11 + 1`、周期 65535) を 1 step。戻り値は IS_LONG (16-bit、result スロットに書き込み)。0 引数 |
 | `NESPHP_NES_SRAND` | **0xFE** | LFSR 状態を `$seed` で上書き。`$seed == 0` は LFSR の退化点なので内部で 1 に置換 |
+| `NESPHP_NES_PUTINT` | **0xFF** | nametable `(x, y)` に **5-char 右詰め unsigned int** を ASCII で書く。0..65535 範囲、leading zeros は ' ' に置換 (例: 99 → "   99")。3 引数全て runtime int 可 (nes_sprite_at と同じく result スロットを 3 番目の入力として再利用)。sprite_mode 中は NMI 同期キュー経由 |
 
 ### serializer のパターン畳み込み
 

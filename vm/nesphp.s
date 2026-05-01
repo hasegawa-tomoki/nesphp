@@ -63,6 +63,7 @@ NESPHP_NES_BTN      = $FB   ; コントローラ状態を IS_LONG (下位 1B = b
 NESPHP_NES_SPRITE_ATTR = $FC ; OAM[$idx*4+2] = attr (palette / flip / 優先度)
 NESPHP_NES_RAND     = $FD   ; 16-bit Galois LFSR を 1 step 進めて IS_LONG で返す
 NESPHP_NES_SRAND    = $FE   ; LFSR 状態を $seed に設定 ($seed = 0 は内部で 1 に置換)
+NESPHP_NES_PUTINT   = $FF   ; nametable (x, y) に 5-char 右詰め unsigned int を書く
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -552,6 +553,10 @@ main_loop:
     CMP #NESPHP_NES_SRAND
     BNE :+
     JMP handle_nesphp_nes_srand
+:
+    CMP #NESPHP_NES_PUTINT
+    BNE :+
+    JMP handle_nesphp_nes_putint
 :
     CMP #ZEND_ECHO
     BNE :+
@@ -2964,6 +2969,103 @@ handle_nesphp_nes_srand:
     LDA #1
     STA rand_state
 :
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_PUTINT (0xFF): nes_putint($x, $y, $value)
+;
+; nametable (x, y) に **5-char 右詰め unsigned 16-bit int** を ASCII で書く。
+;
+; op1         = $x (any operand type、IS_LONG)
+; op2         = $y (any operand type、IS_LONG)
+; result slot = $value (any operand type、IS_LONG; 3 番目の runtime int)
+;
+; $value は unsigned 16-bit として解釈し、0..65535 範囲。出力例:
+;   0     → "    0"
+;   99    → "   99"
+;   1234  → " 1234"
+;   65535 → "65535"
+;
+; 負数 (signed として解釈すると負) を渡すと unsigned 値として表示される
+; (例: -1 → "65535")。スコア HUD など正値前提の用途を想定。
+;
+; sprite_mode 中なら NMI 同期書き込みキュー (ppu_write_bytes 経由) で次 VBlank
+; に反映、forced_blanking 中なら直書き。
+; =============================================================================
+handle_nesphp_nes_putint:
+    JSR resolve_op1        ; OP1_VAL = $x
+    JSR resolve_op2        ; OP2_VAL = $y
+    JSR resolve_result     ; RESULT_VAL = $value
+
+    ; TMP0 = $value (unsigned 16-bit)
+    LDA RESULT_VAL+1
+    STA TMP0
+    LDA RESULT_VAL+2
+    STA TMP0+1
+
+    ; Step 1: 位置 4..0 に 5 桁全部 ('0' を含む leading zeros) を書く
+    ; 注意: div_tmp0_by_10 は X register を clobber する (内部で 16 step counter
+    ; に使用)。Y は touch しないので Y を loop counter にする。
+    LDY #4
+npti_div_loop:
+    JSR div_tmp0_by_10     ; A = 余り 0-9, TMP0 = 商, X = clobber, Y は保持
+    CLC
+    ADC #'0'
+    STA INT_PRINT_BUFFER, Y
+    DEY
+    BPL npti_div_loop
+
+    ; Step 2: 先頭の '0' 連続を ' ' に置換 (位置 4 = 末尾は残すので 0..3 のみ)
+    LDY #0
+npti_pad_loop:
+    LDA INT_PRINT_BUFFER, Y
+    CMP #'0'
+    BNE npti_addr          ; 非 '0' 出現 → 以降そのまま
+    LDA #' '
+    STA INT_PRINT_BUFFER, Y
+    INY
+    CPY #4
+    BNE npti_pad_loop
+
+npti_addr:
+    ; nametable アドレス = $2000 + y*32 + x → TMP0 (nes_put と同じロジック)
+    LDA OP2_VAL+1
+    STA TMP0
+    LDA #0
+    STA TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    CLC
+    LDA OP1_VAL+1
+    ADC TMP0
+    STA TMP0
+    LDA #0
+    ADC TMP0+1
+    STA TMP0+1
+    CLC
+    LDA TMP0
+    ADC #$00
+    STA TMP0
+    LDA TMP0+1
+    ADC #$20
+    STA TMP0+1
+
+    ; TMP1 = INT_PRINT_BUFFER, TMP2 = 5 (固定 5 byte)
+    LDA #<INT_PRINT_BUFFER
+    STA TMP1
+    LDA #>INT_PRINT_BUFFER
+    STA TMP1+1
+    LDA #5
+    STA TMP2
+    JSR ppu_write_bytes
     JMP advance
 
 ; -----------------------------------------------------------------------------

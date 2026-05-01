@@ -83,6 +83,7 @@ INT_COUNT       = 12
 INT_SPRITE_ATTR = 13    ; nes_sprite_attr($idx, $attr)
 INT_RAND        = 14    ; nes_rand() — 0 引数、IS_LONG 返却
 INT_SRAND       = 15    ; nes_srand($seed) — 1 引数、戻り値なし
+INT_PUTINT      = 16    ; nes_putint($x, $y, $value) — 3 引数 全 runtime
 INT_NOT_FOUND   = $FF
 
 ARG_STDIN_SENTINEL = $FE
@@ -3125,6 +3126,14 @@ cmp_match_intrinsic:
     LDA #INT_RAND
     RTS
 :
+    LDA #<intrinsic_name_nes_putint
+    LDX #>intrinsic_name_nes_putint
+    LDY #10
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_PUTINT
+    RTS
+:
     LDA #INT_NOT_FOUND
     RTS
 
@@ -3161,6 +3170,7 @@ intrinsic_name_nes_sprite_at:   .byte "nes_sprite_at"
 intrinsic_name_nes_sprite_attr: .byte "nes_sprite_attr"
 intrinsic_name_nes_rand:        .byte "nes_rand"
 intrinsic_name_nes_srand:       .byte "nes_srand"
+intrinsic_name_nes_putint:      .byte "nes_putint"
 intrinsic_name_nes_attr:      .byte "nes_attr"
 intrinsic_name_nes_vsync:     .byte "nes_vsync"
 intrinsic_name_nes_btn:       .byte "nes_btn"
@@ -3196,6 +3206,7 @@ cmp_emit_jmp_table:
     .word cmp_emit_sprite_attr      ; INT_SPRITE_ATTR (13)
     .word cmp_emit_rand_stmt        ; INT_RAND (14) — stmt context (結果破棄、LFSR は進む)
     .word cmp_emit_srand            ; INT_SRAND (15)
+    .word cmp_emit_putint           ; INT_PUTINT (16)
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -3485,6 +3496,27 @@ cmp_emit_srand:
     JSR cmp_set_op1_from_arg
     LDY #20
     LDA #NESPHP_NES_SRAND
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_putint($x, $y, $value) — 3 引数 全 runtime int 可
+; op1 = $x, op2 = $y, result スロット = $value (3 番目の runtime int の格納場所)
+cmp_emit_putint:
+    LDA CMP_ARG_COUNT
+    CMP #3
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDX #2
+    JSR cmp_set_result_from_arg
+    LDY #20
+    LDA #NESPHP_NES_PUTINT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     RTS
