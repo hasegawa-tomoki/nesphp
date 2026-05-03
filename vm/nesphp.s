@@ -230,6 +230,13 @@ pi_count:       .res 1    ; print_int16 が書いたバイト数
 ; 専用 (1024B を 1 VBlank 予算 ~2273 cycle に収められないため)。
 sprite_mode_on: .res 1
 
+; SXROM PRG-RAM 32KB の現在 bank (0-3)。$A000 reg の bit 2-3 が PRG-RAM
+; bank select。CHR-RAM 環境では bit 0-1 (CHR bank) は無効なので、
+; $A000 への書込値 = (cur_prg_ram_bank << 2)。
+; 起動時は 0 (デフォルト bank、現行コード互換)。
+; ARR_POOL を bank 1 に逃すコミット (b) 以降で実際に切替が発生する。
+cur_prg_ram_bank: .res 1
+
 ; NMI が VBlank ごとに INC するフレームカウンタ (nes_vsync 同期用、8bit wrap OK)
 vblank_frame:   .res 1
 
@@ -287,13 +294,15 @@ nmi_queue_write: .res 1
 nmi_queue_read:  .res 1
 
 ; =============================================================================
-; iNES ヘッダ  (MMC1 / mapper 1、SXROM 移行中: PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 8KB)
+; iNES ヘッダ  (MMC1 / mapper 1、標準 SXROM: PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 32KB)
 ;
 ; PRG-ROM 64KB (4 × 16KB bank): bank 0 = PHPSRC, bank 1 = CHRDATA, bank 2 = 予約,
 ;                                bank 3 = CODE 固定
 ; CHR-RAM 8KB (起動時に PRG_BANK1 から PPU $0000-$1FFF へ 8KB 転送)
-; PRG-RAM 8KB (SXROM 化時に 32KB へ移行予定)
-; MMC1 により: PRG 16KB 切替 + CHR 4KB × 2 独立切替 + 8KB WRAM
+; PRG-RAM 32KB (4 × 8KB bank、$A000 reg の bit 2-3 で bank 切替):
+;     bank 0 = op_array + literals + ARR_POOL + STR_POOL (現状維持)
+;     bank 1-3 = 予約 (ARR_POOL 移行 / USER_RAM_EXT で順次活用)
+; MMC1 により: PRG 16KB 切替 + CHR 4KB × 2 独立切替 + 32KB WRAM (4 bank)
 ; =============================================================================
 .segment "HEADER"
     .byte "NES", $1A
@@ -301,7 +310,7 @@ nmi_queue_read:  .res 1
     .byte 0                ; CHR-ROM = 0 → CHR-RAM 8KB を申告
     .byte %00010000        ; Flags 6: mapper LSB = 1 (上位 nibble), mirroring = horizontal(0)
     .byte %00000000        ; Flags 7: mapper MSB = 0
-    .byte 1                ; PRG-RAM = 1 * 8KB (WRAM $6000-$7FFF)
+    .byte 4                ; PRG-RAM = 4 * 8KB = 32KB (SXROM)
     .byte 0, 0, 0, 0, 0, 0, 0
 
 ; =============================================================================
