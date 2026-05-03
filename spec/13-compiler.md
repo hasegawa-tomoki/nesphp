@@ -335,19 +335,38 @@ END:   (backpatch pop)
 
 - エントリ 4B: `[len, name_ptr_lo, name_ptr_hi, pad]`
 - `cmp_cv_intern` が線形探索 + 新規 alloc
-- 最大 32 スロット (VM 側 CV 領域の予算と一致)
-- ランタイムでは `$0700-$07FF` は予備なので aliasing 無し
+- 最大 64 スロット (= 表領域 256B 全域、VM 側 CV slot 上限と一致)
+- ランタイムでは同じ `$0700-$07FF` を **USER_RAM** (peek/poke 用 256B 汎用バイト領域) として再利用 (aliasing なし、時間的に分離)
 
-### 作業エリア
+### 作業エリア (PRG-RAM $6000-$7FFF)
 
-- `$7000-$77FF`: コンパイル中、literal zval の一時バッファ (CMP_LIT_STAGE)。cmp_finalize で $6000 + literals_off に memcpy 後は未使用
-- `$7800-$7FFF`: 文字列 pool (STR_POOL_BASE、2KB)。cln_string が decoded bytes をここに書き、zval の IS_STRING value は pool 内アドレスを指す OPS_BASE 相対 offset (= pool_addr - $6000 = $1800+)。runtime でもそのまま読み出される (memcpy しない)
-- `$7000-$77FF`: runtime では **配列 pool** (ARR_POOL_BASE、2KB) に転用される。compile 中は CMP_LIT_STAGE として zval の一時置き場、cmp_finalize の memcpy 後は未使用になり、main_loop 突入前に ARR_POOL_HEAD を ARR_POOL_BASE にリセット。配列は header 4B (count, cap) + cap × 16B zval を追記型で alloc、GC 無し
-- `$6000-$6FFF`: 最終レイアウト (header + opcodes + literals)。runtime は VM_PC / VM_LITBASE 経由で参照
+```
+$6000-$600F  header (16B)
+$6010-...    op_array (24B × num_ops、最大 ~308 op)
+$????-...    literals (16B × num_lits、最大 ~40 zval、op_array 直後に memcpy)
+$????-$7F7F  ARR_POOL (runtime 配列ストレージ、ARR_POOL_HEAD は literals 終端から成長)
+$7D00-$7F7F  CMP_LIT_STAGE (compile 中のみ、zval 一時バッファ。memcpy 後 ARR_POOL に転用)
+$7F80-$7FFF  STR_POOL (128B、文字列 pool。runtime も常駐)
+```
+
+- **op_array**: `$6010` から成長。CMP_LIT_STAGE = $7D00 が上限 (op_finish で 16-bit 比較、超えたら compile error)
+- **literals**: cmp_finalize で CMP_LIT_STAGE の zval を $6010 + ops × 24 にバルク memcpy
+- **STR_POOL**: cln_string が decoded bytes をここに書き、zval の IS_STRING value は OPS_BASE 相対 offset を指す。runtime もそのまま参照 (memcpy しない)
+- **ARR_POOL**: runtime 中、配列ヘッダ 4B (count, capacity) + capacity × 16B zval を追記型で alloc。GC 無し。ARR_POOL_HEAD = OPS_BASE + literals_off + num_lits × 16
 
 ### TMP0/TMP1/TMP2 の共有
 
 `TMP0`, `TMP1`, `TMP2` (各 2 バイト、ZP) はコンパイル中も runtime もスクラッチ用に使う。compile_and_emit はランタイムが走る前に終わるので、重複でも問題ない (値の受け渡しは関数内完結)。
+
+### CV/TMP スロット解決の 16-bit 化
+
+zend_op の `op.var` フィールドには `slot * 16` を 16-bit で格納 (Zend 流)。VM の resolver はこれを `/4` して RAM オフセット (`slot * 4`) を得る。
+
+**slot ≥ 16** だと `slot * 16 ≥ 256` で下位 1 byte だけでは足りない。`vm/nesphp.s` の `cv_addr_y` / `tmp_addr_y` ヘルパーが (VM_PC, Y), (VM_PC, Y+1) の 16-bit を読んで 16-bit /4 で計算する。res_cv / res_tmp / wr_cv / wr_tmp / assign_to_cv / incdec_cv_addr すべてここを通る。
+
+### TMP_COUNT は文間でリセット
+
+`cmp_dispatch_stmt` 入口で `CMP_TMP_COUNT` を 6502 stack に PHA、出口 (`cds_done`) で PLA 復帰する。1 文の中で発行された TMP スロット (cond expr / 二項演算結果 / fgets result 等) は文境界で寿命が尽きるため、文間で再利用できる。これにより 64 スロット制限を超える長いプログラムでも持つ。
 
 ---
 
@@ -359,16 +378,18 @@ END:   (backpatch pop)
 4. **文字列長 ≤ 255 バイト** (現行 `CMP_TOK_LEN` が 1 バイト)。UTF-8 日本語 (1 文字 = 3B) なら ~85 文字まで
 5. **コメント対応済** (P4): `//`, `#`, `/* */`。block コメント未閉は compile error
 6. **ソース長上限 16382 バイト** (PRG bank 0 の 16KB − 2B ヘッダ)
-7. **PRG-RAM 8KB** がコンパイル出力の上限 (opcode + literal zval、文字列は ROM 常駐)
-8. **CV 最大 32 スロット**、**TMP 最大 64 スロット**、**関数引数 ≤ 4**、**関数呼出ネスト無し** (call expr は `fgets` / `nes_btn` のみ)
+7. **PRG-RAM 8KB** がコンパイル出力の上限 (opcode + literal zval、文字列は ROM 常駐)。op_array は ~308 op、literal zval は ~40、ARR_POOL と STR_POOL の合計が残り
+8. **CV 最大 64 スロット**、**TMP 最大 64 スロット** (文間でリセット、再利用可能)、**関数引数 ≤ 4**、**関数呼出ネスト無し** (call expr は `fgets` / `nes_btn` / `nes_rand` / `nes_peek` / `nes_peek16` のみ)
 9. **比較式は非連鎖** (`$a < $b < $c` は compile error)
-10. **`!` / 単項 `-` 未対応**、**`^` (BW_XOR) 未対応**
+10. **`!` / 単項 `-` 未対応**、**`^` (BW_XOR) 未対応**、**文字列連結 `.` 未対応**
 11. **if / while / for のボディ**: `{ ... }` または単文どちらも可
-12. **ネスト深さ**: backpatch stack 8 段、6502 HW stack 256B (for ネスト 1 段で 4B 消費)、CV table 32 エントリ
-13. **対応 intrinsic** (合計 16 種): `nes_cls` / `nes_put` / `nes_puts` / `nes_putint` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn` / `nes_rand` / `nes_srand`
+12. **ネスト深さ**: backpatch stack 8 段、6502 HW stack 256B (for ネスト 1 段で 4B 消費)、CV table 64 エントリ
+13. **対応 intrinsic** (合計 20 種): `nes_cls` / `nes_put` / `nes_puts` / `nes_putint` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn` / `nes_rand` / `nes_srand` / `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`
 14. **整数リテラル**: 10 進 (`42`)、16 進 (`0xFF` / `0X0A`)、2 進 (`0b1010` / `0B11`)。16bit signed narrow、overflow 検出なし
 15. **ビット演算**: `&` (BW_AND) / `|` (BW_OR) / `<<` (SL) / `>>` (SR、算術右シフト = 符号保持)。`^` (BW_XOR) / `~` (BW_NOT) は未対応
 16. **論理演算**: `&&` / `||` は短絡評価、結果は 0 or 1 の IS_LONG。`!` (NOT) は未対応
+17. **算術演算**: `+` / `-` / `*` / `/` (truncate-toward-zero signed) / `%` (sign of dividend、PHP/C 流)
+18. **`nes_rand() % N`**: rand は unsigned 16-bit を返すが PHP の `%` は被除数の符号で sign 決定するため、上位 bit が立つと負になる。`(nes_rand() & 0x7FFF) % N` で正値マスクするのが定石
 
 ---
 

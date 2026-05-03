@@ -52,6 +52,10 @@ L3S で emit 対象の nesphp カスタム opcode (intrinsic 畳み込み):
 
 | Custom opcode | 番号 | emit (L3S) |
 |---|---|:---:|
+| `NESPHP_NES_PEEK` | 0xEC | ✓ (W6) — `nes_peek($offset)`。USER_RAM[$offset] を IS_LONG (byte) で返す |
+| `NESPHP_NES_PEEK16` | 0xED | ✓ (W6) — `nes_peek16($offset)`。USER_RAM の 2byte little-endian を IS_LONG で返す |
+| `NESPHP_NES_POKE` | 0xEE | ✓ (W6) — `nes_poke($offset, $byte)`。USER_RAM[$offset] = byte (下位 1B) |
+| `NESPHP_NES_POKESTR` | 0xEF | ✓ (W6) — `nes_pokestr($offset, $string)`。文字列の生バイトを USER_RAM[$offset..] に bulk copy |
 | `NESPHP_FGETS` | 0xF0 | ✓ (P1) |
 | `NESPHP_NES_PUT` | 0xF1 | ✓ (Q1) |
 | `NESPHP_NES_SPRITE` | 0xF2 | ✓ (Q1) — `nes_sprite_at($idx, $x, $y, $tile)` で OAM[$idx] (0-63) を更新 |
@@ -93,6 +97,20 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 | `NESPHP_NES_RAND` | **0xFD** | 16-bit Galois LFSR (tap = `$B400`、polynomial `x^16 + x^14 + x^13 + x^11 + 1`、周期 65535) を 1 step。戻り値は IS_LONG (16-bit、result スロットに書き込み)。0 引数 |
 | `NESPHP_NES_SRAND` | **0xFE** | LFSR 状態を `$seed` で上書き。`$seed == 0` は LFSR の退化点なので内部で 1 に置換 |
 | `NESPHP_NES_PUTINT` | **0xFF** | nametable `(x, y)` に **5-char 右詰め unsigned int** を ASCII で書く。0..65535 範囲、leading zeros は ' ' に置換 (例: 99 → "   99")。3 引数全て runtime int 可 (nes_sprite_at と同じく result スロットを 3 番目の入力として再利用)。sprite_mode 中は NMI 同期キュー経由 |
+
+### peek/poke (USER_RAM = $0700-$07FF, 256B)
+
+zval (16 byte / entry) のオーバーヘッドを回避してバイト単位でデータを保存・参照する仕組み。
+コンパイル後に未使用となる CV シンボル表 (`$0700-$07FF`) を runtime で再利用する。
+
+| opcode | 番号 | 役割 |
+|---|---|---|
+| `NESPHP_NES_PEEK` | **0xEC** | `nes_peek($offset)` → USER_RAM[$offset] を IS_LONG (byte) で返す。$offset は & $FF で 8-bit ラップ |
+| `NESPHP_NES_PEEK16` | **0xED** | `nes_peek16($offset)` → USER_RAM[$offset] \| (USER_RAM[$offset+1] << 8) を IS_LONG で返す。little-endian 16-bit |
+| `NESPHP_NES_POKE` | **0xEE** | `nes_poke($offset, $byte)` → USER_RAM[$offset] = byte (下位 1B のみ書込)。戻り値なし |
+| `NESPHP_NES_POKESTR` | **0xEF** | `nes_pokestr($offset, $string)` → 文字列の生バイトを USER_RAM[$offset..] に bulk copy。$offset+len が 256 を越えるとそこで停止。3 引数 intrinsic と同じ枠 (op1=offset、result スロット = string) |
+
+**用途例**: Tetris の 28 回転 shape table を 56 byte の string literal で保持し、起動時に `nes_pokestr(0, $shape_data)` で USER_RAM に bulk load。runtime は `nes_peek16($idx*2)` で 16-bit shape を 1 op で復元。配列で持つと 28 × 16 = 448 byte 食うが、USER_RAM なら 56 byte で済む (8 倍効率)。
 
 ### serializer のパターン畳み込み
 

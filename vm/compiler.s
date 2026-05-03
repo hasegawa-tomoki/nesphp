@@ -87,6 +87,10 @@ INT_SPRITE_ATTR = 13    ; nes_sprite_attr($idx, $attr)
 INT_RAND        = 14    ; nes_rand() — 0 引数、IS_LONG 返却
 INT_SRAND       = 15    ; nes_srand($seed) — 1 引数、戻り値なし
 INT_PUTINT      = 16    ; nes_putint($x, $y, $value) — 3 引数 全 runtime
+INT_PEEK        = 17    ; nes_peek($offset) — 1 引数、IS_LONG 返却 (byte)
+INT_POKE        = 18    ; nes_poke($offset, $byte) — 2 引数、戻り値なし
+INT_POKESTR     = 19    ; nes_pokestr($offset, $string) — 2 引数、戻り値なし
+INT_PEEK16      = 20    ; nes_peek16($offset) — 1 引数、IS_LONG 返却 (16-bit LE)
 INT_NOT_FOUND   = $FF
 
 ARG_STDIN_SENTINEL = $FE
@@ -200,43 +204,60 @@ cpp_emit_return:
 
 ; -----------------------------------------------------------------------------
 ; cmp_dispatch_stmt: CMP_TOK_KIND に応じて文ハンドラへ
-;   各ハンドラは RTS で返ってくる (cpp_loop / cblk_loop から JSR される前提)
+;   1 文の TMP スロットは文境界で寿命終了 (cond の TMP は JMPZ で consume 済み、
+;   binary 結果 TMP は親ステートメントの op で consume 済み)。dispatch 入口で
+;   CMP_TMP_COUNT を退避、出口で復元することで TMP スロット 64 上限を文間で再利用。
 ; -----------------------------------------------------------------------------
 cmp_dispatch_stmt:
+    LDA CMP_TMP_COUNT
+    PHA
     LDA CMP_TOK_KIND
     CMP #TK_ECHO
     BNE :+
-    JMP cpp_echo
+    JSR cpp_echo
+    JMP cds_done
 :
     CMP #TK_CV
     BNE :+
-    JMP cpp_assign_stmt
+    JSR cpp_assign_stmt
+    JMP cds_done
 :
     CMP #TK_IDENT
     BNE :+
-    JMP cpp_call_stmt
+    JSR cpp_call_stmt
+    JMP cds_done
 :
     CMP #TK_WHILE
     BNE :+
-    JMP cpp_while_stmt
+    JSR cpp_while_stmt
+    JMP cds_done
 :
     CMP #TK_IF
     BNE :+
-    JMP cpp_if_stmt
+    JSR cpp_if_stmt
+    JMP cds_done
 :
     CMP #TK_FOR
     BNE :+
-    JMP cpp_for_stmt
+    JSR cpp_for_stmt
+    JMP cds_done
 :
     CMP #TK_INC
     BNE :+
-    JMP cpp_pre_inc_stmt
+    JSR cpp_pre_inc_stmt
+    JMP cds_done
 :
     CMP #TK_DEC
     BNE :+
-    JMP cpp_pre_dec_stmt
+    JSR cpp_pre_dec_stmt
+    JMP cds_done
 :
+    PLA                          ; discard saved TMP_COUNT
     JMP cmp_error
+cds_done:
+    PLA
+    STA CMP_TMP_COUNT
+    RTS
 
 ; -----------------------------------------------------------------------------
 ; echo expr ';'
@@ -1730,7 +1751,11 @@ cpal_element_loop:
     BEQ cpal_end
     JMP cmp_error
 cpal_next:
-    JSR cmp_lex_next                 ; ',' を consume、次 element token を peek
+    JSR cmp_lex_next                 ; ',' を consume、次 token を peek
+    ; trailing comma `[1, 2, 3,]` も許す: ',' の直後が ']' なら配列終了
+    LDA CMP_TOK_KIND
+    CMP #TK_RBRACKET
+    BEQ cpal_end
     JMP cpal_element_loop
 
 cpal_end:
@@ -1792,6 +1817,14 @@ cpp_ident:
     CMP #INT_RAND
     BNE :+
     JMP cpp_ident_rand
+:
+    CMP #INT_PEEK
+    BNE :+
+    JMP cpp_ident_peek
+:
+    CMP #INT_PEEK16
+    BNE :+
+    JMP cpp_ident_peek16
 :
     JMP cmp_error
 
@@ -1884,6 +1917,70 @@ cpp_ident_rand:
 :
     JSR cmp_emit_rand_tmp            ; result = 新 TMP、CMP_EXPR = TMP
     JSR cmp_lex_next                 ; peek next
+    RTS
+
+cpp_ident_peek:
+    LDA #NESPHP_NES_PEEK
+    JMP cpp_peek_emit_with_opcode
+
+cpp_ident_peek16:
+    LDA #NESPHP_NES_PEEK16
+    ; fall through
+
+; '(' expr ')' をパース (1 引数)、A=opcode で result=TMP を emit。
+; A の値を保存するため stack 経由で渡す。
+cpp_peek_emit_with_opcode:
+    PHA                              ; opcode を退避
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_LPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_lex_next
+    JSR cmp_parse_expr               ; CMP_EXPR = $offset
+    LDA CMP_TOK_KIND
+    CMP #TK_RPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDY #0
+    LDA CMP_EXPR_VAL
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_EXPR_VAL+1
+    STA (CMP_OP_HEAD), Y
+    LDY #21
+    LDA CMP_EXPR_TYPE
+    STA (CMP_OP_HEAD), Y
+    LDX CMP_TMP_COUNT
+    CPX #64
+    BCC :+
+    JMP cmp_error
+:
+    JSR cmp_lit_idx_to_offset
+    LDY #8
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #23
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    PLA                              ; opcode 復帰
+    LDY #20
+    STA (CMP_OP_HEAD), Y
+    INC CMP_TMP_COUNT
+    JSR cmp_op_finish
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    JSR cmp_lex_next                 ; ')' を consume
     RTS
 
 cpp_ident_fgets:
@@ -2080,7 +2177,7 @@ ccv_skip:
     JMP ccv_find
 
 ccv_alloc:
-    CPX #32
+    CPX #64                         ; CV 上限 = 64 (table = $0700-$07FF, 4B × 64)
     BCC :+
     JMP cmp_error
 :
@@ -3244,6 +3341,38 @@ cmp_match_intrinsic:
     LDA #INT_PUTINT
     RTS
 :
+    LDA #<intrinsic_name_nes_pokestr
+    LDX #>intrinsic_name_nes_pokestr
+    LDY #11
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_POKESTR
+    RTS
+:
+    LDA #<intrinsic_name_nes_peek16
+    LDX #>intrinsic_name_nes_peek16
+    LDY #10
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_PEEK16
+    RTS
+:
+    LDA #<intrinsic_name_nes_peek
+    LDX #>intrinsic_name_nes_peek
+    LDY #8
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_PEEK
+    RTS
+:
+    LDA #<intrinsic_name_nes_poke
+    LDX #>intrinsic_name_nes_poke
+    LDY #8
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_POKE
+    RTS
+:
     LDA #INT_NOT_FOUND
     RTS
 
@@ -3281,6 +3410,10 @@ intrinsic_name_nes_sprite_attr: .byte "nes_sprite_attr"
 intrinsic_name_nes_rand:        .byte "nes_rand"
 intrinsic_name_nes_srand:       .byte "nes_srand"
 intrinsic_name_nes_putint:      .byte "nes_putint"
+intrinsic_name_nes_peek:        .byte "nes_peek"
+intrinsic_name_nes_peek16:      .byte "nes_peek16"
+intrinsic_name_nes_poke:        .byte "nes_poke"
+intrinsic_name_nes_pokestr:     .byte "nes_pokestr"
 intrinsic_name_nes_attr:      .byte "nes_attr"
 intrinsic_name_nes_vsync:     .byte "nes_vsync"
 intrinsic_name_nes_btn:       .byte "nes_btn"
@@ -3317,6 +3450,10 @@ cmp_emit_jmp_table:
     .word cmp_emit_rand_stmt        ; INT_RAND (14) — stmt context (結果破棄、LFSR は進む)
     .word cmp_emit_srand            ; INT_SRAND (15)
     .word cmp_emit_putint           ; INT_PUTINT (16)
+    .word cmp_emit_peek_stmt        ; INT_PEEK (17) — stmt context (結果破棄、副作用なし = NOP)
+    .word cmp_emit_poke             ; INT_POKE (18)
+    .word cmp_emit_pokestr          ; INT_POKESTR (19)
+    .word cmp_emit_peek_stmt        ; INT_PEEK16 (20) — stmt context (peek と同様 NOP)
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -3631,6 +3768,54 @@ cmp_emit_putint:
     JSR cmp_op_finish
     RTS
 
+; nes_peek($offset) stmt 形式 — 結果破棄、副作用なし → NOP として何も emit しない
+cmp_emit_peek_stmt:
+    LDA CMP_ARG_COUNT
+    CMP #1
+    BEQ :+
+    JMP cmp_error
+:
+    RTS
+
+; nes_poke($offset, $byte) — 2 引数、戻り値なし
+cmp_emit_poke:
+    LDA CMP_ARG_COUNT
+    CMP #2
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDY #20
+    LDA #NESPHP_NES_POKE
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_pokestr($offset, $string) — 2 引数、戻り値なし
+; op1 = $offset (runtime int 可), result slot = $string (3 番目の引数枠を再利用)
+; 注: $string は IS_CONST 必須。CV/TMP の string も理論上動くが ROM offset が必要なので
+;     pack_src で literal pool に入れたものに限定。
+cmp_emit_pokestr:
+    LDA CMP_ARG_COUNT
+    CMP #2
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_result_from_arg
+    LDY #20
+    LDA #NESPHP_NES_POKESTR
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
 ; =============================================================================
 ; zend_op emit helpers
 ; =============================================================================
@@ -3650,6 +3835,15 @@ cmp_op_finish:
     STA CMP_OP_HEAD
     BCC :+
     INC CMP_OP_HEAD+1
+:
+    ; op_array が CMP_LIT_STAGE に到達したら overflow (16bit 比較)
+    SEC
+    LDA CMP_OP_HEAD
+    SBC #<CMP_LIT_STAGE
+    LDA CMP_OP_HEAD+1
+    SBC #>CMP_LIT_STAGE
+    BCC :+
+    JMP cmp_error
 :
     INC CMP_OP_COUNT
     BNE :+
@@ -4026,7 +4220,66 @@ cezvs_zero:
 :
     RTS
 
+; cmp_emit_zval_long_value: 整数リテラル zval を lit_stage に追加 (dedup あり)
+;   入力: CMP_TOK_VALUE = 16-bit signed int
+;   出力: TMP1 = 該当 lit の idx (0-origin、新規 emit or 既存再利用)
+;
+; 同じ値が既に lit_stage にあれば再利用、なければ新規 emit。線形検索で
+; idx 0..(CMP_LIT_COUNT-1) を順に見て、TYPE_LONG かつ bytes 0-1 一致を探す。
+; これで $shapes = [0,0,1,0,...] のような繰り返し値が 1 zval にまとまり、
+; lit_stage と op_array の容量を大幅に節約する。
 cmp_emit_zval_long_value:
+    ; --- dedup 検索: lit_stage 先頭から既存 zval を線形に走査 ---
+    ; TMP0 = 走査ポインタ (= $7000 + idx * 16)、TMP1 = 走査中の idx
+    LDA #<CMP_LIT_STAGE
+    STA TMP0
+    LDA #>CMP_LIT_STAGE
+    STA TMP0+1
+    LDA #0
+    STA TMP1
+    STA TMP1+1
+cezlv_search:
+    ; idx == CMP_LIT_COUNT なら検索終了 (見つからず)
+    LDA TMP1
+    CMP CMP_LIT_COUNT
+    BNE cezlv_search_check
+    LDA TMP1+1
+    CMP CMP_LIT_COUNT+1
+    BEQ cezlv_emit_new
+cezlv_search_check:
+    ; (TMP0).type == TYPE_LONG ?
+    LDY #8
+    LDA (TMP0), Y
+    CMP #TYPE_LONG
+    BNE cezlv_skip
+    ; (TMP0).val_lo == CMP_TOK_VALUE_lo ?
+    LDY #0
+    LDA (TMP0), Y
+    CMP CMP_TOK_VALUE
+    BNE cezlv_skip
+    ; (TMP0).val_hi == CMP_TOK_VALUE_hi ?
+    INY
+    LDA (TMP0), Y
+    CMP CMP_TOK_VALUE+1
+    BNE cezlv_skip
+    ; ヒット: TMP1 が既存 idx、そのまま RTS
+    RTS
+cezlv_skip:
+    ; 次 zval (16B 進める)
+    CLC
+    LDA TMP0
+    ADC #16
+    STA TMP0
+    BCC :+
+    INC TMP0+1
+:
+    INC TMP1
+    BNE cezlv_search
+    INC TMP1+1
+    JMP cezlv_search
+
+cezlv_emit_new:
+    ; 新規 emit: TMP1 = CMP_LIT_COUNT、CMP_LIT_HEAD に zval を書く
     LDA CMP_LIT_COUNT
     STA TMP1
     LDA CMP_LIT_COUNT+1

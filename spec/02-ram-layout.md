@@ -20,11 +20,12 @@ $0080-$00FF  ゼロページ: コントローラ状態, NMI 作業変数, 一時
 $0100-$01FF  6502 ハードウェアスタック (256B)
 $0200-$02FF  OAM シャドウ (256B, 延長ゴール用。MVP では未使用)
 $0300-$03FF  VM データスタック (4B × 64 エントリ = 256B)
-$0400-$04FF  CV スロット (4B × 最大 32 エントリ = 128B、残り予備)
+$0400-$04FF  CV スロット (4B × 最大 64 エントリ = 256B)
 $0500-$05FF  TMP スロット (4B × 最大 64 エントリ = 256B)
 $0600-$06FF  テキスト行バッファ / CONCAT 作業領域
              (コンパイル中は print_int16 出力先、エラー表示で使用)
-$0700-$07FF  L3S 時: CV シンボル表 (4B × 最大 32)、runtime では予備
+$0700-$07FF  L3S 時: CV シンボル表 (4B × 最大 64 = 256B)
+             runtime: USER_RAM (peek/poke 用 256B 汎用バイト領域)
 ```
 
 L3S (on-NES コンパイラ) は電源 ON 直後の一瞬だけ走り、その後 VM runtime が起動する。コンパイル中と runtime では **WRAM を時間的に分離して共用**する。詳細は [13-compiler](./13-compiler.md)「WRAM 共用契約」を参照。
@@ -154,7 +155,34 @@ CV slot n  →  $0400 + n*4
 TMP slot n →  $0500 + n*4  
 ```
 
-どちらも 4B tagged value 1 個分。
+どちらも 4B tagged value 1 個分。最大スロット数 64 (= 256B / 4)。
+
+### スロット解決の 16-bit 化 (重要)
+
+zend_op の `op.var` フィールドには **`slot * 16`** が 16-bit で入る (Zend 流)。
+VM 側はこれを `/4` して `slot * 4` (RAM オフセット) を計算する。
+
+**slot ≥ 16** のとき `slot*16 ≥ 256` となり下位 1 byte だけでは表現できないため、
+解決は必ず 16-bit で行う。`vm/nesphp.s` の `cv_addr_y` / `tmp_addr_y` ヘルパーがこの計算を集約しており、
+res_cv / res_tmp / wr_cv / wr_tmp / assign_to_cv / incdec_cv_addr すべてここを通る。
+
+---
+
+## USER_RAM ($0700-$07FF, 256B、runtime のみ)
+
+L3S コンパイル完了後、CV シンボル表は不要になるため、同領域 256B を **peek/poke 用の汎用バイト領域**として再利用する。
+
+| 用途 | 例 |
+|---|---|
+| 大きな定数テーブル | Tetris の 28 回転 shape table を 56 byte string で `nes_pokestr(0, $data)` で bulk load |
+| ゲーム状態の生バイト保存 | `nes_poke(64, $byte)` / `$x = nes_peek(64)` |
+| 16-bit テーブル | `nes_peek16($ofs)` で little-endian 2 byte 復元 |
+
+**設計理由**: 配列 (`$a = [...]`) は 1 要素あたり 16 byte の zval オーバーヘッドがあるため、
+バイト単位の大量データ (例: 56 byte の 28 entry shape table) では 7 倍のメモリを食う。
+USER_RAM はオーバーヘッドゼロでバイトアクセスできる。
+
+詳細は [04-opcode-mapping § peek/poke](./04-opcode-mapping.md) と [13-compiler](./13-compiler.md) を参照。
 
 ---
 

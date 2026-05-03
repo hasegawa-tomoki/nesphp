@@ -51,6 +51,10 @@ ZEND_RETURN           = 62
 ZEND_ECHO             = 136
 
 ; --- nesphp カスタム opcode (0xE0-0xFF は Zend 未使用領域) ---
+NESPHP_NES_PEEK     = $EC   ; user RAM ($0700+offset) から 1 byte 読出、IS_LONG 返す
+NESPHP_NES_PEEK16   = $ED   ; user RAM[$ofs] | (user RAM[$ofs+1] << 8) を IS_LONG 返却
+NESPHP_NES_POKE     = $EE   ; user RAM ($0700+offset) に 1 byte 書込
+NESPHP_NES_POKESTR  = $EF   ; user RAM ($0700+offset) に文字列の生バイトを bulk copy
 NESPHP_FGETS        = $F0
 NESPHP_NES_PUT      = $F1
 NESPHP_NES_SPRITE   = $F2
@@ -67,6 +71,13 @@ NESPHP_NES_SPRITE_ATTR = $FC ; OAM[$idx*4+2] = attr (palette / flip / 優先度)
 NESPHP_NES_RAND     = $FD   ; 16-bit Galois LFSR を 1 step 進めて IS_LONG で返す
 NESPHP_NES_SRAND    = $FE   ; LFSR 状態を $seed に設定 ($seed = 0 は内部で 1 に置換)
 NESPHP_NES_PUTINT   = $FF   ; nametable (x, y) に 5-char 右詰め unsigned int を書く
+
+; --- User RAM (peek/poke 用) ---
+; CV symbol table と同じ位置 ($0700-$07FF) を再利用。コンパイル完了後は
+; CV symbol table は不要なので、runtime phase で 256B の汎用 byte 領域として
+; 使う。生バイト単位で読み書きできる (zval オーバーヘッドなし)。
+USER_RAM_BASE       = $0700
+USER_RAM_SIZE       = $0100      ; 256 bytes
 
 ; --- OAM DMA レジスタ ---
 OAM_DMA           = $4014
@@ -132,26 +143,28 @@ PHP_SRC_LEN  = $8000
 PHP_SRC_BODY = $8002
 
 ; 一時的な literal バッファ (コンパイル中のみ使用、後に OPS_BASE + literals_off へ memcpy)
-CMP_LIT_STAGE    = $7000
+; $7D00 に置くと op_array は $6010-$7CFF (≒ 7408 byte ≒ 308 ops) まで使える。
+; literal dedux (cmp_emit_zval_long_value) で同値を再利用するので、staging
+; capacity は ($7F80-$7D00)/16 = 40 zval で典型的なゲームには足りる。
+CMP_LIT_STAGE    = $7D00
 
 ; 文字列リテラル用プール: cln_string が `\xHH` エスケープを解釈して decoded bytes を
-; ここへ書き、zval は OPS_BASE 相対でこの領域を指す。staging area $7000-$77FF
-; (zval 128 entries 分) とは衝突しない $7800-$7FFF (2KB) を使う。runtime 中も
-; この領域はそのまま読み出し対象として残る。
-STR_POOL_BASE    = $7800
+; ここへ書き、zval は OPS_BASE 相対でこの領域を指す。staging area $7C80-$7F7F
+; (zval 48 entries 分) とは衝突しない $7F80-$7FFF (128B) を使う。
+STR_POOL_BASE    = $7F80
 STR_POOL_END     = $8000
 
-; Array runtime プール: コンパイル中は CMP_LIT_STAGE ($7000-$77FF) に zval 一時領域
-; として使われるが、cmp_finalize の memcpy 後は未使用。runtime phase でこの 2KB を
+; Array runtime プール: コンパイル中は CMP_LIT_STAGE ($7C80-$7F7F) に zval 一時領域
+; として使われるが、cmp_finalize の memcpy 後は未使用。runtime phase でこの 4KB を
 ; 配列ヘッダ + 要素ストレージに転用する。各配列は header 4B (count, capacity) +
 ; 要素 (capacity × 16B zval)。ARR_POOL_HEAD は main_loop 前に ARR_POOL_BASE に
 ; リセットされ、追記型で成長、ARR_POOL_END に達したら err_screen。
 ARR_POOL_BASE    = $7000
-ARR_POOL_END     = $7800
+ARR_POOL_END     = $7F80
 
 ; CV シンボル表: WRAM の $0700 以降。1 エントリ 4B ([len, name_ptr_lo, name_ptr_hi, pad])
-; VM runtime では $0700-$07FF は予備 (spec/02-ram-layout.md)。コンパイル完了後は
-; ハンドオフで 0 埋めする予定 (TODO)。最大 32 CV スロット (128B) 使用。
+; 最大 64 CV スロット (= $0700-$07FF 全域、256B 使用)。コンパイル完了後は USER_RAM
+; (peek/poke 用) と同領域だが、runtime phase では table の値は不要なので上書き OK。
 CMP_CV_TABLE     = $0700
 
 ; op_array ヘッダ (spec/01-rom-format.md)
@@ -478,11 +491,37 @@ clear_nt_inner:
     LDA PPU_CURSOR
     STA PPUADDR
 
-    ; runtime array pool 初期化 (compile 中の CMP_LIT_STAGE は memcpy 済みで未使用)
-    LDA #<ARR_POOL_BASE
+    ; runtime array pool 初期化:
+    ; ARR_POOL_HEAD = OPS_BASE + HDR_LITERALS_OFF + HDR_NUM_LITERALS * 16
+    ;               = literals 末尾の直後
+    ; literal pool が op_array の真後ろに置かれているので、配列プールはさらに
+    ; その後ろから開始する (op_array が大きいケースで $7000 を超えても安全)。
+    LDA HDR_NUM_LITERALS
+    STA TMP0
+    LDA HDR_NUM_LITERALS+1
+    STA TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1
+    ASL TMP0
+    ROL TMP0+1                  ; TMP0 = num_literals * 16
+    CLC
+    LDA TMP0
+    ADC HDR_LITERALS_OFF
+    STA TMP0
+    LDA TMP0+1
+    ADC HDR_LITERALS_OFF+1
+    STA TMP0+1                  ; TMP0 = literals_off + num_lits*16 (= relative end)
+    CLC
+    LDA TMP0
+    ADC #<OPS_BASE
     STA ARR_POOL_HEAD
-    LDA #>ARR_POOL_BASE
-    STA ARR_POOL_HEAD+1
+    LDA TMP0+1
+    ADC #>OPS_BASE
+    STA ARR_POOL_HEAD+1         ; ARR_POOL_HEAD = OPS_BASE + 上記
 
     JMP main_loop
 
@@ -560,6 +599,22 @@ main_loop:
     CMP #NESPHP_NES_PUTINT
     BNE :+
     JMP handle_nesphp_nes_putint
+:
+    CMP #NESPHP_NES_PEEK
+    BNE :+
+    JMP handle_nesphp_nes_peek
+:
+    CMP #NESPHP_NES_PEEK16
+    BNE :+
+    JMP handle_nesphp_nes_peek16
+:
+    CMP #NESPHP_NES_POKE
+    BNE :+
+    JMP handle_nesphp_nes_poke
+:
+    CMP #NESPHP_NES_POKESTR
+    BNE :+
+    JMP handle_nesphp_nes_pokestr
 :
     CMP #ZEND_ECHO
     BNE :+
@@ -780,6 +835,49 @@ resolve_op2:
 
 ; ---- resolver 実装: OP1_VAL 行き ----
 
+; cv_addr_y / tmp_addr_y: (VM_PC),Y / (VM_PC),Y+1 の 16bit op.var (slot*16) を
+; /4 して CV/TMP base に加算、TMP0 に絶対スロットアドレスを返す。
+; CV/TMP slot ≥ 16 (= var lo が wrap する) でも正しく動くよう 16bit で計算。
+; Y は呼び出し時に lo オフセット (0 / 4 / 8)、戻り時に +1 (hi 側)。
+; A 破壊。callers は Y を必要に応じて再設定すること。
+cv_addr_y:
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    LSR TMP0+1
+    ROR TMP0
+    LSR TMP0+1
+    ROR TMP0
+    CLC
+    LDA TMP0
+    ADC VM_CVBASE
+    STA TMP0
+    LDA TMP0+1
+    ADC VM_CVBASE+1
+    STA TMP0+1
+    RTS
+
+tmp_addr_y:
+    LDA (VM_PC), Y
+    STA TMP0
+    INY
+    LDA (VM_PC), Y
+    STA TMP0+1
+    LSR TMP0+1
+    ROR TMP0
+    LSR TMP0+1
+    ROR TMP0
+    CLC
+    LDA TMP0
+    ADC VM_TMPBASE
+    STA TMP0
+    LDA TMP0+1
+    ADC VM_TMPBASE+1
+    STA TMP0+1
+    RTS
+
 ; Y は op*.constant のフィールド先頭オフセット (0 or 4)
 res_const:
     LDA (VM_PC), Y
@@ -811,15 +909,7 @@ res_const:
     RTS
 
 res_cv:
-    LDA (VM_PC), Y         ; op1.var lo (= slot * 16)
-    LSR A                  ; slot * 8
-    LSR A                  ; slot * 4
-    CLC
-    ADC VM_CVBASE
-    STA TMP0
-    LDA VM_CVBASE+1
-    ADC #0
-    STA TMP0+1
+    JSR cv_addr_y
     LDY #0
     LDA (TMP0), Y
     STA OP1_VAL
@@ -835,15 +925,7 @@ res_cv:
     RTS
 
 res_tmp:
-    LDA (VM_PC), Y         ; op1.var lo
-    LSR A
-    LSR A
-    CLC
-    ADC VM_TMPBASE
-    STA TMP0
-    LDA VM_TMPBASE+1
-    ADC #0
-    STA TMP0+1
+    JSR tmp_addr_y
     LDY #0
     LDA (TMP0), Y
     STA OP1_VAL
@@ -888,15 +970,7 @@ res_const_to_op2:
     RTS
 
 res_cv_to_op2:
-    LDA (VM_PC), Y         ; op2.var lo
-    LSR A
-    LSR A
-    CLC
-    ADC VM_CVBASE
-    STA TMP0
-    LDA VM_CVBASE+1
-    ADC #0
-    STA TMP0+1
+    JSR cv_addr_y
     LDY #0
     LDA (TMP0), Y
     STA OP2_VAL
@@ -912,15 +986,7 @@ res_cv_to_op2:
     RTS
 
 res_tmp_to_op2:
-    LDA (VM_PC), Y
-    LSR A
-    LSR A
-    CLC
-    ADC VM_TMPBASE
-    STA TMP0
-    LDA VM_TMPBASE+1
-    ADC #0
-    STA TMP0+1
+    JSR tmp_addr_y
     LDY #0
     LDA (TMP0), Y
     STA OP2_VAL
@@ -999,15 +1065,7 @@ res_const_to_result:
     RTS
 
 res_cv_to_result:
-    LDA (VM_PC), Y         ; result.var lo (= slot * 16)
-    LSR A
-    LSR A
-    CLC
-    ADC VM_CVBASE
-    STA TMP0
-    LDA VM_CVBASE+1
-    ADC #0
-    STA TMP0+1
+    JSR cv_addr_y
     LDY #0
     LDA (TMP0), Y
     STA RESULT_VAL
@@ -1023,15 +1081,7 @@ res_cv_to_result:
     RTS
 
 res_tmp_to_result:
-    LDA (VM_PC), Y
-    LSR A
-    LSR A
-    CLC
-    ADC VM_TMPBASE
-    STA TMP0
-    LDA VM_TMPBASE+1
-    ADC #0
-    STA TMP0+1
+    JSR tmp_addr_y
     LDY #0
     LDA (TMP0), Y
     STA RESULT_VAL
@@ -1062,29 +1112,13 @@ write_result:
     RTS
 
 wr_tmp:
-    LDY #8                 ; result.var lo
-    LDA (VM_PC), Y
-    LSR A
-    LSR A
-    CLC
-    ADC VM_TMPBASE
-    STA TMP0
-    LDA VM_TMPBASE+1
-    ADC #0
-    STA TMP0+1
+    LDY #8
+    JSR tmp_addr_y
     JMP wr_store
 
 wr_cv:
     LDY #8
-    LDA (VM_PC), Y
-    LSR A
-    LSR A
-    CLC
-    ADC VM_CVBASE
-    STA TMP0
-    LDA VM_CVBASE+1
-    ADC #0
-    STA TMP0+1
+    JSR cv_addr_y
     ; fall through
 
 wr_store:
@@ -1232,15 +1266,7 @@ handle_zend_assign:
 
 assign_to_cv:
     LDY #0
-    LDA (VM_PC), Y         ; op1.var lo
-    LSR A
-    LSR A
-    CLC
-    ADC VM_CVBASE
-    STA TMP0
-    LDA VM_CVBASE+1
-    ADC #0
-    STA TMP0+1
+    JSR cv_addr_y
     LDY #0
     LDA OP2_VAL
     STA (TMP0), Y
@@ -1708,16 +1734,7 @@ incdec_cv_addr:
     CMP #IS_CV
     BNE incdec_err
     LDY #0
-    LDA (VM_PC), Y         ; op1.var lo (slot * 16)
-    LSR A
-    LSR A                  ; slot * 4
-    CLC
-    ADC VM_CVBASE
-    STA TMP0
-    LDA VM_CVBASE+1
-    ADC #0
-    STA TMP0+1
-    RTS
+    JMP cv_addr_y          ; tail call (RTS は cv_addr_y が行う)
 incdec_err:
     JMP handle_unimpl
 
@@ -3343,6 +3360,114 @@ npti_addr:
     JSR ppu_write_bytes
     JMP advance
 
+; =============================================================================
+; NESPHP_NES_PEEK (0xED): nes_peek($offset) → byte at USER_RAM[$offset]
+;
+; op1 = $offset (any operand type、IS_LONG)
+; result = IS_LONG with byte value (上位バイトは 0)
+;
+; offset は & $FF で 0..255 にラップ。範囲外は wrap、エラーにはしない。
+; =============================================================================
+handle_nesphp_nes_peek:
+    JSR resolve_op1
+    LDA OP1_VAL+1                 ; offset lo
+    TAX                           ; X = offset (8-bit、$FF を超えると wrap)
+    LDA USER_RAM_BASE, X
+    STA RESULT_VAL+1
+    LDA #0
+    STA RESULT_VAL+2
+    STA RESULT_VAL+3
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    JSR write_result
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_PEEK16 (0xED): nes_peek16($offset) → 2 byte little-endian as IS_LONG
+;
+; op1 = $offset
+; result = USER_RAM[$offset] | (USER_RAM[$offset+1] << 8)
+;
+; offset+1 が 256 を越えると 0 番地に wrap (8-bit X 演算)。
+; =============================================================================
+handle_nesphp_nes_peek16:
+    JSR resolve_op1
+    LDA OP1_VAL+1
+    TAX
+    LDA USER_RAM_BASE, X
+    STA RESULT_VAL+1              ; lo byte
+    INX
+    LDA USER_RAM_BASE, X
+    STA RESULT_VAL+2              ; hi byte
+    LDA #0
+    STA RESULT_VAL+3
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    JSR write_result
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_POKE (0xEE): nes_poke($offset, $byte)
+;
+; op1 = $offset (any、IS_LONG)
+; op2 = $byte (any、IS_LONG; 下位 1 byte のみ書込)
+; result = IS_UNUSED (戻り値なし)
+;
+; offset は & $FF で 0..255 にラップ。値は & $FF で 0..255 にトランケート。
+; =============================================================================
+handle_nesphp_nes_poke:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL+1                 ; offset lo
+    TAX
+    LDA OP2_VAL+1                 ; value lo (下位バイトのみ)
+    STA USER_RAM_BASE, X
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_POKESTR (0xEF): nes_pokestr($offset, $string)
+;
+; op1 = $offset (any、IS_LONG): USER_RAM 内の書込開始オフセット
+; result slot (= 3 番目の引数の格納場所として再利用) = $string (any、IS_STRING)
+;
+; $string の生バイト (デコード済み)を USER_RAM_BASE + $offset から bulk copy。
+; offset + len > 256 の場合は 256B 境界でクランプして停止。
+; =============================================================================
+handle_nesphp_nes_pokestr:
+    JSR resolve_op1
+    JSR resolve_result            ; RESULT_VAL = $string
+    LDA RESULT_VAL
+    CMP #TYPE_STRING
+    BEQ :+
+    JMP handle_unimpl
+:
+    ; 文字列の絶対 CPU アドレス = OPS_BASE + RESULT_VAL+1/+2 → TMP1
+    CLC
+    LDA RESULT_VAL+1
+    ADC #<OPS_BASE
+    STA TMP1
+    LDA RESULT_VAL+2
+    ADC #>OPS_BASE
+    STA TMP1+1
+    ; len = RESULT_VAL+3 (val[3] = length lo)
+    LDA RESULT_VAL+3
+    STA TMP2
+    ; X = offset (USER_RAM 先頭からのインデックス)
+    LDA OP1_VAL+1
+    TAX
+    LDY #0
+nps_loop:
+    CPY TMP2
+    BEQ nps_done
+    LDA (TMP1), Y
+    STA USER_RAM_BASE, X
+    INX
+    BEQ nps_done                  ; X が wrap (256B 越え) したら停止
+    INY
+    BNE nps_loop
+nps_done:
+    JMP advance
+
 ; -----------------------------------------------------------------------------
 ; enable_sprite_mode: 初回 nes_sprite から呼ばれる遷移処理
 ;
@@ -3652,22 +3777,36 @@ handle_zend_add_array_element:
     STA TMP0
     LDA OP1_VAL+2
     STA TMP0+1
-    ; TMP1 = count
+    ; count を 16-bit で読む (count_lo, count_hi)
     LDY #0
     LDA (TMP0), Y
-    STA TMP1
+    STA TMP1                   ; count_lo
+    INY
+    LDA (TMP0), Y
+    STA TMP1+1                 ; count_hi
+    ; (count * 16) を 16-bit で計算 (count_hi:count_lo を 4 回左シフト)
+    LDA TMP1                   ; restore A = count_lo
+    LDX #4
+aae_mul16:
+    ASL A
+    ROL TMP1+1
+    DEX
+    BNE aae_mul16
+    STA TMP1                   ; TMP1 = (count*16) & $FFFF
     ; dest = TMP0 + 4 + count*16
-    ASL A
-    ASL A
-    ASL A
-    ASL A                      ; A = (count*16) & $FF
     CLC
+    LDA TMP0
     ADC #4
-    CLC
-    ADC TMP0
-    STA TMP2                   ; dest lo
+    STA TMP2
     LDA TMP0+1
     ADC #0
+    STA TMP2+1
+    CLC
+    LDA TMP2
+    ADC TMP1
+    STA TMP2                   ; dest lo
+    LDA TMP2+1
+    ADC TMP1+1
     STA TMP2+1                 ; dest hi
     ; 16B zval を書く (4B tagged -> 16B zval)
     LDY #0
@@ -3719,19 +3858,34 @@ handle_zend_fetch_dim_r:
     STA TMP0
     LDA OP1_VAL+2
     STA TMP0+1
-    LDA OP2_VAL+1              ; index lo
+    ; index*16 を 16-bit で計算 (TMP2 = index*16)
+    LDA OP2_VAL+1
+    STA TMP2                   ; index_lo
+    LDA OP2_VAL+2
+    STA TMP2+1                 ; index_hi
+    LDA TMP2
+    LDX #4
+fdr_mul16:
     ASL A
-    ASL A
-    ASL A
-    ASL A                      ; A = (index*16) & $FF
+    ROL TMP2+1
+    DEX
+    BNE fdr_mul16
+    STA TMP2                   ; TMP2 = index*16
+    ; src = base + 4 + index*16 → TMP1
     CLC
+    LDA TMP0
     ADC #4
-    CLC
-    ADC TMP0
-    STA TMP1                   ; src lo
+    STA TMP1
     LDA TMP0+1
     ADC #0
-    STA TMP1+1                 ; src hi
+    STA TMP1+1
+    CLC
+    LDA TMP1
+    ADC TMP2
+    STA TMP1
+    LDA TMP1+1
+    ADC TMP2+1
+    STA TMP1+1
     ; zval[0..2] → RESULT_VAL+1..+3
     LDY #0
     LDA (TMP1), Y
@@ -3786,15 +3940,17 @@ handle_zend_assign_dim:
     LDY #22
     LDA (VM_PC), Y
     BNE asd_use_index
-    ; append: slot = count (header[0])
-    ; ptr を pop → TMP0、slot を取る、ptr を push し直す
+    ; append: slot = count (header[0..1] = 16-bit count)
     PLA
     STA TMP0
     PLA
     STA TMP0+1
     LDY #0
     LDA (TMP0), Y
-    STA TMP1                       ; TMP1 = slot
+    STA TMP1                       ; TMP1 = count_lo
+    INY
+    LDA (TMP0), Y
+    STA TMP1+1                     ; TMP1+1 = count_hi
     LDA TMP0+1
     PHA
     LDA TMP0
@@ -3802,8 +3958,11 @@ handle_zend_assign_dim:
     JMP asd_slot_ready
 asd_use_index:
     JSR resolve_op2                ; OP2_VAL = index (TMP0 は clobber される)
+    ; 16-bit index を TMP1 に保存
     LDA OP2_VAL+1
-    STA TMP1                       ; TMP1 = slot
+    STA TMP1                       ; index_lo
+    LDA OP2_VAL+2
+    STA TMP1+1                     ; index_hi
 asd_slot_ready:
     ; 現時点で stack 最上位 = [lo, hi] (array ptr)
     ; ptr を pop → TMP0 (+1)、ここで dest を計算。ptr は push し直す (count 更新用)
@@ -3815,19 +3974,28 @@ asd_slot_ready:
     PHA
     LDA TMP0
     PHA
-    ; dest = TMP0 + 4 + slot*16 (MVP: slot < 16)
+    ; dest = TMP0 + 4 + slot*16 (16-bit、N >= 16 でも正しく動く)
     LDA TMP1
+    LDX #4
+asd_mul16:
     ASL A
-    ASL A
-    ASL A
-    ASL A
+    ROL TMP1+1
+    DEX
+    BNE asd_mul16
+    STA TMP1                       ; TMP1 = slot*16 (16-bit)
     CLC
+    LDA TMP0
     ADC #4
-    CLC
-    ADC TMP0
-    STA TMP2                       ; dest lo
+    STA TMP2
     LDA TMP0+1
     ADC #0
+    STA TMP2+1
+    CLC
+    LDA TMP2
+    ADC TMP1
+    STA TMP2                       ; dest lo
+    LDA TMP2+1
+    ADC TMP1+1
     STA TMP2+1                     ; dest hi
     ; VM_PC を +24 して OP_DATA を指す
     CLC

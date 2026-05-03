@@ -43,8 +43,10 @@
 | W3 | parser 拡張: `else` / `elseif` チェーン、`<=` / `>` / `>=`、括弧式 `(expr)`。`cmp_parse_expr` で CMP_LHS / CMP_INTRINSIC_ID を save/restore する潜在 bug 修正も含む | `elsetest.nes` `parentest.nes` | ✅ **完了** |
 | W4 | `nes_putint($x, $y, $value)`: 5-char 右詰め unsigned int 表示 (スコア HUD)。sprite_mode でも NMI 同期キュー経由で動く | `putint.nes` `score.nes` | ✅ **完了** |
 | W5 | 算術演算子拡張 `*` / `/` / `%` (signed 16bit、divide-by-0 は 0 fallback)。`parse_mul_expr` レイヤー新設で precedence 適用。print_int16 の負数 X clobber bug も合わせて修正 | `multest.nes` | ✅ **完了** |
-| 次 | テトリス実装 / `!` / 単項 `-` / `^` (BW_XOR) / `foreach` / APU intrinsic (nes_beep) | — | 未着手 |
-| 対象外 | 配列、オブジェクト、foreach、例外、double | — | L3 方針 |
+| W6 | `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`: USER_RAM ($0700-$07FF, 256B、コンパイル後の CV table 領域を再利用) でバイト単位のデータアクセス。zval オーバーヘッド (16B/entry) を回避できるため、Tetris の 28 回転 shape table のような大きな定数を 56 byte で持てる | `peek_test.nes`, `tetris.nes` (Phase 5b) | ✅ **完了** |
+| **テトリス Phase 5b** | 7 種ピース + 4 回転 + ライン消去 + スコア + 簡易 game over。**peek/poke + USER_RAM** で shape table を低オーバーヘッドに保持。compile 時に発覚した一連のバグを修正 (CV/TMP slot 16-bit 化 / TMP_COUNT 文間 reset / op_array bound check / nes_rand % N の正値マスク `& 0x7FFF`) | `tetris.nes` | ✅ **完了** |
+| 次 | テトリス Phase 5c (NEXT preview / speed up / 全面再描画) / `!` / 単項 `-` / `^` (BW_XOR) / `foreach` / APU intrinsic (nes_beep) | — | 未着手 |
+| 対象外 | 連想配列、オブジェクト、例外、double | — | L3 方針 |
 
 各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。
 
