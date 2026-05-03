@@ -2760,13 +2760,12 @@ cls_wait_vb:
     JMP advance
 
 ; =============================================================================
-; NESPHP_NES_CHR_SPR (0xF5): sprite 用 4KB CHR bank を切り替える
+; NESPHP_NES_CHR_SPR (0xF5): sprite 用 4KB CHR セットを差し替える
 ;
-; 引数: op1 = 4KB bank 番号 (int literal 0-7, IS_CONST)
+; 引数: op1 = CHR セット番号 (int literal 0-3、IS_CONST)
 ;
-; MMC1 CHR bank 1 register ($C000) に書く → PPU $1000-$1FFF にマッピング。
-; PPUCTRL bit 3 = 1 (reset で設定済み) なので sprite はここを参照する。
-; BG 側 (CHR bank 0, $0000) には影響しない。
+; CHR-RAM 化に伴い、bank 切替ではなく PRG_BANK1 から PPU $1000-$1FFF への
+; 4KB バルク転送として実装。chr_bulk_transfer サブルーチン共有。
 ; =============================================================================
 handle_nesphp_nes_chr_spr:
     JSR resolve_op1
@@ -2774,25 +2773,21 @@ handle_nesphp_nes_chr_spr:
     CMP #TYPE_LONG
     BNE chr_spr_err
     LDA OP1_VAL+1
-    AND #$07               ; 0-7 にクランプ (32KB / 4KB = 8 banks)
-    MMC1_WRITE $C000
+    AND #$03               ; 0-3 にクランプ (PRG_BANK1 16KB / 4KB = 4 セット)
+    LDX #$10               ; PPU dest hi = $10 (sprite pattern table)
+    JSR chr_bulk_transfer
     JMP advance
 
 chr_spr_err:
     JMP handle_unimpl
 
 ; =============================================================================
-; NESPHP_NES_CHR_BG (0xF6): BG 用 4KB CHR bank を切り替える
+; NESPHP_NES_CHR_BG (0xF6): BG 用 4KB CHR セットを差し替える
 ;
-; 引数: op1 = 4KB bank 番号 (int literal 0-7, IS_CONST)
+; 引数: op1 = CHR セット番号 (int literal 0-3、IS_CONST)
 ;
-; MMC1 CHR bank 0 register ($A000) に書く → PPU $0000-$0FFF にマッピング。
-; PPUCTRL bit 4 = 0 (reset で設定済み) なので BG はここを参照する。
-; sprite 側 (CHR bank 1, $1000) には影響しない。
-;
-; 旧 CNROM 時代は PPUCTRL bit 4 のトグルだったが、MMC1 昇格により
-; CHR bank レジスタ直接操作に変更。より細かい粒度 (4KB 単位、0-7) で
-; 任意の bank を指定できるようになった。
+; CHR-RAM 化に伴い、bank 切替ではなく PRG_BANK1 から PPU $0000-$0FFF への
+; 4KB バルク転送として実装。chr_bulk_transfer サブルーチン共有。
 ; =============================================================================
 handle_nesphp_nes_chr_bg:
     JSR resolve_op1
@@ -2800,12 +2795,121 @@ handle_nesphp_nes_chr_bg:
     CMP #TYPE_LONG
     BNE chr_bg_err
     LDA OP1_VAL+1
-    AND #$07               ; 0-7 にクランプ
-    MMC1_WRITE $A000
+    AND #$03               ; 0-3 にクランプ
+    LDX #$00               ; PPU dest hi = $00 (BG pattern table)
+    JSR chr_bulk_transfer
     JMP advance
 
 chr_bg_err:
     JMP handle_unimpl
+
+; =============================================================================
+; chr_bulk_transfer サブルーチン
+;
+; 入力:
+;   A = CHR セット番号 (0-3)
+;   X = PPU 転送先 hi byte ($00 = BG pattern table、$10 = sprite pattern table)
+;
+; 動作:
+;   PRG bank 1 ($8000-$BFFF に CHRDATA) に切替 → PPU $0000 or $1000 に 4KB
+;   バルク転送 → PRG bank 0 (PHPSRC) 復帰。
+;
+;   sprite_mode_on のときは NMI 無効化 + rendering OFF + 転送 + VBlank 待ち +
+;   OAM DMA 補完 + rendering ON の流れ (cls_sprite_mode と同じ brief
+;   force-blanking パターン)。約 25 ms の黒フラッシュ (1.5 frame)。
+;
+;   forced_blanking モード (PPUMASK=0、NMI off の起動直後など) では
+;   PPUMASK 操作は不要なので転送だけして RTS。
+;
+; clobber: A, X, Y, TMP0, TMP1
+; =============================================================================
+chr_bulk_transfer:
+    STA TMP0               ; CHR セット番号を保存
+    STX TMP1               ; PPU dest hi byte を保存 (TMP1 は src 計算でも使う)
+
+    ; sprite_mode_on で分岐: rendering 切替が必要か判定
+    LDA sprite_mode_on
+    BEQ chr_xfer_no_blank
+
+    ; --- sprite_mode: NMI 無効化 + rendering OFF ---
+    LDA ppu_ctrl_shadow
+    PHA                    ; 古い shadow を退避
+    AND #$7F
+    STA ppu_ctrl_shadow
+    STA PPUCTRL            ; bit 7 = 0 で NMI off
+    LDA #0
+    STA PPUMASK            ; 強制 blanking
+
+chr_xfer_no_blank:
+    ; PRG bank を 1 に切替 (CHRDATA を $8000-$BFFF にマップ)
+    LDA #1
+    MMC1_WRITE $E000
+
+    ; PPU アドレス = (TMP1 << 8) — i.e. $0000 or $1000
+    BIT PPUSTATUS
+    LDA TMP1               ; X 入力 = PPU dest hi byte
+    STA PPUADDR
+    LDA #$00
+    STA PPUADDR
+
+    ; src ptr = $8000 + (set_index * $1000)
+    STA TMP1               ; src lo = 0
+    LDA TMP0               ; A = set index
+    ASL                    ; × 16 で bit 0-1 を bit 4-5 にシフト
+    ASL
+    ASL
+    ASL
+    CLC
+    ADC #$80               ; src hi = $80 + (set_index << 4)
+    STA TMP1+1
+
+    ; 4KB 転送 (16 ページ × 256 byte)
+    LDX #$10
+    LDY #0
+chr_xfer_outer:
+chr_xfer_inner:
+    LDA (TMP1), Y
+    STA PPUDATA
+    INY
+    BNE chr_xfer_inner
+    INC TMP1+1
+    DEX
+    BNE chr_xfer_outer
+
+    ; PRG bank 0 (PHPSRC) に戻す
+    LDA #0
+    MMC1_WRITE $E000
+
+    ; sprite_mode のときだけ rendering 復帰処理
+    LDA sprite_mode_on
+    BEQ chr_xfer_done
+
+    ; VBlank を待ってから rendering 再開 (画面途中で復帰すると glitch)
+    BIT PPUSTATUS
+chr_xfer_wait_vb:
+    BIT PPUSTATUS
+    BPL chr_xfer_wait_vb
+
+    ; OAM DMA を手動補完 (NMI 無効化中の OAM 更新を埋める)
+    LDA #>OAM_SHADOW
+    STA OAM_DMA
+
+    ; scroll リセット (PPUADDR 連続書込で内部 scroll latch がズレている)
+    LDA #0
+    STA PPUSCROLL
+    STA PPUSCROLL
+
+    ; rendering 復帰 (BG + sprite enable)
+    LDA #%00011110
+    STA PPUMASK
+
+    ; ppu_ctrl_shadow 復帰 (bit 7 復活で NMI 再有効)
+    PLA
+    STA ppu_ctrl_shadow
+    STA PPUCTRL
+
+chr_xfer_done:
+    RTS
 
 ; =============================================================================
 ; NESPHP_NES_BG_COLOR (0xF7): 背景色 ($3F00) を設定する
@@ -4115,13 +4219,17 @@ palette_data:
 ; =============================================================================
 ; CHRDATA — CHR-RAM 化に伴い PRG_BANK1 経由で焼く CHR タイル data
 ;
-; 起動時に reset で 8KB を PRG_BANK1 ($8000-$9FFF) → PPU $0000-$1FFF にバルク
-; 転送する。font.chr の先頭 8KB のみ使用 (= 旧 CHR-ROM bank 0 + bank 1):
-;   bytes 0-4095:    BG default = 通常 ASCII フォント (PPU $0000)
-;   bytes 4096-8191: sprite default = インバースフォント (PPU $1000)
+; PRG_BANK1 16KB に 4 つの 4KB CHR セットを並べる:
+;   offset 0      ($8000 when bank 1): set 0 = 通常 ASCII フォント
+;   offset $1000  ($9000):              set 1 = インバースフォント
+;   offset $2000  ($A000):              set 2 = (旧 CHR-ROM bank 2 相当)
+;   offset $3000  ($B000):              set 3 = (旧 CHR-ROM bank 3 相当)
 ;
-; 残り 8KB ($A000-$BFFF when bank 1 active) は (a-3) で `nes_chr_bg/spr` の
-; bulk transfer 用 CHR セットを置く予定。
+; 起動時の reset では set 0 + set 1 (先頭 8KB) を PPU $0000-$1FFF へ転送
+; (= 従来の BG = bank 0、sprite = bank 1 と同じ初期見た目)。
+;
+; 実行時の nes_chr_bg($n) / nes_chr_spr($n) ($n=0..3) は chr_bulk_transfer で
+; 該当セット 4KB を PPU $0000 (BG) or $1000 (sprite) へ書き直す。
 ; =============================================================================
 .segment "CHRDATA"
-    .incbin "chr/font.chr", 0, $2000  ; 先頭 8KB のみ (initial CHR-RAM image)
+    .incbin "chr/font.chr", 0, $4000  ; 16KB (4 セット分、PRG_BANK1 全域)
