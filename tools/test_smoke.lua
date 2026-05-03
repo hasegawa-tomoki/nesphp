@@ -6,8 +6,9 @@
 --   fceux --no-config 1 --loadlua tools/test_smoke.lua build/foo.nes
 --
 -- 出力先: $NESPHP_TEST_OUT 環境変数 or "/tmp/nesphp_test_result.txt"
+-- フレーム数: $NESPHP_FRAMES 環境変数 or 300 (= 5 sec at 60fps)
 
-local FRAMES_TO_WAIT = 300  -- 5 sec at 60fps、compile + 初回 render に十分
+local FRAMES_TO_WAIT = tonumber(os.getenv("NESPHP_FRAMES")) or 300
 local NAMETABLE = 0x2000
 local OUT_PATH = os.getenv("NESPHP_TEST_OUT") or "/tmp/nesphp_test_result.txt"
 
