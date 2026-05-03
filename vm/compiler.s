@@ -91,6 +91,10 @@ INT_PEEK        = 17    ; nes_peek($offset) — 1 引数、IS_LONG 返却 (byte)
 INT_POKE        = 18    ; nes_poke($offset, $byte) — 2 引数、戻り値なし
 INT_POKESTR     = 19    ; nes_pokestr($offset, $string) — 2 引数、戻り値なし
 INT_PEEK16      = 20    ; nes_peek16($offset) — 1 引数、IS_LONG 返却 (16-bit LE)
+INT_PEEK_EXT    = 21    ; nes_peek_ext($offset) — 13-bit offset、bank 2
+INT_POKE_EXT    = 22    ; nes_poke_ext($offset, $byte) — bank 2
+INT_POKESTR_EXT = 23    ; nes_pokestr_ext($offset, $string) — bank 2
+INT_PEEK16_EXT  = 24    ; nes_peek16_ext($offset) — bank 2
 INT_NOT_FOUND   = $FF
 
 ARG_STDIN_SENTINEL = $FE
@@ -1826,6 +1830,14 @@ cpp_ident:
     BNE :+
     JMP cpp_ident_peek16
 :
+    CMP #INT_PEEK_EXT
+    BNE :+
+    JMP cpp_ident_peek_ext
+:
+    CMP #INT_PEEK16_EXT
+    BNE :+
+    JMP cpp_ident_peek16_ext
+:
     JMP cmp_error
 
 ; count($a) 式: '(' expr ')' をパース、ZEND_COUNT op1=expr、result = 新 TMP
@@ -1921,6 +1933,14 @@ cpp_ident_rand:
 
 cpp_ident_peek:
     LDA #NESPHP_NES_PEEK
+    JMP cpp_peek_emit_with_opcode
+
+cpp_ident_peek_ext:
+    LDA #NESPHP_NES_PEEK_EXT
+    JMP cpp_peek_emit_with_opcode
+
+cpp_ident_peek16_ext:
+    LDA #NESPHP_NES_PEEK16_EXT
     JMP cpp_peek_emit_with_opcode
 
 cpp_ident_peek16:
@@ -3373,6 +3393,38 @@ cmp_match_intrinsic:
     LDA #INT_POKE
     RTS
 :
+    LDA #<intrinsic_name_nes_pokestr_ext
+    LDX #>intrinsic_name_nes_pokestr_ext
+    LDY #15
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_POKESTR_EXT
+    RTS
+:
+    LDA #<intrinsic_name_nes_peek16_ext
+    LDX #>intrinsic_name_nes_peek16_ext
+    LDY #14
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_PEEK16_EXT
+    RTS
+:
+    LDA #<intrinsic_name_nes_peek_ext
+    LDX #>intrinsic_name_nes_peek_ext
+    LDY #12
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_PEEK_EXT
+    RTS
+:
+    LDA #<intrinsic_name_nes_poke_ext
+    LDX #>intrinsic_name_nes_poke_ext
+    LDY #12
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_POKE_EXT
+    RTS
+:
     LDA #INT_NOT_FOUND
     RTS
 
@@ -3414,6 +3466,10 @@ intrinsic_name_nes_peek:        .byte "nes_peek"
 intrinsic_name_nes_peek16:      .byte "nes_peek16"
 intrinsic_name_nes_poke:        .byte "nes_poke"
 intrinsic_name_nes_pokestr:     .byte "nes_pokestr"
+intrinsic_name_nes_peek_ext:    .byte "nes_peek_ext"
+intrinsic_name_nes_peek16_ext:  .byte "nes_peek16_ext"
+intrinsic_name_nes_poke_ext:    .byte "nes_poke_ext"
+intrinsic_name_nes_pokestr_ext: .byte "nes_pokestr_ext"
 intrinsic_name_nes_attr:      .byte "nes_attr"
 intrinsic_name_nes_vsync:     .byte "nes_vsync"
 intrinsic_name_nes_btn:       .byte "nes_btn"
@@ -3454,6 +3510,10 @@ cmp_emit_jmp_table:
     .word cmp_emit_poke             ; INT_POKE (18)
     .word cmp_emit_pokestr          ; INT_POKESTR (19)
     .word cmp_emit_peek_stmt        ; INT_PEEK16 (20) — stmt context (peek と同様 NOP)
+    .word cmp_emit_peek_stmt        ; INT_PEEK_EXT (21) — stmt 文脈は NOP
+    .word cmp_emit_poke_ext         ; INT_POKE_EXT (22)
+    .word cmp_emit_pokestr_ext      ; INT_POKESTR_EXT (23)
+    .word cmp_emit_peek_stmt        ; INT_PEEK16_EXT (24) — stmt 文脈は NOP
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -3812,6 +3872,42 @@ cmp_emit_pokestr:
     JSR cmp_set_result_from_arg
     LDY #20
     LDA #NESPHP_NES_POKESTR
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_poke_ext($offset, $byte) — 2 引数、戻り値なし、PRG-RAM bank 2 へ書込
+cmp_emit_poke_ext:
+    LDA CMP_ARG_COUNT
+    CMP #2
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDY #20
+    LDA #NESPHP_NES_POKE_EXT
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_pokestr_ext($offset, $string) — 2 引数、戻り値なし、PRG-RAM bank 2 へ bulk copy
+cmp_emit_pokestr_ext:
+    LDA CMP_ARG_COUNT
+    CMP #2
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op24_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_result_from_arg
+    LDY #20
+    LDA #NESPHP_NES_POKESTR_EXT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     RTS
