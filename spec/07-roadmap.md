@@ -45,7 +45,9 @@
 | W5 | 算術演算子拡張 `*` / `/` / `%` (signed 16bit、divide-by-0 は 0 fallback)。`parse_mul_expr` レイヤー新設で precedence 適用。print_int16 の負数 X clobber bug も合わせて修正 | `multest.nes` | ✅ **完了** |
 | W6 | `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`: USER_RAM ($0700-$07FF, 256B、コンパイル後の CV table 領域を再利用) でバイト単位のデータアクセス。zval オーバーヘッド (16B/entry) を回避できるため、Tetris の 28 回転 shape table のような大きな定数を 56 byte で持てる | `peek_test.nes`, `tetris.nes` (Phase 5b) | ✅ **完了** |
 | **テトリス Phase 5b** | 7 種ピース + 4 回転 + ライン消去 + スコア + 簡易 game over。**peek/poke + USER_RAM** で shape table を低オーバーヘッドに保持。compile 時に発覚した一連のバグを修正 (CV/TMP slot 16-bit 化 / TMP_COUNT 文間 reset / op_array bound check / nes_rand % N の正値マスク `& 0x7FFF`) | `tetris.nes` | ✅ **完了** |
-| 次 | テトリス Phase 5c (NEXT preview / speed up / 全面再描画) / `!` / 単項 `-` / `^` (BW_XOR) / `foreach` / APU intrinsic (nes_beep) | — | 未着手 |
+| W7 | **SXROM 標準準拠化** (PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 32KB)。CHR-RAM 8KB は起動時に PRG_BANK1 から bulk 転送 (~50 ms)、`nes_chr_bg/spr` も bulk transfer に変更。ARR_POOL を bank 1 に逃して 720B → 8KB (11x 拡大)。新 intrinsic 4 種 `nes_peek_ext / peek16_ext / poke_ext / pokestr_ext` で bank 2 の 8KB USER_RAM_EXT を提供 | `peekext_test.nes`, `tetris.nes` (Phase 5c) | ✅ **完了** |
+| **テトリス Phase 5c** | ライン消去後の全面再描画 (single-loop: `nes_put(' ')` で先にクリア → 必要セルだけ `\x05` で上書き) と GAME OVER メッセージ表示。ARR_POOL 拡大により op_array 余裕が出て実装可能に | `tetris.nes` | ✅ **完了** |
+| 次 | テトリス Phase 5d (NEXT preview / speed up) / `!` / 単項 `-` / `^` (BW_XOR) / `foreach` / APU intrinsic (nes_beep) / cross-bank op_array dispatch (op_array > 8KB の場合) | — | 未着手 |
 | 対象外 | 連想配列、オブジェクト、例外、double | — | L3 方針 |
 
 各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。

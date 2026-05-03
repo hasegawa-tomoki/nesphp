@@ -855,11 +855,109 @@ CV table 上限も 32 → 64 に拡張 ($0700-$077F → $0700-$07FF 全域)。te
 
 `examples/peek_test.php`: peek/poke/pokestr のスモークテスト。
 
-### 制約として残ったもの
+### 制約として残ったもの (Phase 5b 時点、Phase 5c で解消)
 
 - ライン消去後の全面再描画 (200 cell) は op_array 不足で省略 → cleared 行が ghost として残る
 - GAME OVER メッセージなし (静止のみ)
 - NEXT preview / speed up は未実装 (Phase 5c へ持越)
+
+---
+
+## Phase W7: SXROM 標準準拠化 (PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 32KB)
+
+### 動機: ARR_POOL の容量プレッシャ
+
+Phase 5b の tetris.php では bank 0 8KB のうち op_array 6.7KB + literals 640B +
+header 16B + STR_POOL 128B = 7.5KB を占有し、ARR_POOL 残量が **720B (~45 zval)**。
+`$grid` 20 行 = 320B でほぼ満杯、Phase 5c の全面再描画追加が op 数とメモリ両方で
+収まらない状態だった。
+
+### 設計決定の流れ
+
+「PRG-RAM を増やしたい」という素直な欲求から始まり、対話の中で:
+
+1. **どの mapper variant か**: SNROM (現状、8KB)、SOROM (16KB、bit 3)、SUROM (PRG-ROM 増、無関係)、SXROM (32KB、bit 2-3) を比較。SXROM で PRG-RAM を 4 倍にする路線を採用
+2. **bit 衝突問題**: SXROM は CHR bank 0 reg ($A000) bit 2-3 を PRG-RAM bank に流用。bit 0-2 で 8 CHR banks 切替する現構成と衝突
+3. **CHR-RAM 化を受け入れる**: 標準 SXROM は CHR-RAM 8KB のみ。CHR-RAM では bank 切替が消え bit 衝突が解消。代償は CHR 総容量 32KB → 8KB
+4. **CHR データの置き場**: PRG-ROM を 64KB に拡張、bank 1 に CHRDATA 16KB (4 セット × 4KB) を置く。`nes_chr_bg/spr` は bulk transfer に変更
+5. **op_array の bank 跨ぎは延期**: 当面 op_array は bank 0 8KB に収まるので、bank 跨ぎ dispatch は将来課題に
+
+「現 nesphp は実は SNROM ではなく SIROM 相当」という気付きもあった (CHR-ROM 32KB
++ PRG-RAM 8KB + 32KB PRG-ROM の組み合わせは SIROM)。`vm/nesphp.s` の "SNROM 構成"
+コメントは長らく不正確だった。
+
+### bank 配分
+
+```
+PRG-RAM (32KB、4 × 8KB):
+  bank 0: op_array + literals + ARR_POOL (旧) + STR_POOL  ← bank 0 = 現状維持
+  bank 1: ARR_POOL 8KB                                    ← 配列専用
+  bank 2: USER_RAM_EXT 8KB (peek/poke_ext)                ← 新規
+  bank 3: 予約
+```
+
+**配置の根拠**: 「op_array 以外を bank 1 へ逃す」案 (literals/STR_POOL/ARR_POOL を
+全て bank 1) は literals アクセスが毎 opcode 発生するので bank 切替コストで 30-50%
+スローダウン → 却下。「配列だけ bank 外」(= 案 X) は配列が触るときだけ切替なので
+overhead は 10% 程度に抑えられる。
+
+ARR_POOL bank 切替は handler 入口で `PRG_RAM_BANK1` 出口で `PRG_RAM_BANK0` の atomic
+パターン (5 つの配列 handler を全て修正)。dispatch loop には一切手を入れない。
+
+### CHR-RAM 化の影響
+
+- 起動時に 8KB を PRG_BANK1 → PPU $0000-$1FFF に bulk 転送 (~50 ms、L3S compile に
+  比べれば誤差)
+- `nes_chr_bg/spr($n)` は MMC1 register 書込から、PRG_BANK1 → PPU への 4KB bulk
+  transfer に変更。`cls_sprite_mode` 同様の brief force-blanking パターン (~25 ms
+  blackout / 1.5 frame) で sprite_mode/forced_blanking 両対応
+- chrdemo / presen* の "BG inverse" 演出は CHR セット差替えとして引き続き機能
+- tetris は `nes_chr_bg/spr` を呼ばないので影響なし
+
+### 新 intrinsic 4 種
+
+USER_RAM_EXT (bank 2, 8KB) アクセス用:
+- `nes_peek_ext($ofs)` → byte
+- `nes_peek16_ext($ofs)` → 16-bit LE
+- `nes_poke_ext($ofs, $byte)` → 1 byte 書込
+- `nes_pokestr_ext($ofs, $string)` → bulk copy (string max 255B、内蔵 RAM $0600 を中継)
+
+opcode 0xE8-0xEB を割当、INT_PEEK_EXT 等を compiler.s に追加。
+
+### Phase 5b/5c 帳尻合わせ
+
+ARR_POOL 8KB に拡大したことで、`tetris.php` の Phase 5c (全面再描画 + GAME OVER)
+が op_array に収まるようになった。ライン消去後の 200 セル走査ループは
+`lineclear_test.php` のパターン (1 セルごとに " " 描画 → 必要なら "\x05" 上書き) を
+流用、else 分岐を消して op 削減。
+
+### 移行作業の刻み (8 commits)
+
+1. FCEUX-based smoke test harness 追加 (regression detection 用)
+2. PRG-ROM 32KB → 64KB (4 × 16KB bank、linker config 拡張)
+3. CHR-RAM 化 (iNES CHR-ROM=0 申告、起動時 8KB bulk transfer)
+4. `nes_chr_bg/spr` を bulk transfer に再実装
+5. PRG-RAM 8KB → 32KB 申告 + ZP `cur_prg_ram_bank` 追加
+6. ARR_POOL を bank 1 に移動 (5 handler に PRG_RAM_BANK1/0 wrap)
+7. USER_RAM_EXT (bank 2) + 4 ext intrinsic 追加
+8. tetris.php Phase 5c
+
+各段階で smoke test (37/40 PASS、baseline 維持) を回し regression を防いだ。
+
+### 性能
+
+- bank 切替 1 回 = MMC1 シリアル書込 ~30 cycles
+- 配列 handler は 2 回切替 (in/out) = ~60 cycles overhead per op
+- tetris で配列アクセス ~50 回/フレーム → 3000 cyc/frame ≈ 1.7 ms ≈ 10% スロー
+  ダウン (60fps→54fps、許容範囲)
+
+### 制約として残ったもの
+
+- op_array は bank 0 限定で **最大 308 op** のまま (bank 跨ぎ dispatch は未実装)
+- bank 1 の dispatch 中アクセスは ARR_POOL のみ (op_array overflow を逃すには
+  cross-bank PC 管理が必要)
+- 標準 SXROM は CHR-RAM のみで CHR-ROM 構成は非標準 → 将来 64KB CHR-ROM が必要に
+  なれば SOROM (CHR 8 bank 維持 + 16KB PRG-RAM のみ) に分岐するか別 mapper 検討
 
 ---
 

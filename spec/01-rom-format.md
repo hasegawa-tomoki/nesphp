@@ -134,7 +134,7 @@ offset  size  field              備考
 ```
 Offset     Bytes                                             ASCII
 ---------  ------------------------------------------------  ----------------
-00000000   4e 45 53 1a 02 04 10 00 01 00 00 00 00 00 00 00   NES.............   iNES ヘッダ (MMC1 / mapper 1)
+00000000   4e 45 53 1a 04 00 10 00 04 00 00 00 00 00 00 00   NES.............   iNES ヘッダ (MMC1 / mapper 1, SXROM)
 00000010   [ VM 6502 asm ~16KB ... ]                                             PRG bank 0
 ...
                                                              ↓ nesphp-bc セクション
@@ -168,13 +168,17 @@ Offset     Bytes                                             ASCII
 00003F70   0b 00 00 00 00 00 00 00 48 45 4c 4c 4f 2c 20 4e   ........HELLO, N    len=11, "HELLO, N
 00003F80   45 53 21 00                                       ES!.                "ES!\0"
 ...
-00008010   [ CHR-ROM 32KB = 4 × 8KB バンク ]                                     CHR banks 0-3
-                  Bank 0: PT0 = 通常フォント / PT1 = インバース
-                  Bank 1-3: 初期は Bank 0 のコピー (カスタム差し替え前提)
+00010010   [ PRG bank 1 ($8000-$BFFF when bank 1 mapped) ]                       CHRDATA segment
+                  4 × 4KB CHR セット (起動時の bulk transfer 元)
+                  set 0: 通常フォント / set 1: インバース / set 2-3: 拡張枠
+00018010   [ PRG bank 2 (16KB、予約)、PRG bank 3 ($C000-$FFFF, CODE 固定) ]
 ```
 
-ヘッダの `02 04 10 00 01` は MMC1 (マッパー 1, SNROM): PRG = 2 × 16KB、CHR = 4 × 8KB (4KB × 8 bank)、PRG-RAM = 8KB。
-Flags 6 上位 nibble = 1 → mapper 1。詳細は [11-chr-banks](./11-chr-banks.md)。
+ヘッダの `04 00 10 00 04` は MMC1 (マッパー 1, SXROM): PRG-ROM = 4 × 16KB = 64KB
+(将来 256KB まで拡張可)、CHR-ROM = 0 (= CHR-RAM 8KB を申告)、PRG-RAM = 4 × 8KB =
+32KB (bank 0=op_array、bank 1=ARR_POOL、bank 2=USER_RAM_EXT、bank 3=予約)。
+Flags 6 上位 nibble = 1 → mapper 1。詳細は [11-chr-banks](./11-chr-banks.md) と
+[02-ram-layout § PRG-RAM](./02-ram-layout.md)。
 
 ### 見どころ
 

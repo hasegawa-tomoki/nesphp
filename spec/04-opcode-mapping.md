@@ -88,8 +88,8 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 | `NESPHP_NES_SPRITE` | **0xF2** | OAM[$idx] (0-63) の y / tile / x を更新。$idx は runtime int 可、$tile はリテラル必須。attr バイトは触らない (`NESPHP_NES_SPRITE_ATTR` で別途)。初回呼び出しで sprite_mode に遷移 |
 | `NESPHP_NES_PUTS` | **0xF3** | nametable の (x, y) に文字列リテラルを書く。forced_blanking 前提、行折り返しなし |
 | `NESPHP_NES_CLS` | **0xF4** | nametable 0 ($2000-$23FF) を空白で埋めて `PPU_CURSOR` を既定位置に戻す。forced_blanking 前提 |
-| `NESPHP_NES_CHR_SPR` | **0xF5** | sprite 用 4KB CHR bank 切替 (0-7)。MMC1 CHR bank 1 register ($C000) に書く → PPU $1000。詳細は [11-chr-banks](./11-chr-banks.md) |
-| `NESPHP_NES_CHR_BG` | **0xF6** | BG 用 4KB CHR bank 切替 (0-7)。MMC1 CHR bank 0 register ($A000) に書く → PPU $0000 |
+| `NESPHP_NES_CHR_SPR` | **0xF5** | sprite 用 4KB CHR セット切替 (0-3)。SXROM CHR-RAM 化に伴い PRG_BANK1 から PPU $1000-$1FFF へ 4KB バルク転送 (約 25 ms blackout)。詳細は [11-chr-banks](./11-chr-banks.md) |
+| `NESPHP_NES_CHR_BG` | **0xF6** | BG 用 4KB CHR セット切替 (0-3)。PRG_BANK1 から PPU $0000-$0FFF へ 4KB バルク転送。chr_bulk_transfer サブルーチン共有 |
 | `NESPHP_NES_BG_COLOR` | **0xF7** | 背景色 ($3F00) を NES カラーコード (0x00-0x3F) で設定。全パレット共通 |
 | `NESPHP_NES_PALETTE` | **0xF8** | パレットの色 1-3 を設定。4 引数 (id, c1, c2, c3) で op1/op2/result/extended_value を全て使用 |
 | `NESPHP_NES_ATTR` | **0xF9** | attribute table の 2×2 タイルブロックにパレット番号 (0-3) を設定。64B RAM shadow 経由で read-modify-write |
@@ -111,6 +111,24 @@ zval (16 byte / entry) のオーバーヘッドを回避してバイト単位で
 | `NESPHP_NES_POKESTR` | **0xEF** | `nes_pokestr($offset, $string)` → 文字列の生バイトを USER_RAM[$offset..] に bulk copy。$offset+len が 256 を越えるとそこで停止。3 引数 intrinsic と同じ枠 (op1=offset、result スロット = string) |
 
 **用途例**: Tetris の 28 回転 shape table を 56 byte の string literal で保持し、起動時に `nes_pokestr(0, $shape_data)` で USER_RAM に bulk load。runtime は `nes_peek16($idx*2)` で 16-bit shape を 1 op で復元。配列で持つと 28 × 16 = 448 byte 食うが、USER_RAM なら 56 byte で済む (8 倍効率)。
+
+### peek/poke_ext (USER_RAM_EXT = PRG-RAM bank 2、8KB)
+
+SXROM 化に伴い PRG-RAM bank 2 を **8 KB の汎用バイト領域** として利用する API。
+内蔵 RAM の `nes_peek/poke` (256 B) では足りない大きなデータテーブルやゲームステ
+ートのバッファ用途。13-bit offset (0-8191)。
+
+| opcode | 番号 | 役割 |
+|---|---|---|
+| `NESPHP_NES_PEEK_EXT` | **0xE8** | `nes_peek_ext($offset)` → bank 2 の `$6000+offset` から 1 byte 読出 |
+| `NESPHP_NES_PEEK16_EXT` | **0xE9** | `nes_peek16_ext($offset)` → bank 2 から 2 byte LE 読出 |
+| `NESPHP_NES_POKE_EXT` | **0xEA** | `nes_poke_ext($offset, $byte)` → bank 2 に 1 byte 書込 |
+| `NESPHP_NES_POKESTR_EXT` | **0xEB** | `nes_pokestr_ext($offset, $string)` → bank 2 に文字列の生バイトを bulk copy |
+
+**実装ノート**: 各 handler は入口で MMC1 PRG-RAM bank 2 へ切替、操作、bank 0 へ復帰
+を atomic に行う。bank 切替コストは ~60 cycles per call (= MMC1 シリアル書込 ×2)。
+`nes_pokestr_ext` は STR_POOL (bank 0) と bank 2 が同時マップ不可のため、内蔵 RAM
+の text buffer ($0600-$06FF) を中継する 2-stage コピー (string max 255 byte で 1 chunk)。
 
 ### serializer のパターン畳み込み
 
