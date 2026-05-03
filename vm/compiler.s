@@ -2682,6 +2682,81 @@ cln_str_end:
     JSR cmp_advance1                ; consume closing "
     LDA #TK_STRING
     STA CMP_TOK_KIND
+    JSR cln_str_dedup
+    RTS
+
+; cln_str_dedup: 直前に書き込んだ文字列 (CMP_TOK_PTR, CMP_TOK_LEN) と一致する
+; 既存文字列が STR_POOL_BASE..CMP_TOK_PTR の範囲にあれば、その位置を再利用して
+; CMP_STRPOOL_HEAD を巻き戻す (= 新規分は無かったことに)。重複が無ければ何も
+; しない。線形 1-byte シフト走査、O(N*M) 計算量。
+;
+; 入力:
+;   CMP_TOK_PTR  = 新規文字列の先頭 (STR_POOL 内)
+;   CMP_TOK_LEN  = 長さ (1-255)
+; 出力:
+;   match した場合: CMP_TOK_PTR / CMP_STRPOOL_HEAD を既存位置に変更
+;   match なし: 入力そのまま
+;
+; clobber: A, X, Y, TMP0, TMP1, TMP2
+cln_str_dedup:
+    LDA CMP_TOK_LEN
+    BNE :+
+    RTS                              ; 空文字列は dedup 対象外
+:
+    LDA #<STR_POOL_BASE
+    STA TMP0
+    LDA #>STR_POOL_BASE
+    STA TMP0+1                       ; TMP0 = candidate ptr
+csd_try:
+    ; candidate + LEN > CMP_TOK_PTR なら走査終了 (新規文字列領域に到達)
+    CLC
+    LDA TMP0
+    ADC CMP_TOK_LEN
+    STA TMP1
+    LDA TMP0+1
+    ADC #0
+    STA TMP1+1
+    ; tail > CMP_TOK_PTR ? (= candidate が新規文字列領域に踏み込む)
+    LDA TMP1+1
+    CMP CMP_TOK_PTR+1
+    BCC csd_compare
+    BNE csd_no_match
+    LDA TMP1
+    CMP CMP_TOK_PTR
+    BCC csd_compare
+    BEQ csd_compare                  ; tail == CMP_TOK_PTR は OK (隣接)
+    BCS csd_no_match
+csd_compare:
+    LDY #0
+csd_cmp_loop:
+    CPY CMP_TOK_LEN
+    BEQ csd_matched
+    LDA (TMP0), Y
+    STA TMP2
+    LDA (CMP_TOK_PTR), Y
+    CMP TMP2
+    BNE csd_advance
+    INY
+    BNE csd_cmp_loop
+    ; Y wrap (LEN > 255、想定外)
+    JMP csd_advance
+csd_advance:
+    INC TMP0
+    BNE csd_try
+    INC TMP0+1
+    JMP csd_try
+csd_matched:
+    ; 既存文字列発見: pool head を「新規 string が始まる前」に巻き戻し、
+    ; CMP_TOK_PTR を candidate (既存位置) に書き換える。
+    LDA CMP_TOK_PTR
+    STA CMP_STRPOOL_HEAD
+    LDA CMP_TOK_PTR+1
+    STA CMP_STRPOOL_HEAD+1
+    LDA TMP0
+    STA CMP_TOK_PTR
+    LDA TMP0+1
+    STA CMP_TOK_PTR+1
+csd_no_match:
     RTS
 
 ; cln_str_pool_put: A を *CMP_STRPOOL_HEAD++ に書く。overflow で cmp_error。
@@ -4281,6 +4356,63 @@ cmp_emit_incdec_tmp:
 ; literal emitters
 ; =============================================================================
 cmp_emit_zval_string:
+    ; --- dedup 検索: 同じ offset (TMP0) + length (CMP_TOK_LEN) の IS_STRING zval が
+    ; 既に lit_stage にあれば再利用 (TMP1 = idx で返す)
+    LDA #<CMP_LIT_STAGE
+    STA TMP1
+    LDA #>CMP_LIT_STAGE
+    STA TMP1+1
+    LDA #0
+    STA TMP2                         ; TMP2 = 走査中の idx (8-bit、最大 256 zvals 想定)
+cezvs_search:
+    LDA TMP2
+    CMP CMP_LIT_COUNT
+    BNE cezvs_check
+    LDA CMP_LIT_COUNT+1
+    BEQ cezvs_search_done            ; idx == count、見つからず
+cezvs_check:
+    LDY #8
+    LDA (TMP1), Y
+    CMP #TYPE_STRING
+    BNE cezvs_skip
+    LDY #0
+    LDA (TMP1), Y
+    CMP TMP0
+    BNE cezvs_skip
+    INY
+    LDA (TMP1), Y
+    CMP TMP0+1
+    BNE cezvs_skip
+    INY
+    LDA (TMP1), Y
+    CMP CMP_TOK_LEN
+    BNE cezvs_skip
+    ; HIT: TMP2 が既存 idx → TMP1 に格納して RTS (cpp_str 側の慣習に合わせる)
+    LDA TMP2
+    STA TMP1
+    LDA #0
+    STA TMP1+1
+    RTS
+cezvs_skip:
+    CLC
+    LDA TMP1
+    ADC #16
+    STA TMP1
+    BCC :+
+    INC TMP1+1
+:
+    INC TMP2
+    JMP cezvs_search
+cezvs_search_done:
+    ; bounds check: CMP_LIT_HEAD + 16 が STR_POOL_BASE を超えるなら overflow
+    SEC
+    LDA CMP_LIT_HEAD
+    SBC #<STR_POOL_BASE
+    LDA CMP_LIT_HEAD+1
+    SBC #>STR_POOL_BASE
+    BCC :+
+    JMP cmp_error
+:
     LDA CMP_LIT_COUNT
     STA TMP1
     LDA CMP_LIT_COUNT+1
