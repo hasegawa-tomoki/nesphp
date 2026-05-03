@@ -124,6 +124,21 @@ DMC_FREQ     = $4010
     STA addr
 .endmacro
 
+; --- PRG-RAM bank 切替マクロ (SXROM) ---
+; $A000 reg の bit 2-3 = PRG-RAM bank (CHR-RAM 環境では bit 0-1 は no-op)。
+; bank 1 の値 = %00000100 (bit 2 set)、bank 0 の値 = %00000000。
+; ARR_POOL を触る handler が入口で BANK1、出口で BANK0 を呼ぶ。
+; A レジスタを clobber する。両マクロは ~30 cycles (LDA + 5 STA + 4 LSR)。
+.macro PRG_RAM_BANK1
+    LDA #%00000100
+    MMC1_WRITE $A000
+.endmacro
+
+.macro PRG_RAM_BANK0
+    LDA #0
+    MMC1_WRITE $A000
+.endmacro
+
 ; --- op_array 配置 ---
 ; OPS_BASE は VM が実行時に読み出す op_array の先頭アドレス = PRG-RAM 先頭。
 ; reset で compile_and_emit が PHP ソースをコンパイルしてここに emit する。
@@ -154,13 +169,18 @@ CMP_LIT_STAGE    = $7D00
 STR_POOL_BASE    = $7F80
 STR_POOL_END     = $8000
 
-; Array runtime プール: コンパイル中は CMP_LIT_STAGE ($7C80-$7F7F) に zval 一時領域
-; として使われるが、cmp_finalize の memcpy 後は未使用。runtime phase でこの 4KB を
-; 配列ヘッダ + 要素ストレージに転用する。各配列は header 4B (count, capacity) +
-; 要素 (capacity × 16B zval)。ARR_POOL_HEAD は main_loop 前に ARR_POOL_BASE に
-; リセットされ、追記型で成長、ARR_POOL_END に達したら err_screen。
-ARR_POOL_BASE    = $7000
-ARR_POOL_END     = $7F80
+; Array runtime プール: PRG-RAM bank 1 ($6000-$7FFF when bank 1 mapped) を専有。
+; 全 8KB が ARR_POOL に使える (旧 720B → 11x 拡大、tetris 等でメモリ圧改善)。
+; 各配列は header 4B (count, capacity) + 要素 (capacity × 16B zval)。
+; ARR_POOL_HEAD は init_array_pool で ARR_POOL_BASE にセットされ、追記型で成長、
+; ARR_POOL_END に達したら err_screen。
+;
+; bank 1 は ARR_POOL 専用。dispatch loop は bank 0 (op_array) を読むため、
+; ARR_POOL を触る handler だけが入口で bank 1 へ切替、出口で bank 0 へ復帰する。
+; 切替は MMC1_WRITE $A000 (bit 2-3 = PRG-RAM bank、CHR-RAM 環境では bit 0-1
+; は no-op)。bank 1 の値 = %00000100、bank 0 の値 = 0。
+ARR_POOL_BASE    = $6000
+ARR_POOL_END     = $8000
 
 ; CV シンボル表: WRAM の $0700 以降。1 エントリ 4B ([len, name_ptr_lo, name_ptr_hi, pad])
 ; 最大 64 CV スロット (= $0700-$07FF 全域、256B 使用)。コンパイル完了後は USER_RAM
@@ -533,36 +553,13 @@ chr_copy_inner:
     STA PPUADDR
 
     ; runtime array pool 初期化:
-    ; ARR_POOL_HEAD = OPS_BASE + HDR_LITERALS_OFF + HDR_NUM_LITERALS * 16
-    ;               = literals 末尾の直後
-    ; literal pool が op_array の真後ろに置かれているので、配列プールはさらに
-    ; その後ろから開始する (op_array が大きいケースで $7000 を超えても安全)。
-    LDA HDR_NUM_LITERALS
-    STA TMP0
-    LDA HDR_NUM_LITERALS+1
-    STA TMP0+1
-    ASL TMP0
-    ROL TMP0+1
-    ASL TMP0
-    ROL TMP0+1
-    ASL TMP0
-    ROL TMP0+1
-    ASL TMP0
-    ROL TMP0+1                  ; TMP0 = num_literals * 16
-    CLC
-    LDA TMP0
-    ADC HDR_LITERALS_OFF
-    STA TMP0
-    LDA TMP0+1
-    ADC HDR_LITERALS_OFF+1
-    STA TMP0+1                  ; TMP0 = literals_off + num_lits*16 (= relative end)
-    CLC
-    LDA TMP0
-    ADC #<OPS_BASE
+    ;   ARR_POOL_HEAD = ARR_POOL_BASE (= $6000、bank 1 の先頭)
+    ; bank 1 全 8KB を配列プールに使う。bank 0 (op_array) と時間的に共存するため、
+    ; ARR_POOL を触る handler が動的に bank 切替する (dispatch loop は bank 0)。
+    LDA #<ARR_POOL_BASE
     STA ARR_POOL_HEAD
-    LDA TMP0+1
-    ADC #>OPS_BASE
-    STA ARR_POOL_HEAD+1         ; ARR_POOL_HEAD = OPS_BASE + 上記
+    LDA #>ARR_POOL_BASE
+    STA ARR_POOL_HEAD+1
 
     JMP main_loop
 
@@ -3843,7 +3840,7 @@ epn_wait:
 ; 内 ptr を返す。MVP: cap < 16 を想定。
 handle_zend_init_array:
     LDY #0
-    LDA (VM_PC), Y             ; op1 lo = cap
+    LDA (VM_PC), Y             ; op1 lo = cap (bank 0、op_array 読出)
     STA TMP0
     ; needed = 4 + cap*16
     LDA TMP0
@@ -3865,7 +3862,7 @@ handle_zend_init_array:
     CLC
     ADC TMP1+1
     STA TMP1+1
-    ; 終端判定: new_head = head + needed
+    ; 終端判定: new_head = head + needed (ZP 演算、bank 不問)
     CLC
     LDA ARR_POOL_HEAD
     ADC TMP1
@@ -3893,7 +3890,9 @@ ia_have_space:
     STA RESULT_VAL+2
     LDA #0
     STA RESULT_VAL+3
-    ; header: count=0, cap=cap
+
+    ; --- bank 1 へ切替: header を ARR_POOL に書く ---
+    PRG_RAM_BANK1
     LDY #0
     LDA #0
     STA (ARR_POOL_HEAD), Y
@@ -3905,7 +3904,10 @@ ia_have_space:
     INY
     LDA #0
     STA (ARR_POOL_HEAD), Y
-    ; advance pool head
+    PRG_RAM_BANK0
+    ; --- bank 0 復帰 ---
+
+    ; advance pool head (ZP 操作、bank 不問)
     LDA TMP2
     STA ARR_POOL_HEAD
     LDA TMP2+1
@@ -3916,12 +3918,16 @@ ia_have_space:
 ; handle_zend_add_array_element: op1 = array、op2 = element。
 ; array->count 番目に element の 16B zval を書き込み、count++。
 handle_zend_add_array_element:
-    JSR resolve_op1
-    JSR resolve_op2
+    JSR resolve_op1            ; bank 0: array zval を OP1_VAL に展開
+    JSR resolve_op2            ; bank 0: element zval を OP2_VAL に展開
     LDA OP1_VAL+1
     STA TMP0
     LDA OP1_VAL+2
-    STA TMP0+1
+    STA TMP0+1                 ; TMP0 = array ptr (bank 1 view address)
+
+    ; --- bank 1 へ切替: ARR_POOL の count 読み + 16B zval 書き + count++ ---
+    PRG_RAM_BANK1
+
     ; count を 16-bit で読む (count_lo, count_hi)
     LDY #0
     LDA (TMP0), Y
@@ -3991,19 +3997,21 @@ aae_zero2:
     ADC #0
     STA (TMP0), Y
 aae_done:
+    PRG_RAM_BANK0
+    ; --- bank 0 復帰 ---
     JSR write_result
     JMP advance
 
 ; handle_zend_fetch_dim_r: op1 = array、op2 = index (IS_LONG)。
 ; array[index] の 16B zval を RESULT (4B tagged) に展開。
 handle_zend_fetch_dim_r:
-    JSR resolve_op1
-    JSR resolve_op2
+    JSR resolve_op1            ; bank 0: array zval
+    JSR resolve_op2            ; bank 0: index zval
     LDA OP1_VAL+1
     STA TMP0
     LDA OP1_VAL+2
     STA TMP0+1
-    ; index*16 を 16-bit で計算 (TMP2 = index*16)
+    ; index*16 を 16-bit で計算 (TMP2 = index*16、ZP のみ、bank 不問)
     LDA OP2_VAL+1
     STA TMP2                   ; index_lo
     LDA OP2_VAL+2
@@ -4031,6 +4039,9 @@ fdr_mul16:
     LDA TMP1+1
     ADC TMP2+1
     STA TMP1+1
+
+    ; --- bank 1 へ切替: ARR_POOL から zval 読出 ---
+    PRG_RAM_BANK1
     ; zval[0..2] → RESULT_VAL+1..+3
     LDY #0
     LDA (TMP1), Y
@@ -4044,24 +4055,33 @@ fdr_mul16:
     LDY #8
     LDA (TMP1), Y
     STA RESULT_VAL
+    PRG_RAM_BANK0
+    ; --- bank 0 復帰 ---
+
     JSR write_result
     JMP advance
 
 ; handle_zend_count: op1 = array、RESULT = IS_LONG(count)。
 handle_zend_count:
-    JSR resolve_op1
+    JSR resolve_op1            ; bank 0: array zval
     LDA OP1_VAL+1
     STA TMP0
     LDA OP1_VAL+2
     STA TMP0+1
     LDA #TYPE_LONG
     STA RESULT_VAL
+
+    ; --- bank 1 へ切替: ARR_POOL から count を読出 ---
+    PRG_RAM_BANK1
     LDY #0
     LDA (TMP0), Y
     STA RESULT_VAL+1
     INY
     LDA (TMP0), Y
     STA RESULT_VAL+2
+    PRG_RAM_BANK0
+    ; --- bank 0 復帰 ---
+
     LDA #0
     STA RESULT_VAL+3
     JSR write_result
@@ -4090,12 +4110,18 @@ handle_zend_assign_dim:
     STA TMP0
     PLA
     STA TMP0+1
+
+    ; --- bank 1 へ切替: ARR_POOL から count 読出 ---
+    PRG_RAM_BANK1
     LDY #0
     LDA (TMP0), Y
     STA TMP1                       ; TMP1 = count_lo
     INY
     LDA (TMP0), Y
     STA TMP1+1                     ; TMP1+1 = count_hi
+    PRG_RAM_BANK0
+    ; --- bank 0 復帰 ---
+
     LDA TMP0+1
     PHA
     LDA TMP0
@@ -4150,7 +4176,11 @@ asd_mul16:
     BCC :+
     INC VM_PC+1
 :
-    JSR resolve_op1                ; OP1_VAL = value (TMP0 clobber される)
+    JSR resolve_op1                ; bank 0: OP1_VAL = value (TMP0 clobber される)
+
+    ; --- bank 1 へ切替: 16B zval 書込 + count 更新 (連続して bank 1 で実行) ---
+    PRG_RAM_BANK1
+
     ; 16B zval を (TMP2) に書込
     LDY #0
     LDA OP1_VAL+1
@@ -4177,7 +4207,7 @@ asd_zero2:
     INY
     CPY #16
     BNE asd_zero2
-    ; array ptr を stack から復元して count 更新
+    ; array ptr を stack から復元して count 更新 (PLA/STA は bank 不問)
     PLA
     STA TMP0
     PLA
@@ -4186,13 +4216,15 @@ asd_zero2:
     CLC
     ADC #1                         ; A = slot + 1
     LDY #0
-    CMP (TMP0), Y
+    CMP (TMP0), Y                  ; bank 1: count_lo を読む
     BCC asd_no_update
-    STA (TMP0), Y                  ; count_lo = slot+1
+    STA (TMP0), Y                  ; count_lo = slot+1 (bank 1 書込)
     LDA #0
     INY
-    STA (TMP0), Y                  ; count_hi = 0
+    STA (TMP0), Y                  ; count_hi = 0 (bank 1 書込)
 asd_no_update:
+    PRG_RAM_BANK0
+    ; --- bank 0 復帰 ---
     JMP advance
 
 irq:
