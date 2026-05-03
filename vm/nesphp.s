@@ -287,17 +287,18 @@ nmi_queue_write: .res 1
 nmi_queue_read:  .res 1
 
 ; =============================================================================
-; iNES ヘッダ  (MMC1 / mapper 1、SXROM 移行中: PRG-ROM 64KB / CHR-ROM 32KB / PRG-RAM 8KB)
+; iNES ヘッダ  (MMC1 / mapper 1、SXROM 移行中: PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 8KB)
 ;
-; PRG-ROM 64KB (4 × 16KB bank): bank 0 = PHPSRC, bank 1-2 = 予約, bank 3 = CODE 固定
-; CHR-ROM 32KB (8 × 4KB bank、SXROM 化時に CHR-RAM 8KB へ移行予定)
+; PRG-ROM 64KB (4 × 16KB bank): bank 0 = PHPSRC, bank 1 = CHRDATA, bank 2 = 予約,
+;                                bank 3 = CODE 固定
+; CHR-RAM 8KB (起動時に PRG_BANK1 から PPU $0000-$1FFF へ 8KB 転送)
 ; PRG-RAM 8KB (SXROM 化時に 32KB へ移行予定)
 ; MMC1 により: PRG 16KB 切替 + CHR 4KB × 2 独立切替 + 8KB WRAM
 ; =============================================================================
 .segment "HEADER"
     .byte "NES", $1A
     .byte 4                ; PRG-ROM = 4 * 16KB = 64KB
-    .byte 4                ; CHR-ROM = 4 * 8KB = 32KB (MMC1 4KB mode で 8 bank)
+    .byte 0                ; CHR-ROM = 0 → CHR-RAM 8KB を申告
     .byte %00010000        ; Flags 6: mapper LSB = 1 (上位 nibble), mirroring = horizontal(0)
     .byte %00000000        ; Flags 7: mapper MSB = 0
     .byte 1                ; PRG-RAM = 1 * 8KB (WRAM $6000-$7FFF)
@@ -434,6 +435,35 @@ clear_nt_inner:
     BNE clear_nt_inner
     DEX
     BNE clear_nt_outer
+
+    ; --- CHR-RAM 初期化 (8KB 転送 PRG_BANK1 → PPU $0000-$1FFF) ---
+    ; PPU は強制 blanking 中 (PPUMASK=0)、PPUDATA 経由でいつでも書込可。
+    ; PRG bank を 1 に切替して $8000-$9FFF の CHRDATA を 8KB 連続読み出し、
+    ; PPUDATA ($2007) に流し込む。auto-increment が +1 で動く前提
+    ; (PPUCTRL bit 2 = 0、初期化済み)。約 50-65 ms かかる (一度きり)。
+    LDA #1
+    MMC1_WRITE $E000           ; PRG bank 1 を $8000-$BFFF にマップ
+    BIT PPUSTATUS
+    LDA #$00
+    STA PPUADDR                ; PPU addr hi
+    STA PPUADDR                ; PPU addr lo → $0000
+    LDA #$00
+    STA TMP0                   ; src lo
+    LDA #$80
+    STA TMP0+1                 ; src = $8000 (= PRG bank 1 視点の先頭)
+    LDX #$20                   ; 32 ページ × 256 byte = 8192 byte
+    LDY #0
+chr_copy_outer:
+chr_copy_inner:
+    LDA (TMP0), Y
+    STA PPUDATA
+    INY
+    BNE chr_copy_inner
+    INC TMP0+1
+    DEX
+    BNE chr_copy_outer
+    LDA #0
+    MMC1_WRITE $E000           ; PRG bank 0 (PHPSRC) に戻して compile_and_emit へ
 
     ; PRG-RAM ($6000-$7FFF) に op_array を配置する。
     ; Phase A (プラミング検証): ROM の ops.bin をそのまま PRG-RAM へ memcpy する
@@ -4083,7 +4113,15 @@ palette_data:
     .word irq
 
 ; =============================================================================
-; CHARS
+; CHRDATA — CHR-RAM 化に伴い PRG_BANK1 経由で焼く CHR タイル data
+;
+; 起動時に reset で 8KB を PRG_BANK1 ($8000-$9FFF) → PPU $0000-$1FFF にバルク
+; 転送する。font.chr の先頭 8KB のみ使用 (= 旧 CHR-ROM bank 0 + bank 1):
+;   bytes 0-4095:    BG default = 通常 ASCII フォント (PPU $0000)
+;   bytes 4096-8191: sprite default = インバースフォント (PPU $1000)
+;
+; 残り 8KB ($A000-$BFFF when bank 1 active) は (a-3) で `nes_chr_bg/spr` の
+; bulk transfer 用 CHR セットを置く予定。
 ; =============================================================================
-.segment "CHARS"
-    .incbin "chr/font.chr"
+.segment "CHRDATA"
+    .incbin "chr/font.chr", 0, $2000  ; 先頭 8KB のみ (initial CHR-RAM image)
