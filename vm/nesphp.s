@@ -287,14 +287,16 @@ nmi_queue_write: .res 1
 nmi_queue_read:  .res 1
 
 ; =============================================================================
-; iNES ヘッダ  (MMC1 / mapper 1, SNROM 構成)
+; iNES ヘッダ  (MMC1 / mapper 1、SXROM 移行中: PRG-ROM 64KB / CHR-ROM 32KB / PRG-RAM 8KB)
 ;
-; PRG-ROM 32KB (2 × 16KB), CHR-ROM 32KB (8 × 4KB), PRG-RAM 8KB (WRAM $6000)
+; PRG-ROM 64KB (4 × 16KB bank): bank 0 = PHPSRC, bank 1-2 = 予約, bank 3 = CODE 固定
+; CHR-ROM 32KB (8 × 4KB bank、SXROM 化時に CHR-RAM 8KB へ移行予定)
+; PRG-RAM 8KB (SXROM 化時に 32KB へ移行予定)
 ; MMC1 により: PRG 16KB 切替 + CHR 4KB × 2 独立切替 + 8KB WRAM
 ; =============================================================================
 .segment "HEADER"
     .byte "NES", $1A
-    .byte 2                ; PRG-ROM = 2 * 16KB = 32KB
+    .byte 4                ; PRG-ROM = 4 * 16KB = 64KB
     .byte 4                ; CHR-ROM = 4 * 8KB = 32KB (MMC1 4KB mode で 8 bank)
     .byte %00010000        ; Flags 6: mapper LSB = 1 (上位 nibble), mirroring = horizontal(0)
     .byte %00000000        ; Flags 7: mapper MSB = 0
