@@ -134,8 +134,20 @@ while (true) {
             if ($line_clears > 0) {
                 $score = $score + $line_clears * 100;
                 nes_putint(17, 7, $score);
-                // 注: 全面再描画は省略 (PRG-RAM 8KB 制約)。消えた行はゴーストとして
-                // 残るが、grid 状態は正しいので新しいピースが上から順に上書きしていく。
+                // 全面再描画 (Phase 5c): lineclear_test.php と同じ単一ループ方式。
+                // " " で先にクリア → 必要なセルだけ "\x05" で上書き (else 不要)。
+                $idx = 0;
+                while ($idx < 200) {
+                    $r = $idx / 10;
+                    $c = $idx - $r * 10;
+                    $sx = $c + 4;
+                    $sy = $r + 5;
+                    nes_put($sx, $sy, " ");
+                    if (($grid[$r] & (1 << $c)) !== 0) {
+                        nes_put($sx, $sy, "\x05");
+                    }
+                    $idx = $idx + 1;
+                }
             }
 
             // 次ピース
@@ -146,8 +158,9 @@ while (true) {
             $px = 6;
             $py = 5;
 
-            // 簡易 game over: spawn 行が既占有 → 静止
+            // 簡易 game over: spawn 行が既占有 → メッセージ表示 + 静止
             if ($grid[0] !== 0) {
+                nes_puts(5, 14, "GAME OVER");
                 while (true) { nes_vsync(); }
             }
 
