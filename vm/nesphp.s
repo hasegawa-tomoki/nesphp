@@ -181,15 +181,22 @@ PHP_SRC_BODY = $8002
 
 ; 一時的な literal バッファ (コンパイル中のみ使用、後に OPS_BASE + literals_off へ memcpy)
 ; $7D00 に置くと op_array は $6010-$7CFF (≒ 7408 byte ≒ 308 ops) まで使える。
-; literal dedux (cmp_emit_zval_long_value) で同値を再利用するので、staging
-; capacity は ($7F80-$7D00)/16 = 40 zval で典型的なゲームには足りる。
-CMP_LIT_STAGE    = $7D00
+; STR_POOL を bank 2 に移したので末尾は $8000 まで使える: ($8000-$7D00)/16 = 48 zval。
+; literal dedux (cmp_emit_zval_long_value, cmp_emit_zval_string) で同値を再利用する。
+CMP_LIT_STAGE     = $7D00
+CMP_LIT_STAGE_END = $8000          ; staging が膨らんで $8000 に達したら overflow
 
-; 文字列リテラル用プール: cln_string が `\xHH` エスケープを解釈して decoded bytes を
-; ここへ書き、zval は OPS_BASE 相対でこの領域を指す。staging area $7C80-$7F7F
-; (zval 48 entries 分) とは衝突しない $7F80-$7FFF (128B) を使う。
-STR_POOL_BASE    = $7F80
-STR_POOL_END     = $8000
+; 文字列リテラル用プール: PRG-RAM bank 2 専有 (8KB)。cln_string が `\xHH`
+; エスケープを解釈して decoded bytes をここへ書き、IS_STRING zval は
+; STR_POOL 内 offset (= OPS_BASE 相対 = 0..$1FFF) を持つ。
+;
+; bank 2 は STR_POOL 専用。bank 切替は文字列を読む handler (nes_put/puts/
+; pokestr/pokestr_ext/echo + 文字列等価比較) と compile 中の cln_string で
+; ローカルに発生し、出口で bank 0 に戻す。
+;
+; 旧 $7F80-$7FFF (128B) はこの bank 移行で解放、CMP_LIT_STAGE 拡張余地に。
+STR_POOL_BASE    = $6000          ; bank 2 が見えてるときの先頭
+STR_POOL_END     = $8000          ; bank 2 末尾 (= 8KB)
 
 ; Array runtime プール: PRG-RAM bank 1 ($6000-$7FFF when bank 1 mapped) を専有。
 ; 全 8KB が ARR_POOL に使える (旧 720B → 11x 拡大、tetris 等でメモリ圧改善)。
@@ -351,9 +358,12 @@ nmi_queue_read:  .res 1
     .byte 4                ; PRG-ROM = 4 * 16KB = 64KB
     .byte 0                ; CHR-ROM = 0 → CHR-RAM 8KB を申告
     .byte %00010000        ; Flags 6: mapper LSB = 1 (上位 nibble), mirroring = horizontal(0)
-    .byte %00000000        ; Flags 7: mapper MSB = 0
-    .byte 4                ; PRG-RAM = 4 * 8KB = 32KB (SXROM)
-    .byte 0, 0, 0, 0, 0, 0, 0
+    .byte %00001000        ; Flags 7: mapper MSB = 0、bit 2-3 = 10 (NES 2.0 marker)
+    .byte 0                ; mapper MSB nibble + submapper = 0
+    .byte 0                ; PRG-ROM/CHR-ROM size MSB
+    .byte $09              ; PRG-RAM = 64 << 9 = 32 KB volatile, no NV-RAM
+    .byte $07              ; CHR-RAM = 64 << 7 = 8 KB volatile (NES 2.0 byte 11)
+    .byte 0, 0, 0, 0       ; CPU/PPU timing + padding
 
 ; =============================================================================
 ; PHPSRC セグメント: pack_src.php が出した src.bin
@@ -1241,10 +1251,12 @@ handle_zend_echo:
 
 echo_string:
     ; 新方式: OP1_VAL+1/+2 = val[] 先頭の OPS_BASE 相対 offset、OP1_VAL+3 = length
+    ; STR_POOL は bank 2、ppu_write_bytes が (TMP1), Y で読むので bank 2 を
+    ; マップ → 復帰の流れにする。
     CLC
     LDA OP1_VAL+1
     ADC #<OPS_BASE
-    STA TMP1                ; val[] の絶対 CPU アドレス
+    STA TMP1                ; val[] の絶対 CPU アドレス (bank 2 view)
     LDA OP1_VAL+2
     ADC #>OPS_BASE
     STA TMP1+1
@@ -1274,7 +1286,12 @@ echo_write:
     STA TMP0
     LDA PPU_CURSOR+1
     STA TMP0+1
+    ; STR_POOL (bank 2) から読んで PPU に書く。echo_long 経由でも呼ばれるが
+    ; その場合 src は INT_PRINT_BUFFER ($0600+ = 内蔵 RAM、bank 不問)。
+    ; bank 切替を毎回しても両ケース安全。
+    PRG_RAM_BANK2
     JSR ppu_write_bytes
+    PRG_RAM_BANK0
     ; PPU_CURSOR += TMP2
     CLC
     LDA PPU_CURSOR
@@ -2164,17 +2181,23 @@ vec_string:
     LDA OP2_VAL+2
     ADC #>OPS_BASE
     STA TMP1+1
+    ; STR_POOL 内 byte 比較は bank 2 で行う
+    PRG_RAM_BANK2
     LDY #0
 vec_loop:
     LDA (TMP0), Y
     CMP (TMP1), Y
-    BNE vec_false
+    BNE vec_false_b2
     INY
     DEX
     BNE vec_loop
 vec_eq:
+    PRG_RAM_BANK0
     LDA #1
     RTS
+vec_false_b2:
+    PRG_RAM_BANK0
+    JMP vec_false
 
 ; -----------------------------------------------------------------------------
 ; is_truthy: OP1_VAL の真偽を A に返す (truthy=1 / falsy=0)
@@ -2537,7 +2560,7 @@ handle_nesphp_nes_put:
     JMP handle_unimpl
 
 np_from_string:
-    ; 新方式: value bytes 0-1 = val[] への OPS_BASE 相対 offset
+    ; 新方式: value bytes 0-1 = val[] への OPS_BASE 相対 offset (bank 2 内)
     ; 1 文字目を直接読み INT_PRINT_BUFFER[0] に保存 (nes_put は 1 文字固定)
     LDY #0
     LDA (TMP0), Y
@@ -2553,8 +2576,10 @@ np_from_string:
     ADC #>OPS_BASE
     STA TMP1+1
     LDY #0
+    PRG_RAM_BANK2          ; STR_POOL から 1 byte 読出
     LDA (TMP1), Y
-    STA INT_PRINT_BUFFER
+    STA INT_PRINT_BUFFER   ; ★ BANK0 復帰前に内蔵 RAM へ保存 (BANK0 macro が A clobber)
+    PRG_RAM_BANK0
     JMP np_addr
 
 np_from_long:
@@ -2685,9 +2710,11 @@ handle_nesphp_nes_puts:
     ADC #$20
     STA TMP0+1
 
-    ; TMP0=addr, TMP1=src ptr, TMP2=len で ppu_write_bytes に委譲
+    ; TMP0=addr, TMP1=src ptr (bank 2 STR_POOL), TMP2=len で ppu_write_bytes に委譲
     ; (forced_blanking は直書き、sprite_mode は NMI キューに積む)
+    PRG_RAM_BANK2
     JSR ppu_write_bytes
+    PRG_RAM_BANK0
     JMP advance
 
 nps_type_err:
@@ -3621,6 +3648,9 @@ handle_nesphp_nes_pokestr:
     LDA OP1_VAL+1
     TAX
     LDY #0
+    ; STR_POOL は bank 2、USER_RAM ($0700+) は内蔵 RAM (bank 不問)。
+    ; bank 2 をマップして loop、終了で bank 0 復帰。
+    PRG_RAM_BANK2
 nps_loop:
     CPY TMP2
     BEQ nps_done
@@ -3631,6 +3661,7 @@ nps_loop:
     INY
     BNE nps_loop
 nps_done:
+    PRG_RAM_BANK0
     JMP advance
 
 ; =============================================================================
@@ -3729,10 +3760,10 @@ handle_nesphp_nes_poke_ext:
 ;
 ; op1 = $offset、result slot = $string (= 3 引数 intrinsic 枠と同じ慣習)
 ;
-; ソース ($string) は STR_POOL (PRG-RAM bank 0)、宛先は bank 3。両方を同時に
+; ソース ($string) は STR_POOL (PRG-RAM bank 2)、宛先は bank 3。両方を同時に
 ; マップできないので、内蔵 RAM の text buffer ($0600-$06FF, 256B) を中継
 ; バッファとして使う 2-stage コピー:
-;   stage 1 (bank 0): STR_POOL → $0600 (string max 255 bytes、1 chunk で足りる)
+;   stage 1 (bank 2): STR_POOL → $0600 (string max 255 bytes、1 chunk で足りる)
 ;   stage 2 (bank 3): $0600 → USER_RAM_EXT[$offset]
 ; =============================================================================
 handle_nesphp_nes_pokestr_ext:
@@ -3743,7 +3774,7 @@ handle_nesphp_nes_pokestr_ext:
     BEQ :+
     JMP handle_unimpl
 :
-    ; src = OPS_BASE + RESULT_VAL+1/+2 (bank 0 PRG-RAM、STR_POOL 内)
+    ; src = OPS_BASE + RESULT_VAL+1/+2 (bank 2 PRG-RAM、STR_POOL 内)
     CLC
     LDA RESULT_VAL+1
     ADC #<OPS_BASE
@@ -3755,7 +3786,8 @@ handle_nesphp_nes_pokestr_ext:
     LDA RESULT_VAL+3
     STA TMP2
 
-    ; --- stage 1 (bank 0): STR_POOL → 内蔵 RAM 中継 ($0600+) ---
+    ; --- stage 1 (bank 2): STR_POOL → 内蔵 RAM 中継 ($0600+) ---
+    PRG_RAM_BANK2
     LDY #0
 nps_ext_to_ram:
     CPY TMP2

@@ -2606,6 +2606,10 @@ cln_cv_done:
 ;     それ以外の `\` に続く文字は compile error
 ;   - pool overflow ($8000 以上) も compile error
 cln_string:
+    ; STR_POOL は PRG-RAM bank 2。書込・dedup の間 bank 2 をマップし、終了で
+    ; bank 0 に戻す。cln_string 内で読む source (CMP_SRC_PTR) は PRG-ROM
+    ; ($8000+) なので bank 切替の影響なし。
+    PRG_RAM_BANK2
     JSR cmp_advance1                ; consume opening "
     ; TOK_PTR = 現在の pool head (この文字列の先頭)
     LDA CMP_STRPOOL_HEAD
@@ -2683,6 +2687,7 @@ cln_str_end:
     LDA #TK_STRING
     STA CMP_TOK_KIND
     JSR cln_str_dedup
+    PRG_RAM_BANK0                   ; cln_string 入口で BANK2 した分を復帰
     RTS
 
 ; cln_str_dedup: 直前に書き込んだ文字列 (CMP_TOK_PTR, CMP_TOK_LEN) と一致する
@@ -4355,6 +4360,9 @@ cmp_emit_incdec_tmp:
 cmp_emit_zval_string:
     ; --- dedup 検索: 同じ offset (TMP0) + length (CMP_TOK_LEN) の IS_STRING zval が
     ; 既に lit_stage にあれば再利用 (TMP1 = idx で返す)
+    ; 注: dedup は CMP_LIT_STAGE 領域 (bank 0) のみ走査する。STR_POOL 内容自体は
+    ; cln_str_dedup が cln_string 内で別途バイト dedup しているので、ここでは
+    ; offset/length 一致だけ見れば十分。
     LDA #<CMP_LIT_STAGE
     STA TMP1
     LDA #>CMP_LIT_STAGE
@@ -4401,12 +4409,12 @@ cezvs_skip:
     INC TMP2
     JMP cezvs_search
 cezvs_search_done:
-    ; bounds check: CMP_LIT_HEAD + 16 が STR_POOL_BASE を超えるなら overflow
+    ; bounds check: CMP_LIT_HEAD が CMP_LIT_STAGE_END に到達したら overflow
     SEC
     LDA CMP_LIT_HEAD
-    SBC #<STR_POOL_BASE
+    SBC #<CMP_LIT_STAGE_END
     LDA CMP_LIT_HEAD+1
-    SBC #>STR_POOL_BASE
+    SBC #>CMP_LIT_STAGE_END
     BCC :+
     JMP cmp_error
 :
