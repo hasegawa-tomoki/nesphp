@@ -298,6 +298,18 @@ foreach ([
     $customTiles[$tile_idx] = array_merge($bp0, $bp1);
 }
 
+// 0x0C: レンガ壁用タイル (palette 0 default colors を使用)
+//   color 2 ($10 medium gray) = ブロック本体
+//   color 3 ($00 dark gray)   = モルタル (継ぎ目)
+//   2 段のレンガ (上段 aligned + 下段 offset) を 1 タイルに収め、繰返し配置で
+//   水平/垂直に seamless にタイル化される。
+$customTiles[0x0C] = [
+    // bp0 (color 2 / 3 を区別する LSB)
+    0xFF, 0x11, 0x11, 0x11, 0xFF, 0x44, 0x44, 0x44,
+    // bp1 (color 2 / 3 とも MSB=1)
+    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+];
+
 function build_bank(array $font5x7, array $customTiles): string
 {
     $bank = str_repeat("\x00", 8192);

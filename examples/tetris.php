@@ -11,12 +11,27 @@
 // line clear 時の全面再描画はこの per-cell タイル情報を使う。
 
 nes_puts(4, 1, "TETRIS");
-nes_puts(3, 4,  "+----------+");
-nes_puts(3, 25, "+----------+");
-for ($y = 5; $y <= 24; $y++) {
-    nes_put(3, $y, "|");
-    nes_put(14, $y, "|");
+
+// レンガ壁: tile 0x0C (palette 0 default colors の gray + dark gray) で
+// play field を囲む。play field cell は (col 4-13, row 5-24) で attribute
+// block 2-6 / 2-12 = pal 1。壁を pal 1 領域と attribute を共有しないよう、
+// 上下を row 3 / row 26 に出して、attribute は pal 0 (default) に任せる。
+//   * 上枠: row 3, col 3-14 (12 cells)
+//   * 下枠: row 26, col 3-14
+//   * 左右: col 3 / col 14, row 4-25 (22 cells × 2)
+$x = 3;
+while ($x <= 14) {
+    nes_put($x, 3, 0x0C);
+    nes_put($x, 26, 0x0C);
+    $x = $x + 1;
 }
+$y = 4;
+while ($y <= 25) {
+    nes_put(3, $y, 0x0C);
+    nes_put(14, $y, 0x0C);
+    $y = $y + 1;
+}
+
 nes_puts(17, 5, "SCORE");
 nes_puts(17, 7, "    0");
 
