@@ -596,6 +596,29 @@ chr_copy_inner:
     JMP main_loop
 
 ; -----------------------------------------------------------------------------
+; clear_8kb_window: 現在マップされている PRG-RAM bank の $6000-$7FFF (8KB) を
+; 0 で埋める。呼び出し前に PRG_RAM_BANK0/1/2/3 で対象 bank をマップすること。
+; A/X/Y/TMP0 を破壊。約 60K cycles ≒ 33 ms。
+; -----------------------------------------------------------------------------
+clear_8kb_window:
+    LDA #<$6000
+    STA TMP0
+    LDA #>$6000
+    STA TMP0+1
+clr8k_outer:
+    LDY #0
+    LDA #0
+clr8k_inner:
+    STA (TMP0), Y
+    INY
+    BNE clr8k_inner
+    INC TMP0+1
+    LDA TMP0+1
+    CMP #$80                ; $8000 に到達したら終わり
+    BNE clr8k_outer
+    RTS
+
+; -----------------------------------------------------------------------------
 ; メインループ: fetch → dispatch
 ; -----------------------------------------------------------------------------
 main_loop:
@@ -3012,6 +3035,13 @@ handle_nesphp_nes_bg_color:
     LDA #1
     STA TMP2
     JSR ppu_write_bytes
+    ; nes_palette と同じ: v レジスタが palette range に残ると実機破綻するので
+    ; nametable 0 ($2000) に戻す
+    BIT PPUSTATUS
+    LDA #$20
+    STA PPUADDR
+    LDA #$00
+    STA PPUADDR
     JMP advance
 
 bg_color_err:
@@ -3117,10 +3147,20 @@ handle_nesphp_nes_palette:
     LDA #3
     STA TMP2
     JSR ppu_write_bytes
-    JMP advance
+    JMP palette_post
 
 palette_err:
     JMP handle_unimpl
+
+palette_post:
+    ; PPU 内部 v レジスタが palette range ($3F08) に残ると実機で
+    ; rendering 開始時に挙動がおかしくなるので nametable 0 ($2000) に戻す
+    BIT PPUSTATUS
+    LDA #$20
+    STA PPUADDR
+    LDA #$00
+    STA PPUADDR
+    JMP advance
 
 ; =============================================================================
 ; NESPHP_NES_ATTR (0xF9): attribute table の 2×2 タイルブロックにパレットを設定
