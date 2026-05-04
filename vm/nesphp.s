@@ -102,6 +102,19 @@ IS_TMP_VAR      = 2
 IS_VAR          = 4
 IS_CV           = 8
 
+; --- zend_op compact layout (NESPHP は 16-bit address space に最適化、12B/op) ---
+; 元の Zend struct (24B) から lineno (4B) を削除、各 znode_op フィールドを 4B→2B
+; に圧縮。VM は下位 2B しか読まないので情報量は無損失。spec/01-rom-format.md 参照。
+ZOP_OP1         = 0    ; op1.constant / .var / .num / .jmp_offset (2B)
+ZOP_OP2         = 2    ; op2 同 (2B)
+ZOP_RESULT      = 4    ; result 同 (2B)
+ZOP_EXT         = 6    ; extended_value (2B)
+ZOP_OPCODE      = 8    ; opcode (1B、Zend 互換番号)
+ZOP_OP1_TYPE    = 9    ; op1_type (1B、IS_CONST / IS_TMP_VAR / IS_VAR / IS_CV / IS_UNUSED)
+ZOP_OP2_TYPE    = 10   ; op2_type (1B)
+ZOP_RESULT_TYPE = 11   ; result_type (1B)
+ZOP_SIZE        = 12   ; 1 op の総 byte 数
+
 ; --- zval type IDs (Zend/zend_types.h) ---
 TYPE_UNDEF      = 0
 TYPE_NULL       = 1
@@ -622,7 +635,7 @@ clr8k_inner:
 ; メインループ: fetch → dispatch
 ; -----------------------------------------------------------------------------
 main_loop:
-    LDY #20                ; zend_op.opcode オフセット
+    LDY #ZOP_OPCODE        ; zend_op.opcode オフセット
     LDA (VM_PC), Y
 
     CMP #ZEND_NOP
@@ -861,7 +874,7 @@ main_loop:
 advance:
     CLC
     LDA VM_PC
-    ADC #24
+    ADC #ZOP_SIZE
     STA VM_PC
     BCC :+
     INC VM_PC+1
@@ -881,7 +894,7 @@ advance:
 ; =============================================================================
 
 resolve_op1:
-    LDY #21                ; op1_type
+    LDY #ZOP_OP1_TYPE
     LDA (VM_PC), Y
     ; dispatch
     CMP #IS_CONST
@@ -913,26 +926,26 @@ resolve_op1:
     RTS
 
 resolve_op2:
-    LDY #22                ; op2_type
+    LDY #ZOP_OP2_TYPE
     LDA (VM_PC), Y
     CMP #IS_CONST
     BNE :+
-    LDY #4                 ; op2.constant
+    LDY #ZOP_OP2
     JMP res_const_to_op2
 :
     CMP #IS_CV
     BNE :+
-    LDY #4
+    LDY #ZOP_OP2
     JMP res_cv_to_op2
 :
     CMP #IS_TMP_VAR
     BNE :+
-    LDY #4
+    LDY #ZOP_OP2
     JMP res_tmp_to_op2
 :
     CMP #IS_VAR
     BNE :+
-    LDY #4
+    LDY #ZOP_OP2
     JMP res_tmp_to_op2
 :
     LDA #0
@@ -1117,26 +1130,26 @@ res_tmp_to_op2:
 ; $y)。result_type が IS_UNUSED の場合は 0 で埋める。
 ; =============================================================================
 resolve_result:
-    LDY #23                ; result_type
+    LDY #ZOP_RESULT_TYPE
     LDA (VM_PC), Y
     CMP #IS_CONST
     BNE :+
-    LDY #8
+    LDY #ZOP_RESULT
     JMP res_const_to_result
 :
     CMP #IS_CV
     BNE :+
-    LDY #8
+    LDY #ZOP_RESULT
     JMP res_cv_to_result
 :
     CMP #IS_TMP_VAR
     BNE :+
-    LDY #8
+    LDY #ZOP_RESULT
     JMP res_tmp_to_result
 :
     CMP #IS_VAR
     BNE :+
-    LDY #8
+    LDY #ZOP_RESULT
     JMP res_tmp_to_result
 :
     LDA #0
@@ -1209,7 +1222,7 @@ res_tmp_to_result:
 ; result writer: RESULT_VAL を result スロット (IS_TMP_VAR / IS_VAR / IS_CV) に書く
 ; =============================================================================
 write_result:
-    LDY #23                ; result_type
+    LDY #ZOP_RESULT_TYPE
     LDA (VM_PC), Y
     CMP #IS_TMP_VAR
     BEQ wr_tmp
@@ -1221,12 +1234,12 @@ write_result:
     RTS
 
 wr_tmp:
-    LDY #8
+    LDY #ZOP_RESULT
     JSR tmp_addr_y
     JMP wr_store
 
 wr_cv:
-    LDY #8
+    LDY #ZOP_RESULT
     JSR cv_addr_y
     ; fall through
 
@@ -1374,8 +1387,8 @@ halt:
 handle_zend_assign:
     JSR resolve_op2
     ; op1 の CV スロットに OP2_VAL を書く
-    LDY #21
-    LDA (VM_PC), Y         ; op1_type
+    LDY #ZOP_OP1_TYPE
+    LDA (VM_PC), Y
     CMP #IS_CV
     BEQ assign_to_cv
     JMP handle_unimpl
@@ -1845,8 +1858,8 @@ handle_zend_qm_assign:
 ; (op1_type != IS_CV なら handle_unimpl)
 ; -----------------------------------------------------------------------------
 incdec_cv_addr:
-    LDY #21
-    LDA (VM_PC), Y         ; op1_type
+    LDY #ZOP_OP1_TYPE
+    LDA (VM_PC), Y
     CMP #IS_CV
     BNE incdec_err
     LDY #0
@@ -2002,7 +2015,7 @@ handle_zend_jmpz:
     BEQ jmpz_take
     JMP advance
 jmpz_take:
-    LDY #4
+    LDY #ZOP_OP2
     LDA (VM_PC), Y
     STA TMP0
     INY
@@ -2020,7 +2033,7 @@ handle_zend_jmpnz:
     BNE jmpnz_take
     JMP advance
 jmpnz_take:
-    LDY #4
+    LDY #ZOP_OP2
     LDA (VM_PC), Y
     STA TMP0
     INY
@@ -2251,7 +2264,8 @@ is_truthy_no:
     RTS
 
 ; -----------------------------------------------------------------------------
-; jmp_compute_pc: TMP0 (op_index) から VM_PC = OPS_FIRST_OP + op_index * 24 を計算
+; jmp_compute_pc: TMP0 (op_index) から VM_PC = OPS_FIRST_OP + op_index * ZOP_SIZE
+; ZOP_SIZE=12 なので idx*12 = idx*4 + idx*8
 ; -----------------------------------------------------------------------------
 jmp_compute_pc:
     ; TMP0 を TMP2 に保存
@@ -2259,22 +2273,20 @@ jmp_compute_pc:
     STA TMP2
     LDA TMP0+1
     STA TMP2+1
-    ; TMP0 <<= 3 (= op_index * 8)
+    ; TMP0 <<= 2 (= op_index * 4)
     ASL TMP0
     ROL TMP0+1
     ASL TMP0
     ROL TMP0+1
-    ASL TMP0
-    ROL TMP0+1
-    ; TMP1 = TMP0 (= op_index * 8)
+    ; TMP1 = TMP0 (= op_index * 4)
     LDA TMP0
     STA TMP1
     LDA TMP0+1
     STA TMP1+1
-    ; TMP0 <<= 1 (= op_index * 16)
+    ; TMP0 <<= 1 (= op_index * 8)
     ASL TMP0
     ROL TMP0+1
-    ; TMP0 += TMP1 (= op_index * 24)
+    ; TMP0 += TMP1 (= op_index * 12)
     CLC
     LDA TMP0
     ADC TMP1
@@ -2561,7 +2573,7 @@ handle_nesphp_nes_put:
     JSR resolve_op2        ; OP2_VAL = y
 
     ; extended_value (offset 12) → zval アドレスを TMP0 に
-    LDY #12
+    LDY #ZOP_EXT
     LDA (VM_PC), Y
     STA TMP0
     INY
@@ -2667,7 +2679,7 @@ handle_nesphp_nes_puts:
     JSR resolve_op2        ; OP2_VAL = y
 
     ; extended_value (offset 12) = zval (16B) のバイトオフセット
-    LDY #12
+    LDY #ZOP_EXT
     LDA (VM_PC), Y
     STA TMP0
     INY
@@ -3063,15 +3075,15 @@ handle_nesphp_nes_palette:
     JSR resolve_op1        ; OP1_VAL = id
     JSR resolve_op2        ; OP2_VAL = c1
 
-    ; result (offset 8) を手動 resolve → c2
-    LDY #8
+    ; result フィールド を手動 resolve → c2
+    LDY #ZOP_RESULT
     LDA (VM_PC), Y
     STA TMP0
     INY
     LDA (VM_PC), Y
     STA TMP0+1
     ; result_type チェック
-    LDY #23                ; result_type
+    LDY #ZOP_RESULT_TYPE
     LDA (VM_PC), Y
     CMP #IS_CONST
     BNE palette_err
@@ -3095,7 +3107,7 @@ handle_nesphp_nes_palette:
     STA INT_PRINT_BUFFER+1 ; c2 を buffer[1] に
 
     ; extended_value (offset 12) → c3
-    LDY #12
+    LDY #ZOP_EXT
     LDA (VM_PC), Y
     STA TMP0
     INY
@@ -3362,7 +3374,7 @@ nss_mode_ready:
     JSR resolve_result     ; RESULT_VAL = $y
 
     ; extended_value から $tile を decode (literal 必須)
-    LDY #12
+    LDY #ZOP_EXT
     LDA (VM_PC), Y
     STA TMP0
     INY
@@ -4354,7 +4366,7 @@ handle_zend_assign_dim:
     LDA OP1_VAL+1
     PHA
     ; slot 決定: op2_type が IS_UNUSED (= 0) なら append、それ以外は index
-    LDY #22
+    LDY #ZOP_OP2_TYPE
     LDA (VM_PC), Y
     BNE asd_use_index
     ; append: slot = count (header[0..1] = 16-bit count)
@@ -4423,7 +4435,7 @@ asd_mul16:
     ; VM_PC を +24 して OP_DATA を指す
     CLC
     LDA VM_PC
-    ADC #24
+    ADC #ZOP_SIZE
     STA VM_PC
     BCC :+
     INC VM_PC+1

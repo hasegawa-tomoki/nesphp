@@ -369,7 +369,7 @@ cas_dim_after_index:
     JMP cmp_error
 :
     ; --- ASSIGN_DIM emit (index は stack から pop) ---
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     ; op1 = CV array
     LDX CMP_ASSIGN_SLOT
     JSR cmp_lit_idx_to_offset
@@ -379,35 +379,35 @@ cas_dim_after_index:
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA #IS_CV
     STA (CMP_OP_HEAD), Y
     ; op2 = popped index (pop 順: type, hi, lo)
     PLA
-    LDY #22
+    LDY #ZOP_OP2_TYPE
     STA (CMP_OP_HEAD), Y
     PLA
     LDY #5
     STA (CMP_OP_HEAD), Y
     PLA
-    LDY #4
+    LDY #ZOP_OP2
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_ASSIGN_DIM
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     ; --- OP_DATA emit (op1 = value、ASSIGN_DIM の直後に必須) ---
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_OP_DATA
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -541,7 +541,7 @@ cpw_single:
 cpw_after_body:
 
     ; JMP loop_top
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     PLA
     STA TMP0+1
     PLA
@@ -552,7 +552,7 @@ cpw_after_body:
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_JMP
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -793,14 +793,14 @@ cfs_cond_emit:
 cfs_update_skip:
 
     ; JMP loop_top
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_FOR_LOOP_TOP
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_FOR_LOOP_TOP+1
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_JMP
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -820,14 +820,14 @@ cfs_body_single:
 cfs_body_done:
 
     ; JMP update_start
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_FOR_UPD_START
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_FOR_UPD_START+1
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_JMP
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -848,8 +848,8 @@ cfs_body_done:
 
 ; cmp_emit_jmp_with_bp: 無条件 JMP を placeholder 0 で emit、op1 アドレスを bp stack に push
 cmp_emit_jmp_with_bp:
-    JSR cmp_op24_zero
-    LDY #20
+    JSR cmp_op_zero
+    LDY #ZOP_OPCODE
     LDA #ZEND_JMP
     STA (CMP_OP_HEAD), Y
     LDA CMP_OP_HEAD
@@ -1160,8 +1160,8 @@ cmp_reserve_logic_slot:
     RTS
 
 cmp_emit_jmp_save_done:
-    JSR cmp_op24_zero
-    LDY #20
+    JSR cmp_op_zero
+    LDY #ZOP_OPCODE
     LDA #ZEND_JMP
     STA (CMP_OP_HEAD), Y
     LDA CMP_OP_HEAD
@@ -1190,7 +1190,7 @@ cmp_emit_qm_assign_const_slot:
     LDA #0
     STA CMP_TOK_VALUE+1
     JSR cmp_emit_zval_long_value     ; TMP1 = lit_idx
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX TMP1
     JSR cmp_lit_idx_to_offset
     LDY #0
@@ -1199,21 +1199,21 @@ cmp_emit_qm_assign_const_slot:
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA #IS_CONST
     STA (CMP_OP_HEAD), Y
     LDX CMP_LOGIC_SLOT
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_QM_ASSIGN
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -1595,23 +1595,23 @@ cdf_loop:
     JMP cmp_error
 :
     ; --- FETCH_DIM_R emit ---
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_LHS_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_LHS_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA CMP_LHS_TYPE
     STA (CMP_OP_HEAD), Y
-    LDY #4
+    LDY #ZOP_OP2
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #22
+    LDY #ZOP_OP2_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
     LDX CMP_TMP_COUNT
@@ -1620,16 +1620,16 @@ cdf_loop:
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_FETCH_DIM_R
     STA (CMP_OP_HEAD), Y
     INC CMP_TMP_COUNT
@@ -1677,7 +1677,7 @@ cpp_array_literal:
     PHA
     JSR cmp_lex_next                ; '[' を consume、先頭 token を peek
     ; --- INIT_ARRAY emit ---
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     ; backpatch 位置 = 現 CMP_OP_HEAD (op の先頭)
     LDA CMP_OP_HEAD
     STA CMP_ARR_PATCH
@@ -1690,16 +1690,16 @@ cpp_array_literal:
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset        ; TMP0 = TMP idx * 4
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_INIT_ARRAY
     STA (CMP_OP_HEAD), Y
     INC CMP_TMP_COUNT
@@ -1721,7 +1721,7 @@ cpp_array_literal:
 cpal_element_loop:
     JSR cmp_parse_expr               ; 要素。終了時 CMP_TOK_KIND = ',' or ']'
     ; --- ADD_ARRAY_ELEMENT emit ---
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     ; op1 = array TMP (IS_TMP_VAR)
     LDY #0
     LDA CMP_ARR_TMP
@@ -1729,20 +1729,20 @@ cpal_element_loop:
     INY
     LDA CMP_ARR_TMP+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
     ; op2 = element (CMP_EXPR)
-    LDY #4
+    LDY #ZOP_OP2
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #22
+    LDY #ZOP_OP2_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_ADD_ARRAY_ELEMENT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -1856,14 +1856,14 @@ cpp_ident_count:
     JMP cmp_error
 :
     ; --- ZEND_COUNT emit ---
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
     LDX CMP_TMP_COUNT
@@ -1872,16 +1872,16 @@ cpp_ident_count:
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_COUNT
     STA (CMP_OP_HEAD), Y
     INC CMP_TMP_COUNT
@@ -1964,14 +1964,14 @@ cpp_peek_emit_with_opcode:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
     LDX CMP_TMP_COUNT
@@ -1980,17 +1980,17 @@ cpp_peek_emit_with_opcode:
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
     PLA                              ; opcode 復帰
-    LDY #20
+    LDY #ZOP_OPCODE
     STA (CMP_OP_HEAD), Y
     INC CMP_TMP_COUNT
     JSR cmp_op_finish
@@ -2064,23 +2064,23 @@ cpp_ident_fgets:
     RTS
 
 cmp_emit_fgets_tmp:
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX CMP_TMP_COUNT
     CPX #64
     BCC :+
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_FGETS
     STA (CMP_OP_HEAD), Y
     LDA TMP0
@@ -2097,7 +2097,7 @@ cmp_emit_fgets_tmp:
 ;   NESPHP_NES_BTN を result=新 TMP で emit、CMP_EXPR を TMP に更新
 ;   出力: CMP_EXPR_TYPE/VAL = 新 TMP (実行時に IS_LONG(buttons bitmask) が入る)
 cmp_emit_btn_tmp:
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     ; result = 新 TMP
     LDX CMP_TMP_COUNT
     CPX #64
@@ -2105,16 +2105,16 @@ cmp_emit_btn_tmp:
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_BTN
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -2130,23 +2130,23 @@ cmp_emit_btn_tmp:
 ; cmp_emit_rand_tmp: nes_rand() (expr 文脈、0 引数)
 ;   NESPHP_NES_RAND を result=新 TMP で emit、CMP_EXPR を TMP に更新
 cmp_emit_rand_tmp:
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX CMP_TMP_COUNT
     CPX #64
     BCC :+
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_RAND
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3600,8 +3600,8 @@ cmp_emit_cls:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
-    LDY #20
+    JSR cmp_op_zero
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_CLS
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3613,10 +3613,10 @@ cmp_emit_chr_bg:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_CHR_BG
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3628,10 +3628,10 @@ cmp_emit_chr_spr:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_CHR_SPR
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3643,10 +3643,10 @@ cmp_emit_bg_color:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_BG_COLOR
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3658,7 +3658,7 @@ cmp_emit_palette:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
@@ -3667,7 +3667,7 @@ cmp_emit_palette:
     JSR cmp_set_result_from_arg
     LDX #3
     JSR cmp_set_extended_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_PALETTE
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3684,14 +3684,14 @@ cmp_emit_puts:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
     LDX #2
     JSR cmp_set_extended_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_PUTS
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3708,8 +3708,8 @@ cmp_emit_fgets_stmt:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
-    LDY #20
+    JSR cmp_op_zero
+    LDY #ZOP_OPCODE
     LDA #NESPHP_FGETS
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3728,14 +3728,14 @@ cmp_emit_put:
     BEQ :+
     JMP cmp_error                ; 第 3 引数は compile-time リテラル必須
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
     LDX #2
     JSR cmp_set_extended_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_PUT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3755,7 +3755,7 @@ cmp_emit_sprite_at:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
@@ -3764,7 +3764,7 @@ cmp_emit_sprite_at:
     JSR cmp_set_result_from_arg
     LDX #3
     JSR cmp_set_extended_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_SPRITE
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3778,12 +3778,12 @@ cmp_emit_sprite_attr:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_SPRITE_ATTR
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3799,14 +3799,14 @@ cmp_emit_attr:
 :
     ; 第 3 引数 ($pal) は runtime int 可。result スロット枠に格納し、handler 内で
     ; resolve_result で取り出す (nes_putint / nes_sprite_at と同じ慣習)。
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
     LDX #2
     JSR cmp_set_result_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_ATTR
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3818,8 +3818,8 @@ cmp_emit_vsync:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
-    LDY #20
+    JSR cmp_op_zero
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_VSYNC
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3831,8 +3831,8 @@ cmp_emit_btn_stmt:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
-    LDY #20
+    JSR cmp_op_zero
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_BTN
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3845,10 +3845,10 @@ cmp_emit_count_stmt:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_COUNT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3861,8 +3861,8 @@ cmp_emit_rand_stmt:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
-    LDY #20
+    JSR cmp_op_zero
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_RAND
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3875,10 +3875,10 @@ cmp_emit_srand:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_SRAND
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3892,14 +3892,14 @@ cmp_emit_putint:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
     LDX #2
     JSR cmp_set_result_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_PUTINT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3921,12 +3921,12 @@ cmp_emit_poke:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_POKE
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3942,12 +3942,12 @@ cmp_emit_pokestr:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_result_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_POKESTR
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3960,12 +3960,12 @@ cmp_emit_poke_ext:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_POKE_EXT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3978,12 +3978,12 @@ cmp_emit_pokestr_ext:
     BEQ :+
     JMP cmp_error
 :
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_result_from_arg
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #NESPHP_NES_POKESTR_EXT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -3992,8 +3992,8 @@ cmp_emit_pokestr_ext:
 ; =============================================================================
 ; zend_op emit helpers
 ; =============================================================================
-cmp_op24_zero:
-    LDY #23
+cmp_op_zero:
+    LDY #ZOP_RESULT_TYPE
     LDA #0
 coz_loop:
     STA (CMP_OP_HEAD), Y
@@ -4004,7 +4004,7 @@ coz_loop:
 cmp_op_finish:
     CLC
     LDA CMP_OP_HEAD
-    ADC #24
+    ADC #ZOP_SIZE
     STA CMP_OP_HEAD
     BCC :+
     INC CMP_OP_HEAD+1
@@ -4058,7 +4058,7 @@ cmp_set_op1_from_arg:
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA TMP1
     STA (CMP_OP_HEAD), Y
     RTS
@@ -4076,13 +4076,13 @@ cmp_set_op2_from_arg:
     LDX TMP2
     LDA CMP_ARG_TYPES, X
     STA TMP1
-    LDY #4
+    LDY #ZOP_OP2
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #22
+    LDY #ZOP_OP2_TYPE
     LDA TMP1
     STA (CMP_OP_HEAD), Y
     RTS
@@ -4100,13 +4100,13 @@ cmp_set_result_from_arg:
     LDX TMP2
     LDA CMP_ARG_TYPES, X
     STA TMP1
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA TMP1
     STA (CMP_OP_HEAD), Y
     RTS
@@ -4120,7 +4120,7 @@ cmp_set_extended_from_arg:
     INY
     LDA CMP_ARG_LITS, Y
     STA TMP0+1
-    LDY #12
+    LDY #ZOP_EXT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
@@ -4132,7 +4132,7 @@ cmp_set_extended_from_arg:
 ; cmp_emit_assign: ZEND_ASSIGN op1=CV(slot), op2=expr
 ; -----------------------------------------------------------------------------
 cmp_emit_assign:
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX CMP_ASSIGN_SLOT
     JSR cmp_lit_idx_to_offset
     LDY #0
@@ -4141,19 +4141,19 @@ cmp_emit_assign:
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA #IS_CV
     STA (CMP_OP_HEAD), Y
-    LDY #4
+    LDY #ZOP_OP2
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #22
+    LDY #ZOP_OP2_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA #ZEND_ASSIGN
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -4164,23 +4164,23 @@ cmp_emit_assign:
 ;   opcode は CMP_INTRINSIC_ID
 ; -----------------------------------------------------------------------------
 cmp_emit_binary:
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_LHS_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_LHS_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA CMP_LHS_TYPE
     STA (CMP_OP_HEAD), Y
-    LDY #4
+    LDY #ZOP_OP2
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #22
+    LDY #ZOP_OP2_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
     LDX CMP_TMP_COUNT
@@ -4189,16 +4189,16 @@ cmp_emit_binary:
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA CMP_INTRINSIC_ID
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -4218,23 +4218,23 @@ cmp_emit_binary:
 ; -----------------------------------------------------------------------------
 cmp_emit_jmpxx_with_bp:
     STA TMP2
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA TMP2
     STA (CMP_OP_HEAD), Y
-    ; backpatch 対象 = CMP_OP_HEAD + 4 (op2 offset)
+    ; backpatch 対象 = CMP_OP_HEAD + ZOP_OP2 (op2 offset)
     CLC
     LDA CMP_OP_HEAD
-    ADC #4
+    ADC #ZOP_OP2
     STA TMP0
     LDA CMP_OP_HEAD+1
     ADC #0
@@ -4248,17 +4248,17 @@ cmp_emit_jmpxx_with_bp:
 ; -----------------------------------------------------------------------------
 cmp_emit_op_expr1:
     STA TMP2
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDY #0
     LDA CMP_EXPR_VAL
     STA (CMP_OP_HEAD), Y
     INY
     LDA CMP_EXPR_VAL+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA CMP_EXPR_TYPE
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA TMP2
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -4266,7 +4266,7 @@ cmp_emit_op_expr1:
 
 cmp_emit_op_const1:
     STA TMP2
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX TMP1
     JSR cmp_lit_idx_to_offset
     LDY #0
@@ -4275,10 +4275,10 @@ cmp_emit_op_const1:
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA #IS_CONST
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA TMP2
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -4291,7 +4291,7 @@ cmp_emit_op_const1:
 ; -----------------------------------------------------------------------------
 cmp_emit_incdec_discard:
     STA TMP2
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX CMP_INCDEC_SLOT
     JSR cmp_lit_idx_to_offset
     LDY #0
@@ -4300,10 +4300,10 @@ cmp_emit_incdec_discard:
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA #IS_CV
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA TMP2
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
@@ -4313,7 +4313,7 @@ cmp_emit_incdec_discard:
 ;   入力: A = opcode、CMP_INCDEC_SLOT = CV slot
 cmp_emit_incdec_tmp:
     STA TMP2
-    JSR cmp_op24_zero
+    JSR cmp_op_zero
     LDX CMP_INCDEC_SLOT
     JSR cmp_lit_idx_to_offset
     LDY #0
@@ -4322,7 +4322,7 @@ cmp_emit_incdec_tmp:
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #21
+    LDY #ZOP_OP1_TYPE
     LDA #IS_CV
     STA (CMP_OP_HEAD), Y
     ; result = 新 TMP
@@ -4332,16 +4332,16 @@ cmp_emit_incdec_tmp:
     JMP cmp_error
 :
     JSR cmp_lit_idx_to_offset
-    LDY #8
+    LDY #ZOP_RESULT
     LDA TMP0
     STA (CMP_OP_HEAD), Y
     INY
     LDA TMP0+1
     STA (CMP_OP_HEAD), Y
-    LDY #23
+    LDY #ZOP_RESULT_TYPE
     LDA #IS_TMP_VAR
     STA (CMP_OP_HEAD), Y
-    LDY #20
+    LDY #ZOP_OPCODE
     LDA TMP2
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish

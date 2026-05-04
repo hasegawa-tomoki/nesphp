@@ -83,7 +83,7 @@ const TYPE_OBJECT      = 8;
 
 // === サイズ定数 (spec/01-rom-format.md) ===
 const HEADER_SIZE      = 16;
-const ZEND_OP_SIZE     = 24;   // handler 除去版
+const ZEND_OP_SIZE     = 12;   // handler/lineno 除去 + 各 znode_op を 4B→2B に圧縮
 const ZVAL_SIZE        = 16;
 const ZSTR_HEADER_SIZE = 24;
 
@@ -659,23 +659,21 @@ function pack_header(
 
 function pack_zend_op(array $op): string
 {
-    // spec/01-rom-format.md
-    // 0  u32 op1
-    // 4  u32 op2
-    // 8  u32 result
-    // 12 u32 extended_value
-    // 16 u32 lineno
-    // 20 u8  opcode
-    // 21 u8  op1_type
-    // 22 u8  op2_type
-    // 23 u8  result_type
+    // spec/01-rom-format.md (12B 圧縮レイアウト)
+    // 0  u16 op1
+    // 2  u16 op2
+    // 4  u16 result
+    // 6  u16 extended_value
+    // 8  u8  opcode
+    // 9  u8  op1_type
+    // 10 u8  op2_type
+    // 11 u8  result_type
     $bin = pack(
-        'VVVVV',
-        $op['op1'] & 0xFFFFFFFF,
-        $op['op2'] & 0xFFFFFFFF,
-        $op['result'] & 0xFFFFFFFF,
-        $op['extended_value'] & 0xFFFFFFFF,
-        $op['lineno'] & 0xFFFFFFFF,
+        'vvvv',
+        $op['op1'] & 0xFFFF,
+        $op['op2'] & 0xFFFF,
+        $op['result'] & 0xFFFF,
+        $op['extended_value'] & 0xFFFF,
     );
     $bin .= chr($op['opcode'] & 0xFF);
     $bin .= chr($op['op1_type'] & 0xFF);

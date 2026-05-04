@@ -6,7 +6,9 @@
 
 ## 方針
 
-Zend 内部の `zend_op` (32B) を `handler` ポインタ (8B) だけ抜いて **24B 構造体** として PRG-ROM に焼く。literals も Zend の 16B `zval` レイアウトをそのまま保持。6502 VM は Zend のフィールドオフセットを直接読む。
+Zend 内部の `zend_op` (32B) から `handler` (8B) と `lineno` (4B) を除き、各 znode_op union (4B) を VM が実際に読む下位 2B のみに圧縮した **12B 構造体** として PRG-RAM に焼く。literals は Zend の 16B `zval` レイアウトをそのまま保持。6502 VM は `ZOP_*` 定数で参照する (`vm/nesphp.s`)。
+
+旧 24B レイアウト (Zend と同じオフセットのまま `handler` のみ除去) は ROM サイズ制約 (PRG-RAM bank 0 の 8KB) を圧迫したため、後述 §2 の通り 12B に再圧縮した。
 
 「なぜこの形なのか」「Zend 原本からの改変点 9 項目」は [12-zend-diff](./12-zend-diff.md) を参照。本ファイルは**現行の byte レベルの厳密仕様**にフォーカスする。
 
@@ -35,22 +37,50 @@ offset  size  field               意味
 
 ---
 
-## 2. zend_op (24B, handler 除去)
+## 2. zend_op (12B, NESPHP 圧縮レイアウト)
 
-Zend `struct _zend_op` から先頭の `handler` (8B) を抜いた残りを、Zend と同じオフセットで配置:
+Zend `struct _zend_op` から `handler` (8B) と `lineno` (4B) を除き、各 znode_op
+union (4B) を **下位 2B のみ** に圧縮した独自レイアウト。VM が 16-bit address
+space に閉じてるので各 union の上位 2B は常に 0 で、保持しても意味がない:
+
+```
+offset  size  field              元 Zend での型                    備考
+0       2     op1                znode_op union → 下位 2B          constant / var / num / jmp_offset
+2       2     op2                znode_op union → 下位 2B
+4       2     result             znode_op union → 下位 2B
+6       2     extended_value     uint32_t       → 下位 2B
+8       1     opcode             zend_uchar                        ★ Zend 互換番号 ([04-opcode-mapping](./04-opcode-mapping.md) 参照)
+9       1     op1_type           zend_uchar                        下記 operand type 表
+10      1     op2_type           zend_uchar
+11      1     result_type        zend_uchar
+```
+
+オフセット定数は `vm/nesphp.s` の `ZOP_*` で集中管理。
+
+### 旧レイアウト (24B、移行前) — 参考
+
+PRG-RAM bank 0 が op_array + literals + STR_POOL + ARR_POOL を全部抱えていた
+時代に使っていた、Zend と同じオフセットを保つ素朴な配置:
 
 ```
 offset  size  field              Zend での型                       備考
 0       4     op1                znode_op union                    constant / var / num / jmp_offset
-4       4     op2                znode_op union                    
-8       4     result             znode_op union                    
-12      4     extended_value     uint32_t                          
-16      4     lineno             uint32_t                          デバッグ用 (削減可)
-20      1     opcode             zend_uchar                        ★ Zend 互換番号 ([04-opcode-mapping](./04-opcode-mapping.md) 参照)
-21      1     op1_type           zend_uchar                        下記 operand type 表
-22      1     op2_type           zend_uchar                        
-23      1     result_type        zend_uchar                        
+4       4     op2                znode_op union
+8       4     result             znode_op union
+12      4     extended_value     uint32_t
+16      4     lineno             uint32_t                          デバッグ用
+20      1     opcode             zend_uchar
+21      1     op1_type           zend_uchar
+22      1     op2_type           zend_uchar
+23      1     result_type        zend_uchar
 ```
+
+旧 → 新の変更点:
+- lineno (offset 16-19) を削除 → -4B
+- 各 znode_op を 4B → 2B に圧縮 (上位 2B は常時 0 だった) → -8B
+- 合計 24B → 12B (op_array サイズ半減、tetris.php で 97.8% → 52.8%)
+- VM ハンドラ側は `ZOP_*` 定数でオフセットを参照するだけなので、再度
+  圧縮 / 拡張する場合も定数 1 箇所の更新で完結する
 
 ### operand type (Zend `IS_CONST` 等、`Zend/zend_compile.h`)
 
@@ -131,27 +161,31 @@ offset  size  field              備考
 
 入力: `<?php echo "HELLO, NES!";`
 
+新フォーマット (12B/op):
+
 ```
 Offset     Bytes                                             ASCII
 ---------  ------------------------------------------------  ----------------
 00000000   4e 45 53 1a 04 00 10 08 00 00 09 07 00 00 00 00   NES.............   iNES ヘッダ (NES 2.0、MMC1 / mapper 1, SXROM)
 00000010   [ VM 6502 asm ~16KB ... ]                                             PRG bank 0
 ...
-                                                             ↓ nesphp-bc セクション
-00003F00   02 00 20 3f 02 00 00 00 00 00 08 04 00 00 00 00   .. ?........        op_array header
+                                                             ↓ op_array セクション (PRG-RAM bank 0)
+00006000   02 00 28 00 02 00 00 00 00 00 08 04 00 00 00 00   ..(.............    op_array header
                                                                                   num_ops=2
-                                                                                  literals_off=$3f20
+                                                                                  literals_off=$0028 (= header 16B + ops 24B)
                                                                                   num_literals=2
                                                                                   num_cvs=0, num_tmps=0
                                                                                   php_version=8.4
 
-00003F10   00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00   ................    op[0] ZEND_ECHO
-00003F20   01 00 00 00 88 01 00 00                           ........             (lineno=1, opcode=0x88=136,
-                                                                                   op1_type=CONST(1),
-                                                                                   op2/result_type=UNUSED(0))
+00006010   00 00 00 00 00 00 00 00 88 01 00 00               ............        op[0] ZEND_ECHO
+                                                                                   op1=$0000 (literal[0]),
+                                                                                   opcode=0x88=136,
+                                                                                   op1_type=CONST(1)
 
-00003F28   10 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00   ................    op[1] ZEND_RETURN
-00003F38   01 00 00 00 3e 01 00 00                           ....>...             (opcode=0x3e=62)
+0000601C   10 00 00 00 00 00 00 00 3e 01 00 00               ........>...        op[1] ZEND_RETURN
+                                                                                   op1=$0010 (literal[1]),
+                                                                                   opcode=0x3e=62,
+                                                                                   op1_type=CONST(1)
 
 00003F40   50 3f 00 00 00 00 00 00 06 00 00 00 00 00 00 00   P?..............    literals[0] zval STRING
                                                                                   value.str → $3f50

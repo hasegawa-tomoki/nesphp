@@ -49,22 +49,22 @@ local hdr = {}
 for i = 0, 15 do hdr[#hdr+1] = string.format("%02X", memory.readbyte(0x6000 + i)) end
 f:write(table.concat(hdr, " ") .. "\n\n")
 
-f:write("--- OPS (starting $6010) ---\n")
+f:write("--- OPS (starting $6010, 12B layout) ---\n")
 for opi = 0, 499 do
-    local addr = 0x6010 + opi * 24
-    if addr + 24 > 0x8000 then break end
-    local op    = memory.readbyte(addr + 20)
-    local op1t  = memory.readbyte(addr + 21)
-    local op2t  = memory.readbyte(addr + 22)
-    local rt    = memory.readbyte(addr + 23)
+    local addr = 0x6010 + opi * 12
+    if addr + 12 > 0x8000 then break end
+    local op    = memory.readbyte(addr + 8)
+    local op1t  = memory.readbyte(addr + 9)
+    local op2t  = memory.readbyte(addr + 10)
+    local rt    = memory.readbyte(addr + 11)
     local op1lo = memory.readbyte(addr + 0)
     local op1hi = memory.readbyte(addr + 1)
-    local op2lo = memory.readbyte(addr + 4)
-    local op2hi = memory.readbyte(addr + 5)
-    local rlo   = memory.readbyte(addr + 8)
-    local rhi   = memory.readbyte(addr + 9)
-    local extlo = memory.readbyte(addr + 12)
-    local exthi = memory.readbyte(addr + 13)
+    local op2lo = memory.readbyte(addr + 2)
+    local op2hi = memory.readbyte(addr + 3)
+    local rlo   = memory.readbyte(addr + 4)
+    local rhi   = memory.readbyte(addr + 5)
+    local extlo = memory.readbyte(addr + 6)
+    local exthi = memory.readbyte(addr + 7)
 
     local opname = opnames[op] or string.format("?%d", op)
     local op1tn  = typenames[op1t] or string.format("?%d", op1t)
