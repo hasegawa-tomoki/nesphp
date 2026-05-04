@@ -3715,26 +3715,23 @@ cmp_emit_fgets_stmt:
     JSR cmp_op_finish
     RTS
 
-; nes_put($x, $y, "X" | tile_int)
-; op1 = $x, op2 = $y, extended_value = char/tile literal (IS_CONST)
+; nes_put($x, $y, "X" | $tile)
+; op1 = $x, op2 = $y, result = char (CV/TMP/CONST 可、nes_attr と同じ慣習)
 cmp_emit_put:
     LDA CMP_ARG_COUNT
     CMP #3
     BEQ :+
     JMP cmp_error
 :
-    LDA CMP_ARG_TYPES+2
-    CMP #IS_CONST
-    BEQ :+
-    JMP cmp_error                ; 第 3 引数は compile-time リテラル必須
-:
+    ; 第 3 引数は IS_CONST string/long でも runtime CV/TMP int でも可。
+    ; result スロット枠に格納し、handler 内で resolve_result で取り出す。
     JSR cmp_op_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
     LDX #2
-    JSR cmp_set_extended_from_arg
+    JSR cmp_set_result_from_arg
     LDY #ZOP_OPCODE
     LDA #NESPHP_NES_PUT
     STA (CMP_OP_HEAD), Y

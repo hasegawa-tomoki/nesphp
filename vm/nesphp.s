@@ -2561,9 +2561,11 @@ disable_rendering_restore:
 ; =============================================================================
 ; NESPHP_NES_PUT: nametable (x, y) に 1 文字を書く
 ;
-; op1 = x (IS_CV / IS_CONST, IS_LONG 値)
-; op2 = y (IS_CV / IS_CONST, IS_LONG 値)
-; extended_value = 文字 literal のバイトオフセット (IS_CONST, TYPE_STRING or TYPE_LONG)
+; op1    = x       (IS_CV / IS_CONST / IS_TMP_VAR / IS_VAR, IS_LONG 値)
+; op2    = y       (同上)
+; result = 文字    (上記 + IS_CONST の TYPE_STRING も可、3 引数 runtime 慣習)
+;          IS_LONG: 下位 1B = 文字コード
+;          IS_STRING (literal のみ): 1 文字目を STR_POOL から読出
 ;
 ; 前提: PPUMASK = 0 (強制 blanking) 中に呼ぶこと。fgets 以外は常に forced blanking
 ; なので OK。PPU 内部アドレスは書き換わるので、次の echo が再 set する想定。
@@ -2571,23 +2573,9 @@ disable_rendering_restore:
 handle_nesphp_nes_put:
     JSR resolve_op1        ; OP1_VAL = x
     JSR resolve_op2        ; OP2_VAL = y
+    JSR resolve_result     ; RESULT_VAL = char (LONG または STRING literal)
 
-    ; extended_value (offset 12) → zval アドレスを TMP0 に
-    LDY #ZOP_EXT
-    LDA (VM_PC), Y
-    STA TMP0
-    INY
-    LDA (VM_PC), Y
-    STA TMP0+1
-    CLC
-    LDA VM_LITBASE
-    ADC TMP0
-    STA TMP0
-    LDA VM_LITBASE+1
-    ADC TMP0+1
-    STA TMP0+1
-    LDY #8                 ; u1.type_info
-    LDA (TMP0), Y
+    LDA RESULT_VAL
     CMP #TYPE_STRING
     BEQ np_from_string
     CMP #TYPE_LONG
@@ -2595,32 +2583,24 @@ handle_nesphp_nes_put:
     JMP handle_unimpl
 
 np_from_string:
-    ; 新方式: value bytes 0-1 = val[] への OPS_BASE 相対 offset (bank 2 内)
-    ; 1 文字目を直接読み INT_PRINT_BUFFER[0] に保存 (nes_put は 1 文字固定)
-    LDY #0
-    LDA (TMP0), Y
-    STA TMP1
-    INY
-    LDA (TMP0), Y
-    STA TMP1+1
+    ; RESULT_VAL+1/+2 = STR_POOL 内 byte offset (OPS_BASE 相対)
+    ; 1 文字目を bank 2 から読み INT_PRINT_BUFFER[0] に保存
     CLC
-    LDA TMP1
+    LDA RESULT_VAL+1
     ADC #<OPS_BASE
     STA TMP1
-    LDA TMP1+1
+    LDA RESULT_VAL+2
     ADC #>OPS_BASE
     STA TMP1+1
     LDY #0
-    PRG_RAM_BANK2          ; STR_POOL から 1 byte 読出
+    PRG_RAM_BANK2
     LDA (TMP1), Y
-    STA INT_PRINT_BUFFER   ; ★ BANK0 復帰前に内蔵 RAM へ保存 (BANK0 macro が A clobber)
+    STA INT_PRINT_BUFFER   ; BANK0 復帰前に内蔵 RAM へ (BANK0 macro が A clobber)
     PRG_RAM_BANK0
     JMP np_addr
 
 np_from_long:
-    ; value.lval 下位 1 バイト = 文字コード
-    LDY #0
-    LDA (TMP0), Y
+    LDA RESULT_VAL+1
     STA INT_PRINT_BUFFER
 
 np_addr:

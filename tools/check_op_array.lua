@@ -6,7 +6,7 @@
 --   $6000 + 6: NUM_CVS (u16)
 --   $6000 + 8: NUM_TMPS (u16)
 
-for i = 1, 60 do emu.frameadvance() end   -- let compile finish
+for i = 1, 240 do emu.frameadvance() end  -- let compile + prologue finish (tetris is large)
 
 local f = assert(io.open("/tmp/op_array_size.txt", "w"))
 
@@ -35,6 +35,11 @@ f:write(string.format("literals     : $%04X - $%04X (%d bytes)\n", lits_start, l
 f:write(string.format("\n"))
 f:write(string.format("bank 0 used  : %d / 8192 bytes (%.1f%%)\n", used_total, used_total * 100.0 / 8192))
 f:write(string.format("bank 0 free  : %d bytes (%.1f%%)\n", 8192 - used_total, (8192 - used_total) * 100.0 / 8192))
+f:write(string.format("\n--- DEBUG ---\n"))
+f:write(string.format("CPU PC = %04X\n", memory.getregister("pc")))
+f:write("$6000 first 16 bytes: ")
+for i = 0, 15 do f:write(string.format("%02X ", memory.readbyte(0x6000 + i))) end
+f:write("\n")
 
 f:close()
 emu.print("done")

@@ -243,22 +243,60 @@ $customTiles = [
         0x07, 0x07, 0x0F, 0x0F, 0x3F, 0xFF, 0xFF, 0xFF,
         0xF8, 0xF8, 0xF0, 0xF0, 0xC0, 0x00, 0x00, 0x00,
     ],
-    // 0x05: テトリス用の中塗りブロック (color 1 全面塗り)
-    //   bp0 全 0xFF + bp1 全 0x00 → palette の color 1 ($30 = 白) で 8×8 単色塗り。
-    //   ピース色分けは attribute table で BG palette を切替えて行う。
-    0x05 => [
-        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ],
-    // 0x06: 枠線付きブロック (外周 1px = color 2、内側 6×6 = color 1)
-    //   テトロミノ間の境目を視覚的に区別する用 (隣接ブロック境界が見える)。
-    0x06 => [
-        // bp0 (color 1 mask: 内側 6×6)
-        0x00, 0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 0x7E, 0x00,
-        // bp1 (color 2 mask: 外周枠)
-        0xFF, 0x81, 0x81, 0x81, 0x81, 0x81, 0x81, 0xFF,
-    ],
 ];
+
+// 0x05-0x0B: 7 種テトロミノ用ピースタイル (BPS 版 Famicom テトリスに倣う方式)
+//   palette 1 を ($0F bg=黒, $30 白=slot1, $16 赤=slot2, $1A 緑=slot3) と
+//   設定し、play field 全 cell の attribute = 1 にする。各ピースは 7×7 の
+//   縁取り (Ring) + 中心 3×3 のコア (Core) で識別、Ring/Core 色の組合せで
+//   7 ピース × 1 色 = 7 種類を区別する。
+//
+//   タイルレイアウト (8×8、右下 1px はマージン):
+//      col→ 0 1 2 3 4 5 6 7
+//      row 0 R R R R R R R .
+//      row 1 R . . . . . R .
+//      row 2 R . C C C . R .
+//      row 3 R . C C C . R .
+//      row 4 R . C C C . R .
+//      row 5 R . . . . . R .
+//      row 6 R R R R R R R .
+//      row 7 . . . . . . . .
+//
+//   ピース → Ring/Core 割当 (slot 1=白 / 2=赤 / 3=緑):
+//      0x05 I: ring=3 緑, core=3 緑       (緑単色)
+//      0x06 O: ring=1 白, core=1 白       (白単色)
+//      0x07 T: ring=2 赤, core=2 赤       (赤単色)
+//      0x08 S: ring=3 緑, core=2 赤       (緑枠+赤芯)
+//      0x09 Z: ring=2 赤, core=3 緑       (赤枠+緑芯)
+//      0x0A L: ring=1 白, core=2 赤       (白枠+赤芯)
+//      0x0B J: ring=2 赤, core=1 白       (赤枠+白芯)
+foreach ([
+    0x05 => [3, 3], 0x06 => [1, 1], 0x07 => [2, 2],
+    0x08 => [3, 2], 0x09 => [2, 3], 0x0A => [1, 2], 0x0B => [2, 1],
+] as $tile_idx => [$ring, $core]) {
+    $rows = [
+        [$ring,$ring,$ring,$ring,$ring,$ring,$ring, 0],
+        [$ring,    0,    0,    0,    0,    0,$ring, 0],
+        [$ring,    0,$core,$core,$core,    0,$ring, 0],
+        [$ring,    0,$core,$core,$core,    0,$ring, 0],
+        [$ring,    0,$core,$core,$core,    0,$ring, 0],
+        [$ring,    0,    0,    0,    0,    0,$ring, 0],
+        [$ring,$ring,$ring,$ring,$ring,$ring,$ring, 0],
+        [    0,    0,    0,    0,    0,    0,    0, 0],
+    ];
+    $bp0 = [];
+    $bp1 = [];
+    foreach ($rows as $row) {
+        $b0 = $b1 = 0;
+        foreach ($row as $c) {
+            $b0 = ($b0 << 1) | ($c & 1);
+            $b1 = ($b1 << 1) | (($c >> 1) & 1);
+        }
+        $bp0[] = $b0;
+        $bp1[] = $b1;
+    }
+    $customTiles[$tile_idx] = array_merge($bp0, $bp1);
+}
 
 function build_bank(array $font5x7, array $customTiles): string
 {
