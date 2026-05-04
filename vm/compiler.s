@@ -3792,18 +3792,15 @@ cmp_emit_attr:
     BEQ :+
     JMP cmp_error
 :
-    LDA CMP_ARG_TYPES+2
-    CMP #IS_CONST
-    BEQ :+
-    JMP cmp_error
-:
+    ; 第 3 引数 ($pal) は runtime int 可。result スロット枠に格納し、handler 内で
+    ; resolve_result で取り出す (nes_putint / nes_sprite_at と同じ慣習)。
     JSR cmp_op24_zero
     LDX #0
     JSR cmp_set_op1_from_arg
     LDX #1
     JSR cmp_set_op2_from_arg
     LDX #2
-    JSR cmp_set_extended_from_arg
+    JSR cmp_set_result_from_arg
     LDY #20
     LDA #NESPHP_NES_ATTR
     STA (CMP_OP_HEAD), Y

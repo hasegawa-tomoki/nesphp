@@ -3118,27 +3118,12 @@ palette_err:
 handle_nesphp_nes_attr:
     JSR resolve_op1        ; OP1_VAL = x
     JSR resolve_op2        ; OP2_VAL = y
+    JSR resolve_result     ; RESULT_VAL = pal (3 引数枠を再利用、runtime int 可)
 
-    ; extended_value → pal を取得
-    LDY #12
-    LDA (VM_PC), Y
-    STA TMP0
-    INY
-    LDA (VM_PC), Y
-    STA TMP0+1
-    CLC
-    LDA VM_LITBASE
-    ADC TMP0
-    STA TMP0
-    LDA VM_LITBASE+1
-    ADC TMP0+1
-    STA TMP0+1
-    LDY #8
-    LDA (TMP0), Y
+    LDA RESULT_VAL
     CMP #TYPE_LONG
     BNE attr_err
-    LDY #0
-    LDA (TMP0), Y
+    LDA RESULT_VAL+1
     AND #$03               ; pal を 0-3 にクランプ
     STA TMP2               ; TMP2 = pal (2 bit)
 
