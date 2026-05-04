@@ -12,6 +12,9 @@ for ($y = 5; $y <= 24; $y++) {
 nes_puts(17, 5, "SCORE");
 nes_puts(17, 7, "    0");
 
+// F: ピース色用 BG パレット (1=シアン、ピース全て同色)
+nes_palette(1, 0x21, 0x11, 0x30);
+
 // 4x4 bbox エンコード: bit i = (i&3, i>>2) のセル。bit 0 = 左上、bit 15 = 右下。
 // 16-bit 値、user RAM に lo/hi の順で 2 byte ずつ詰める。
 // 7 ピース × 4 回転 = 28 entry × 2 byte = 56 byte。
@@ -103,12 +106,14 @@ while (true) {
             }
         } elseif ($dy > 0 && $rot_d === 0) {
             // 落下方向で衝突 → lock。$shape の各セルを grid に焼き込む。
+            // F: 同時に attribute を pal 1 (シアン) にしてピース色を確定
             $i = 0;
             while ($i < 16) {
                 if (($shape >> $i) & 1) {
                     $cy = $py + ($i >> 2);
                     $cx = $px + ($i & 3);
                     $grid[$cy - 5] = $grid[$cy - 5] | (1 << ($cx - 4));
+                    nes_attr($cx >> 1, $cy >> 1, 1);
                 }
                 $i = $i + 1;
             }
@@ -158,9 +163,11 @@ while (true) {
             $px = 6;
             $py = 5;
 
-            // 簡易 game over: spawn 行が既占有 → メッセージ表示 + 静止
+            // E: spawn 行が既占有 → GAME OVER + 最終スコア + 静止
             if ($grid[0] !== 0) {
                 nes_puts(5, 14, "GAME OVER");
+                nes_puts(5, 16, "SCORE:");
+                nes_putint(13, 16, $score);
                 while (true) { nes_vsync(); }
             }
 
