@@ -179,7 +179,7 @@ COMMENT      ::= "//" [^\n]* "\n"
 | `TK_FOR`   | `for` | keyword |
 | `TK_TRUE`  | `true` | keyword、`IS_TRUE` zval として emit |
 | `TK_IDENT` | `[a-zA-Z_]\w*` | キーワード以外の識別子 (関数名等) |
-| `TK_STRING`| `"..."` | 内容は decoded で PRG-RAM 内の string pool ($7800-$7FFF) に置かれ、zval は pool への OPS_BASE 相対 offset を持つ。`\xHH` / `\\` / `\"` のエスケープ対応 (それ以外の `\` で compile error)、non-ASCII byte は pass-through |
+| `TK_STRING`| `"..."` | 内容は decoded で **PRG-RAM bank 2 全域 ($6000-$7FFF, 8KB)** の STR_POOL に置かれ、zval は pool への OPS_BASE 相対 offset (0..$1FFF) を持つ。`\xHH` / `\\` / `\"` のエスケープ対応 (それ以外の `\` で compile error)、non-ASCII byte は pass-through |
 | `TK_INT`   | `[0-9]+` / `0x..` / `0b..` | 10 進 / 16 進 / 2 進、16bit signed narrow |
 | `TK_CV`    | `$name` | compile variable |
 | `TK_SEMI` / `TK_LPAREN` / `TK_RPAREN` / `TK_COMMA` / `TK_LBRACE` / `TK_RBRACE` | `; ( ) , { }` | |
@@ -208,7 +208,7 @@ COMMENT      ::= "//" [^\n]* "\n"
 | **R2** | `nes_btn()` を 0 引数化。コントローラ状態 (下位 1B = bitmask) を IS_LONG で返す | ✅ |
 | **R3** | ビット演算子 `&` / `\|` (`ZEND_BW_AND` / `ZEND_BW_OR`)、2 進リテラル `0b..` | ✅ |
 | **S1-S4** | 論理演算 `&&` / `\|\|` (短絡評価、JMPZ/JMPNZ + QM_ASSIGN パターン)、シフト `<<` / `>>` (`ZEND_SL` / `ZEND_SR`) | ✅ |
-| **T1** | 文字列リテラルに `\xHH` / `\\` / `\"` エスケープ追加。decoded bytes を PRG-RAM pool ($7800-$7FFF) に書き zval は pool 内 offset を指す。本物の PHP 互換構文で任意 byte を埋めこめる (CHR タイル index 直接指定で非 ASCII テキストを扱うため) | ✅ |
+| **T1** | 文字列リテラルに `\xHH` / `\\` / `\"` エスケープ追加。decoded bytes を PRG-RAM bank 2 ($6000-$7FFF, 8KB) の STR_POOL に書き zval は pool 内 offset を指す。本物の PHP 互換構文で任意 byte を埋めこめる (CHR タイル index 直接指定で非 ASCII テキストを扱うため) | ✅ |
 | **U1** | 整数キー配列 MVP: `[expr,...]` リテラル + `$a[idx]` 読取 + `count($a)`。IS_ARRAY=7、2KB runtime array pool ($7000-$77FF)。ZEND_INIT_ARRAY / ZEND_ADD_ARRAY_ELEMENT / ZEND_FETCH_DIM_R / ZEND_COUNT opcode | ✅ |
 | **V1-V4** | 配列: **書換 `$a[i] = v`** + **append `$a[] = v`** (ZEND_ASSIGN_DIM + ZEND_OP_DATA、2-op sequence)、**ネスト読取 `$a[i][j]...`** (FETCH_DIM_R チェーン)、**ネストリテラル `[[1,2],[3,4]]`** (CMP_ARR_* を stack で退避)。連想配列/foreach は未対応 | ✅ |
 | **W1** | マルチスプライト: `nes_sprite_at($idx, $x, $y, $tile)` (4 引数、$idx は runtime int 可)、`nes_sprite_attr($idx, $attr)`。NESPHP_NES_SPRITE (0xF2) の意味を「OAM[0] 固定」→「OAM[$idx]」に拡張、result スロットを 3 番目の入力 ($y) として流用。NESPHP_NES_SPRITE_ATTR (0xFC) を新設 | ✅ |
@@ -338,21 +338,29 @@ END:   (backpatch pop)
 - 最大 64 スロット (= 表領域 256B 全域、VM 側 CV slot 上限と一致)
 - ランタイムでは同じ `$0700-$07FF` を **USER_RAM** (peek/poke 用 256B 汎用バイト領域) として再利用 (aliasing なし、時間的に分離)
 
-### 作業エリア (PRG-RAM $6000-$7FFF)
+### 作業エリア (PRG-RAM、複数 bank に分散)
+
+**bank 0** ($6000-$7FFF、デフォルトでマップ):
 
 ```
 $6000-$600F  header (16B)
 $6010-...    op_array (24B × num_ops、最大 ~308 op)
-$????-...    literals (16B × num_lits、最大 ~40 zval、op_array 直後に memcpy)
-$????-$7F7F  ARR_POOL (runtime 配列ストレージ、ARR_POOL_HEAD は literals 終端から成長)
-$7D00-$7F7F  CMP_LIT_STAGE (compile 中のみ、zval 一時バッファ。memcpy 後 ARR_POOL に転用)
-$7F80-$7FFF  STR_POOL (128B、文字列 pool。runtime も常駐)
+$????-$7CFF  literals (16B × num_lits、最大 ~48 zval、op_array 直後に memcpy)
+$7D00-$7FFF  CMP_LIT_STAGE (768B、compile 中のみ、zval 一時バッファ)
 ```
+
+**bank 1** ($6000-$7FFF、配列 handler の入出口で atomic 切替): ARR_POOL 8KB
+
+**bank 2** ($6000-$7FFF、文字列 handler / `cln_string` の入出口で atomic 切替):
+STR_POOL 8KB (文字列リテラル pool)
+
+**bank 3** ($6000-$7FFF、`nes_*_ext` intrinsic の入出口で atomic 切替):
+USER_RAM_EXT 8KB (peek/poke_ext の汎用 byte 領域)
 
 - **op_array**: `$6010` から成長。CMP_LIT_STAGE = $7D00 が上限 (op_finish で 16-bit 比較、超えたら compile error)
 - **literals**: cmp_finalize で CMP_LIT_STAGE の zval を $6010 + ops × 24 にバルク memcpy
-- **STR_POOL**: cln_string が decoded bytes をここに書き、zval の IS_STRING value は OPS_BASE 相対 offset を指す。runtime もそのまま参照 (memcpy しない)
-- **ARR_POOL**: runtime 中、配列ヘッダ 4B (count, capacity) + capacity × 16B zval を追記型で alloc。GC 無し。ARR_POOL_HEAD = OPS_BASE + literals_off + num_lits × 16
+- **STR_POOL** (bank 2): cln_string が decoded bytes をここに書き、zval の IS_STRING value は STR_POOL 内 offset (= OPS_BASE 相対 = 0..$1FFF) を指す。runtime もそのまま参照 (memcpy しない)。pool overflow ($8000 到達) で compile error
+- **ARR_POOL** (bank 1): runtime 中、配列ヘッダ 4B (count, capacity) + capacity × 16B zval を追記型で alloc。GC 無し
 
 ### TMP0/TMP1/TMP2 の共有
 
@@ -374,11 +382,11 @@ zend_op の `op.var` フィールドには `slot * 16` を 16-bit で格納 (Zen
 
 1. **PHP ソース先頭は `<?php` 必須**。省略はできない。タグ直後に空白類 1 文字以上が無くても OK (lexer がその後の echo / IDENT で区切る)
 2. **non-ASCII**: **文字列リテラル内とコメント内は透過的に pass through**。それ以外の位置で non-ASCII バイトが出ると NES lexer が compile error (ERR L/C 画面表示)。pack_src.php にチェックなし。文字列内の UTF-8 バイト (例: 「あ」= 3B) はタイル ID として `echo` / `nes_puts` がそのまま PPU に流すので、ユーザ側で CHR タイルを用意する
-3. **文字列は double-quoted のみ**。エスケープは `\xHH` (任意 byte)、`\\`、`\"` の 3 種だけ (`\n` 等は compile error)。decoded 結果は PRG-RAM pool ($7800-$7FFF、2KB) に溜まる。pool overflow で compile error
+3. **文字列は double-quoted のみ**。エスケープは `\xHH` (任意 byte)、`\\`、`\"` の 3 種だけ (`\n` 等は compile error)。decoded 結果は PRG-RAM bank 2 の STR_POOL ($6000-$7FFF、8KB) に溜まる。pool overflow で compile error
 4. **文字列長 ≤ 255 バイト** (現行 `CMP_TOK_LEN` が 1 バイト)。UTF-8 日本語 (1 文字 = 3B) なら ~85 文字まで
 5. **コメント対応済** (P4): `//`, `#`, `/* */`。block コメント未閉は compile error
 6. **ソース長上限 16382 バイト** (PRG bank 0 の 16KB − 2B ヘッダ)
-7. **PRG-RAM 8KB** がコンパイル出力の上限 (opcode + literal zval、文字列は ROM 常駐)。op_array は ~308 op、literal zval は ~40、ARR_POOL と STR_POOL の合計が残り
+7. **PRG-RAM 32KB (4 × 8KB bank)** がコンパイル出力の上限。bank 0 (op_array + literal zval, ~308 op + ~48 zval = 8KB)、bank 1 (ARR_POOL 8KB)、bank 2 (STR_POOL 8KB、文字列リテラルもここで PRG-RAM 常駐)、bank 3 (USER_RAM_EXT 8KB)
 8. **CV 最大 64 スロット**、**TMP 最大 64 スロット** (文間でリセット、再利用可能)、**関数引数 ≤ 4**、**関数呼出ネスト無し** (call expr は `fgets` / `nes_btn` / `nes_rand` / `nes_peek` / `nes_peek16` のみ)
 9. **比較式は非連鎖** (`$a < $b < $c` は compile error)
 10. **`!` / 単項 `-` 未対応**、**`^` (BW_XOR) 未対応**、**文字列連結 `.` 未対応**

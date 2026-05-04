@@ -112,23 +112,24 @@ zval (16 byte / entry) のオーバーヘッドを回避してバイト単位で
 
 **用途例**: Tetris の 28 回転 shape table を 56 byte の string literal で保持し、起動時に `nes_pokestr(0, $shape_data)` で USER_RAM に bulk load。runtime は `nes_peek16($idx*2)` で 16-bit shape を 1 op で復元。配列で持つと 28 × 16 = 448 byte 食うが、USER_RAM なら 56 byte で済む (8 倍効率)。
 
-### peek/poke_ext (USER_RAM_EXT = PRG-RAM bank 2、8KB)
+### peek/poke_ext (USER_RAM_EXT = PRG-RAM bank 3、8KB)
 
-SXROM 化に伴い PRG-RAM bank 2 を **8 KB の汎用バイト領域** として利用する API。
+SXROM 化に伴い PRG-RAM bank 3 を **8 KB の汎用バイト領域** として利用する API。
 内蔵 RAM の `nes_peek/poke` (256 B) では足りない大きなデータテーブルやゲームステ
 ートのバッファ用途。13-bit offset (0-8191)。
 
 | opcode | 番号 | 役割 |
 |---|---|---|
-| `NESPHP_NES_PEEK_EXT` | **0xE8** | `nes_peek_ext($offset)` → bank 2 の `$6000+offset` から 1 byte 読出 |
-| `NESPHP_NES_PEEK16_EXT` | **0xE9** | `nes_peek16_ext($offset)` → bank 2 から 2 byte LE 読出 |
-| `NESPHP_NES_POKE_EXT` | **0xEA** | `nes_poke_ext($offset, $byte)` → bank 2 に 1 byte 書込 |
-| `NESPHP_NES_POKESTR_EXT` | **0xEB** | `nes_pokestr_ext($offset, $string)` → bank 2 に文字列の生バイトを bulk copy |
+| `NESPHP_NES_PEEK_EXT` | **0xE8** | `nes_peek_ext($offset)` → bank 3 の `$6000+offset` から 1 byte 読出 |
+| `NESPHP_NES_PEEK16_EXT` | **0xE9** | `nes_peek16_ext($offset)` → bank 3 から 2 byte LE 読出 |
+| `NESPHP_NES_POKE_EXT` | **0xEA** | `nes_poke_ext($offset, $byte)` → bank 3 に 1 byte 書込 |
+| `NESPHP_NES_POKESTR_EXT` | **0xEB** | `nes_pokestr_ext($offset, $string)` → bank 3 に文字列の生バイトを bulk copy |
 
-**実装ノート**: 各 handler は入口で MMC1 PRG-RAM bank 2 へ切替、操作、bank 0 へ復帰
+**実装ノート**: 各 handler は入口で MMC1 PRG-RAM bank 3 へ切替、操作、bank 0 へ復帰
 を atomic に行う。bank 切替コストは ~60 cycles per call (= MMC1 シリアル書込 ×2)。
-`nes_pokestr_ext` は STR_POOL (bank 0) と bank 2 が同時マップ不可のため、内蔵 RAM
-の text buffer ($0600-$06FF) を中継する 2-stage コピー (string max 255 byte で 1 chunk)。
+`nes_pokestr_ext` は STR_POOL (bank 2) と USER_RAM_EXT (bank 3) が同時マップ不可
+のため、内蔵 RAM の text buffer ($0600-$06FF) を中継する 2-stage コピー (stage 1
+= bank 2 → 内蔵 RAM、stage 2 = 内蔵 RAM → bank 3、string max 255 byte で 1 chunk)。
 
 ### serializer のパターン畳み込み
 

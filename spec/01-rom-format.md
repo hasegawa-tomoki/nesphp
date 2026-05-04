@@ -134,7 +134,7 @@ offset  size  field              備考
 ```
 Offset     Bytes                                             ASCII
 ---------  ------------------------------------------------  ----------------
-00000000   4e 45 53 1a 04 00 10 00 04 00 00 00 00 00 00 00   NES.............   iNES ヘッダ (MMC1 / mapper 1, SXROM)
+00000000   4e 45 53 1a 04 00 10 08 00 00 09 07 00 00 00 00   NES.............   iNES ヘッダ (NES 2.0、MMC1 / mapper 1, SXROM)
 00000010   [ VM 6502 asm ~16KB ... ]                                             PRG bank 0
 ...
                                                              ↓ nesphp-bc セクション
@@ -174,11 +174,19 @@ Offset     Bytes                                             ASCII
 00018010   [ PRG bank 2 (16KB、予約)、PRG bank 3 ($C000-$FFFF, CODE 固定) ]
 ```
 
-ヘッダの `04 00 10 00 04` は MMC1 (マッパー 1, SXROM): PRG-ROM = 4 × 16KB = 64KB
-(将来 256KB まで拡張可)、CHR-ROM = 0 (= CHR-RAM 8KB を申告)、PRG-RAM = 4 × 8KB =
-32KB (bank 0=op_array、bank 1=ARR_POOL、bank 2=USER_RAM_EXT、bank 3=予約)。
-Flags 6 上位 nibble = 1 → mapper 1。詳細は [11-chr-banks](./11-chr-banks.md) と
-[02-ram-layout § PRG-RAM](./02-ram-layout.md)。
+ヘッダの `04 00 10 08 00 00 09 07` は **NES 2.0** 形式の MMC1 (mapper 1, SXROM):
+PRG-ROM = 4 × 16KB = 64KB、CHR-ROM = 0 (= CHR-RAM 8KB を申告)、Flags 7 = `08`
+(bit 2-3 = `10` → NES 2.0 marker)、byte 10 = `09` (PRG-RAM = 64 << 9 = 32KB
+volatile)、byte 11 = `07` (CHR-RAM = 64 << 7 = 8KB volatile)。Flags 6 上位 nibble
+= 1 → mapper 1。
+
+PRG-RAM 32KB の bank 配置: bank 0 = op_array + literals、bank 1 = ARR_POOL、
+bank 2 = STR_POOL、bank 3 = USER_RAM_EXT。詳細は [11-chr-banks](./11-chr-banks.md)
+と [02-ram-layout § PRG-RAM](./02-ram-layout.md)。
+
+**NES 2.0 ヘッダが必須な理由**: FCEUX は iNES 1.0 ヘッダだと PRG-RAM サイズを
+8KB 固定として扱い MMC1 の bank 切替を無視する。NES 2.0 で 32KB を明示的に申告
+することで bank 1-3 が物理的に独立した RAM ページとしてマップされる。
 
 ### 見どころ
 

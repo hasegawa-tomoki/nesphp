@@ -192,27 +192,31 @@ USER_RAM はオーバーヘッドゼロでバイトアクセスできる。
 MMC1 の `$A000` レジスタ bit 2-3 が PRG-RAM bank select (CHR-RAM 環境では bit 0-1
 は no-op)。`cur_prg_ram_bank` ZP byte で現状を追跡。
 
+**iNES ヘッダ要件**: FCEUX は **NES 2.0 ヘッダ** で PRG-RAM 32KB を明示的に申告
+した場合のみ bank 切替を honor する (Flags 7 bit 2-3 = `10`、byte 10 = `$09`)。
+iNES 1.0 ヘッダだと 8KB 固定扱いで bank 1-3 が bank 0 にエイリアスする。詳細は
+[01-rom-format § iNES ヘッダ](./01-rom-format.md)。
+
 ### 各 bank の用途
 
 | bank | 用途 | 切替タイミング |
 |---|---|---|
-| **0** (デフォルト) | header + op_array + literals + STR_POOL | dispatch loop の常時マップ |
+| **0** (デフォルト) | header + op_array + literals + CMP_LIT_STAGE | dispatch loop の常時マップ |
 | **1** | ARR_POOL 8KB (配列専用) | 配列 handler の入口/出口で atomic 切替 |
-| **2** | USER_RAM_EXT 8KB (peek/poke_ext 用) | `nes_*_ext` intrinsic 内で atomic 切替 |
-| **3** | 予約 | 将来の拡張 |
+| **2** | STR_POOL 8KB (文字列リテラル pool) | 文字列を読む handler / `cln_string` で atomic 切替 |
+| **3** | USER_RAM_EXT 8KB (peek/poke_ext 用) | `nes_*_ext` intrinsic 内で atomic 切替 |
 
 ### bank 0 内訳 (現行 8KB レイアウト)
 
 ```
 $6000-$600F  header (16 B)
 $6010-...    op_array (24B × 命令数、最大 ~308 op)
-...-$7CFF    literals (op_array の直後に memcpy、~40 zval × 16B)
-$7D00-$7F7F  CMP_LIT_STAGE (640 B、コンパイル中のみ。post-compile は free)
-$7F80-$7FFF  STR_POOL (128 B、文字列 pool)
+...-$7CFF    literals (op_array の直後に memcpy、~48 zval × 16B)
+$7D00-$7FFF  CMP_LIT_STAGE (768 B、コンパイル中のみ。post-compile は free)
 ```
 
-ARR_POOL が bank 1 に移ったため、旧 ARR_POOL 領域 ($7000-$7CFF) は post-compile
-で完全に free。将来 op_array 拡張に転用可。
+STR_POOL が bank 2 に移った分、CMP_LIT_STAGE が $7F80 → $8000 に拡張され
+zval 上限が 40 → 48 に増えた。
 
 ### bank 1 (ARR_POOL 専用)
 
@@ -223,7 +227,20 @@ $6000-$7FFF  ARR_POOL (8 KB、追記型成長、GC なし)
 旧 720B (bank 0 内に分割共有) → 8 KB (専有) で **約 11 倍** に拡大。tetris の
 全面再描画など、配列が増える用途のメモリ圧を解消。
 
-### bank 2 (USER_RAM_EXT)
+### bank 2 (STR_POOL 専用)
+
+```
+$6000-$7FFF  STR_POOL (8 KB、文字列リテラル pool)
+```
+
+旧 128B (bank 0 内 `$7F80-$7FFF`) → 8KB で **約 64 倍** に拡大。
+`cln_string` が `\xHH` エスケープを decode した bytes をここに書き、
+IS_STRING zval は STR_POOL 内 offset (= OPS_BASE 相対 = 0..$1FFF) を持つ。
+runtime 側でも文字列を読む handler (`echo` / `nes_put` / `nes_puts` /
+`nes_pokestr` / `nes_pokestr_ext` stage 1 / 文字列等価比較) は呼出前後で
+bank 2 ↔ bank 0 を atomic 切替する。
+
+### bank 3 (USER_RAM_EXT)
 
 ```
 $6000-$7FFF  USER_RAM_EXT (8 KB、汎用 byte 領域)
@@ -231,12 +248,15 @@ $6000-$7FFF  USER_RAM_EXT (8 KB、汎用 byte 領域)
 
 `nes_peek_ext` / `nes_peek16_ext` / `nes_poke_ext` / `nes_pokestr_ext` で読み書き。
 13-bit offset (0-8191)、内蔵 RAM の `nes_peek/poke` (256B) より遥かに大容量。
+`nes_pokestr_ext` のソース (STR_POOL = bank 2) と宛先 (USER_RAM_EXT = bank 3) は
+同時マップ不可なので、内蔵 RAM `$0600-$06FF` を中継する 2-stage コピーを使う。
 
 ### bank 切替コスト
 
-MMC1 シリアル書込は 5 STA + 4 LSR = ~30 cycles。bank 1/2 への入出口で 2 回切替
-= **約 60 cycles オーバーヘッド** per intrinsic 呼出。配列 50 回/フレーム の
-tetris で約 10% スローダウン (許容範囲)。
+MMC1 シリアル書込は 5 STA + 4 LSR = ~30 cycles。bank の入出口で 2 回切替
+= **約 60 cycles オーバーヘッド** per intrinsic 呼出。文字列 handler / 配列
+handler が高頻度で呼ばれる tetris のようなケースでも 10% 程度のスローダウンに
+留まる (許容範囲)。
 
 詳細は [13-compiler § PRG-RAM bank 構成](./13-compiler.md) と
 [04-opcode-mapping § ext intrinsic](./04-opcode-mapping.md)。
