@@ -84,10 +84,11 @@ USER_RAM_BASE       = $0700
 USER_RAM_SIZE       = $0100      ; 256 bytes
 
 ; --- User RAM Extended (peek/poke_ext 用) ---
-; PRG-RAM bank 2 の全 8KB を汎用 byte 領域として確保。bank 切替で使う。
-; bank 2 へのアクセスは nes_*_ext 系 intrinsic に閉じ込め、入口で BANK2、
-; 出口で BANK0 に戻す。ARR_POOL (bank 1) や op_array (bank 0) には影響しない。
-USER_RAM_EXT_BASE   = $6000      ; bank 2 が見えてるときの先頭
+; PRG-RAM bank 3 の全 8KB を汎用 byte 領域として確保。bank 切替で使う。
+; bank 3 へのアクセスは nes_*_ext 系 intrinsic に閉じ込め、入口で BANK3、
+; 出口で BANK0 に戻す。ARR_POOL (bank 1) / STR_POOL (bank 2) / op_array (bank 0)
+; には影響しない。
+USER_RAM_EXT_BASE   = $6000      ; bank 3 が見えてるときの先頭
 USER_RAM_EXT_SIZE   = $2000      ; 8192 bytes
 
 ; --- OAM DMA レジスタ ---
@@ -3638,7 +3639,7 @@ nps_done:
 ; op1 = $offset (0..8191、IS_LONG)
 ; result = IS_LONG with byte value
 ;
-; PRG-RAM bank 2 ($6000-$7FFF when bank 2 mapped) を 8KB の汎用領域として読出。
+; PRG-RAM bank 3 ($6000-$7FFF when bank 3 mapped) を 8KB の汎用領域として読出。
 ; offset は & $1FFF で 13-bit にラップ。bank 切替は intrinsic 内で完結。
 ; =============================================================================
 handle_nesphp_nes_peek_ext:
@@ -3652,9 +3653,9 @@ handle_nesphp_nes_peek_ext:
     ADC #>USER_RAM_EXT_BASE       ; + $60
     STA TMP0+1                    ; src hi
 
-    PRG_RAM_BANK2
+    PRG_RAM_BANK3
     LDY #0
-    LDA (TMP0), Y                 ; bank 2 読出
+    LDA (TMP0), Y                 ; bank 3 読出
     STA RESULT_VAL+1              ; ★ 読み出した A を bank 0 復帰前に保存
     PRG_RAM_BANK0                 ; (BANK0 macro 内の LDA #0 で A clobber)
 
@@ -3682,7 +3683,7 @@ handle_nesphp_nes_peek16_ext:
     ADC #>USER_RAM_EXT_BASE
     STA TMP0+1
 
-    PRG_RAM_BANK2
+    PRG_RAM_BANK3
     LDY #0
     LDA (TMP0), Y
     STA RESULT_VAL+1              ; lo
@@ -3715,7 +3716,7 @@ handle_nesphp_nes_poke_ext:
     ADC #>USER_RAM_EXT_BASE
     STA TMP0+1
 
-    PRG_RAM_BANK2
+    PRG_RAM_BANK3
     LDY #0
     LDA OP2_VAL+1                 ; byte to write
     STA (TMP0), Y
@@ -3728,11 +3729,11 @@ handle_nesphp_nes_poke_ext:
 ;
 ; op1 = $offset、result slot = $string (= 3 引数 intrinsic 枠と同じ慣習)
 ;
-; ソース ($string) は STR_POOL (PRG-RAM bank 0)、宛先は bank 2。両方を同時に
+; ソース ($string) は STR_POOL (PRG-RAM bank 0)、宛先は bank 3。両方を同時に
 ; マップできないので、内蔵 RAM の text buffer ($0600-$06FF, 256B) を中継
 ; バッファとして使う 2-stage コピー:
 ;   stage 1 (bank 0): STR_POOL → $0600 (string max 255 bytes、1 chunk で足りる)
-;   stage 2 (bank 2): $0600 → USER_RAM_EXT[$offset]
+;   stage 2 (bank 3): $0600 → USER_RAM_EXT[$offset]
 ; =============================================================================
 handle_nesphp_nes_pokestr_ext:
     JSR resolve_op1
@@ -3774,17 +3775,17 @@ nps_ext_to_ram_done:
     ADC #>USER_RAM_EXT_BASE
     STA TMP1+1                    ; dest hi
 
-    ; --- stage 2 (bank 2): 中継 → USER_RAM_EXT ---
-    PRG_RAM_BANK2
+    ; --- stage 2 (bank 3): 中継 → USER_RAM_EXT ---
+    PRG_RAM_BANK3
     LDY #0
-nps_ext_to_bank2:
+nps_ext_to_bank3:
     CPY TMP2
-    BEQ nps_ext_to_bank2_done
+    BEQ nps_ext_to_bank3_done
     LDA $0600, Y
     STA (TMP1), Y
     INY
-    BNE nps_ext_to_bank2
-nps_ext_to_bank2_done:
+    BNE nps_ext_to_bank3
+nps_ext_to_bank3_done:
     PRG_RAM_BANK0
 
     JMP advance
