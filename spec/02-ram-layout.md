@@ -1,122 +1,122 @@
-# 02. RAM レイアウトと 4B tagged value
+# 02. RAM Layout and 4B Tagged Value
 
 [← README](./README.md) | [← 01-rom-format](./01-rom-format.md) | [→ 03-vm-dispatch](./03-vm-dispatch.md)
 
-ROM 側は Zend 互換 16B zval を守る ([01-rom-format](./01-rom-format.md)) が、**RAM 側は 4B に縮退**する。2KB RAM でヒープなしの制約を守るため。
+The ROM side preserves the Zend-compatible 16B zval ([01-rom-format](./01-rom-format.md)), but **the RAM side narrows it to 4B**. We need this to honor the "2KB RAM, no heap" constraint.
 
-## 方針
+## Policy
 
-- ROM: Zend 互換 16B zval (faithful)
-- RAM: 4B tagged value (縮退、ただし type ID は Zend 互換)
-- 動的アロケーションは一切しない。全スロットは固定オフセットで決め打ち
-- VM は ROM から 16B zval を fetch → その場で 4B tagged に narrow → スタックに push
+- ROM: Zend-compatible 16B zval (faithful)
+- RAM: 4B tagged value (narrowed; the type ID is still Zend-compatible)
+- No dynamic allocation. Every slot lives at a fixed offset
+- The VM fetches the 16B zval from ROM, narrows on the spot to 4B tagged, and pushes it on the stack
 
-## WRAM マップ ($0000-$07FF, 2KB)
+## WRAM map ($0000-$07FF, 2KB)
 
 ```
-$0000-$007F  ゼロページ: VM レジスタ (PC/SP/LITBASE/CVBASE/TMP 等)
-             + L3S コンパイラ作業領域 (CMP_* 群、コンパイル中のみ生存)
-$0080-$00FF  ゼロページ: コントローラ状態, NMI 作業変数, 一時 TMP
-$0100-$01FF  6502 ハードウェアスタック (256B)
-$0200-$02FF  OAM シャドウ (256B, 延長ゴール用。MVP では未使用)
-$0300-$03FF  VM データスタック (4B × 64 エントリ = 256B)
-$0400-$04FF  CV スロット (4B × 最大 64 エントリ = 256B)
-$0500-$05FF  TMP スロット (4B × 最大 64 エントリ = 256B)
-$0600-$06FF  テキスト行バッファ / CONCAT 作業領域
-             (コンパイル中は print_int16 出力先、エラー表示で使用)
-$0700-$07FF  L3S 時: CV シンボル表 (4B × 最大 64 = 256B)
-             runtime: USER_RAM (peek/poke 用 256B 汎用バイト領域)
+$0000-$007F  Zero page: VM registers (PC/SP/LITBASE/CVBASE/TMP etc.)
+             + L3S compiler workspace (CMP_* family, only alive during compile)
+$0080-$00FF  Zero page: controller state, NMI scratch, transient TMP
+$0100-$01FF  6502 hardware stack (256B)
+$0200-$02FF  OAM shadow (256B; for extended goals; unused in MVP)
+$0300-$03FF  VM data stack (4B × 64 entries = 256B)
+$0400-$04FF  CV slots (4B × up to 64 entries = 256B)
+$0500-$05FF  TMP slots (4B × up to 64 entries = 256B)
+$0600-$06FF  Text-row buffer / CONCAT scratch
+             (during compile: print_int16 sink, used by error display)
+$0700-$07FF  Compile-time: CV symbol table (4B × up to 64 = 256B)
+             Runtime: USER_RAM (256B generic byte area for peek/poke)
 ```
 
-L3S (on-NES コンパイラ) は電源 ON 直後の一瞬だけ走り、その後 VM runtime が起動する。コンパイル中と runtime では **WRAM を時間的に分離して共用**する。詳細は [13-compiler](./13-compiler.md)「WRAM 共用契約」を参照。
+The L3S on-NES compiler runs only briefly right after power-on; the VM runtime takes over afterward. Compile-time and runtime **share WRAM through temporal separation**. Details: [13-compiler](./13-compiler.md), section "WRAM sharing contract".
 
-### 2KB 利用合計
+### 2KB total usage
 
-- MVP ではスタック・CV・TMP すべてフルに使う必要はない。`examples/hello.php` は **VM データスタック 1 段、CV/TMP 0 個**で動く
-- 延長ゴール (`while ($i < 10) { ... }`) で CV 1-2 個、TMP 2-4 個、VM stack 2-3 段程度
-- 64 段 VM スタック + 32 CV + 64 TMP で合計 640B、RAM 予算の 30%
+- The MVP doesn't need to fill the stacks / CV / TMP. `examples/hello.php` runs with **a 1-deep VM data stack and zero CV/TMP**
+- Extension goals (`while ($i < 10) { ... }`) use 1-2 CV, 2-4 TMP, 2-3 deep VM stack
+- 64-deep VM stack + 32 CV + 64 TMP totals 640B, ~30% of the RAM budget
 
 ---
 
-## ゼロページ VM レジスタ (実装済み)
+## Zero-page VM registers (implemented)
 
-ゼロページに置くと `LDA (zp),Y` の間接アドレッシングと `LDX zp` の即値が使えて、6502 で最速。ca65 `.segment "ZEROPAGE"` で `.res` 宣言し、ld65 が自動配置する。現在の配置:
+Putting them on the zero page lets us use `LDA (zp),Y` indirection and `LDX zp` immediates — fastest on the 6502. Declared with `.res` in `.segment "ZEROPAGE"`, ld65 places them automatically. Current layout:
 
-| label | サイズ | 用途 |
+| label | size | purpose |
 |---|---|---|
-| `VM_PC` | 2 | 現在の zend_op の ROM アドレス (fetch 元) |
-| `VM_LITBASE` | 2 | literals 配列の ROM アドレス (= OPS_BASE + literals_off) |
-| `VM_CVBASE` | 2 | CV スロット配列の RAM アドレス (= $0400) |
-| `VM_TMPBASE` | 2 | TMP スロット配列の RAM アドレス (= $0500) |
-| `PPU_CURSOR` | 2 | nametable 書き込み位置 ($2000 ベースの絶対 PPU アドレス) |
-| `OP1_VAL` | 4 | resolve_op1 が書き込む 4B tagged value |
-| `OP2_VAL` | 4 | resolve_op2 が書き込む 4B tagged value |
-| `RESULT_VAL` | 4 | handler が write_result で書き戻す 4B tagged value |
-| `TMP0` | 2 | 汎用 16bit 作業レジスタ |
-| `TMP1` | 2 | 汎用 16bit 作業レジスタ |
-| `TMP2` | 2 | 汎用 16bit 作業レジスタ |
-| `DIV_COUNTER` | 1 | (予約、未使用) |
-| `buttons` | 1 | コントローラ状態 (bit 7=A, 6=B, ..., 0=R) |
-| `pi_count` | 1 | `print_int16` が出力したバイト数 (echo_long で PPU_CURSOR 更新に使用) |
-| `sprite_mode_on` | 1 | `0 = forced_blanking` / `1 = sprite_mode` の状態フラグ |
+| `VM_PC` | 2 | ROM address of the current zend_op (fetch source) |
+| `VM_LITBASE` | 2 | ROM address of the literals array (= OPS_BASE + literals_off) |
+| `VM_CVBASE` | 2 | RAM address of the CV slot array (= $0400) |
+| `VM_TMPBASE` | 2 | RAM address of the TMP slot array (= $0500) |
+| `PPU_CURSOR` | 2 | nametable write position (absolute PPU address based on $2000) |
+| `OP1_VAL` | 4 | 4B tagged value resolve_op1 writes |
+| `OP2_VAL` | 4 | 4B tagged value resolve_op2 writes |
+| `RESULT_VAL` | 4 | 4B tagged value handlers write back via write_result |
+| `TMP0` | 2 | General-purpose 16-bit work register |
+| `TMP1` | 2 | General-purpose 16-bit work register |
+| `TMP2` | 2 | General-purpose 16-bit work register |
+| `DIV_COUNTER` | 1 | (reserved, unused) |
+| `buttons` | 1 | Controller state (bit 7=A, 6=B, ..., 0=R) |
+| `pi_count` | 1 | Bytes that `print_int16` emitted (echo_long uses it to advance PPU_CURSOR) |
+| `sprite_mode_on` | 1 | State flag: `0 = forced_blanking` / `1 = sprite_mode` |
 
-合計 ~34 バイト。ZP 予算 256B のうち 13% 程度しか使っていないので、今後も余裕あり。
+Total ~34 bytes — about 13% of the 256B ZP budget, with plenty of headroom remaining.
 
 ---
 
-## 4B tagged value の仕様
+## 4B tagged value layout
 
 ```
-byte 0: type ID    (Zend 互換)
+byte 0: type ID    (Zend-compatible)
 byte 1: payload lo
 byte 2: payload hi
-byte 3: payload ext (type により意味が変わる、下表)
+byte 3: payload ext (meaning depends on type, see table below)
 ```
 
-### type ID (Zend `zend_types.h` と互換)
+### type ID (compatible with Zend `zend_types.h`)
 
-| 値 | 名前 | byte 1-2 の意味 | byte 3 の意味 |
+| Value | Name | byte 1-2 meaning | byte 3 meaning |
 |----|------|----------------|----------------|
 | 0 | IS_UNDEF | 0 | 0 |
 | 1 | IS_NULL | 0 | 0 |
 | 2 | IS_FALSE | 0 | 0 |
 | 3 | IS_TRUE | 0 | 0 |
-| 4 | IS_LONG | **16bit 符号付き整数** | 0 (将来符号拡張用) |
-| 5 | IS_DOUBLE | **未対応** | — |
-| 6 | IS_STRING | val[] への 16bit OPS_BASE 相対 offset | **L3S では文字列長 (下位 1B)**、L3 では 0 |
-| 7 | IS_ARRAY | **未対応** | — |
-| 8 | IS_OBJECT | **未対応** | — |
+| 4 | IS_LONG | **16-bit signed integer** | 0 (reserved for future sign extension) |
+| 5 | IS_DOUBLE | **Unsupported** | — |
+| 6 | IS_STRING | 16-bit OPS_BASE-relative offset to val[] | **L3S: string length (low 1B)**, L3: 0 |
+| 7 | IS_ARRAY | **Unsupported** | — |
+| 8 | IS_OBJECT | **Unsupported** | — |
 
-**L3 (host serializer 経路)**: IS_STRING の byte 1-2 は ROM 内 `zend_string` 構造体への offset。length は `zend_string` の offset 16 から読む。byte 3 は未使用 (0)。
+**L3 (host serializer path)**: For IS_STRING, byte 1-2 is the offset to a ROM-resident `zend_string` struct. Length is read from offset 16 of `zend_string`. byte 3 unused (0).
 
-**L3S (on-NES コンパイラ経路、spec/13-compiler.md)**: IS_STRING の byte 1-2 は ROM 内 val[] (生バイト列) への offset。length は byte 3 に格納 (255B 上限)。zend_string 構造体は持たない。
+**L3S (on-NES compiler path, [13-compiler](./13-compiler.md))**: For IS_STRING, byte 1-2 is the offset to val[] (raw bytes) in ROM. Length lives in byte 3 (255B cap). No `zend_string` struct.
 
-### narrow のルール
+### Narrowing rules
 
-| ROM 側 (16B zval) | RAM 側 (4B tagged) |
+| ROM-side (16B zval) | RAM-side (4B tagged) |
 |---|---|
-| `IS_LONG` (8B lval) 範囲 -32768..32767 | そのまま 16bit に |
-| `IS_LONG` 範囲外 | serializer で compile error (実行時には発生しない) |
-| `IS_STRING` value 下位 2B | byte 1-2 にコピー (ROM offset) |
-| `IS_STRING` value offset 2 (L3S のみ) | byte 3 にコピー (length) |
-| `IS_TRUE/FALSE/NULL` | type ID だけコピー、payload 0 |
+| `IS_LONG` (8B lval) in -32768..32767 | Narrow to 16-bit |
+| `IS_LONG` out of range | Compile error at the serializer (never seen at runtime) |
+| `IS_STRING` value low 2B | Copy to bytes 1-2 (ROM offset) |
+| `IS_STRING` value offset 2 (L3S only) | Copy to byte 3 (length) |
+| `IS_TRUE/FALSE/NULL` | Copy only the type ID, payload is zero |
 
-### narrow は誰がやるか
+### Who narrows?
 
-**VM 側のハンドラ** (`resolve_op1` / `resolve_op2`) がフェッチ時に narrow する。コンパイラ (host の serializer または NES の compiler) は ROM に Zend 互換の 16B zval を書くだけで、narrow を事前に行わない。これは「ROM は Zend のレイアウトそのまま」という L3 方針の帰結。
+**The VM-side handlers** (`resolve_op1` / `resolve_op2`) narrow at fetch. The compiler (host serializer or NES compiler) writes Zend-compatible 16B zvals into ROM and never narrows ahead of time. This follows from the L3 policy of "ROM keeps Zend's layout as-is".
 
 ---
 
-## データスタック ($0300-$03FF)
+## Data stack ($0300-$03FF)
 
-4B tagged value × 64 段 = 256B。VM_SP は `$0300` を底、`$03FF+1` を満杯として下向きに伸ばす (または上向きでもよい、要決定)。
+4B tagged value × 64 entries = 256B. `VM_SP` uses `$0300` as the bottom and `$03FF+1` as the cap, growing downward (or upward; choice TBD).
 
-**推奨**: 上向きに伸ばす。`push` = `STA ($02),Y : INY ×4`。底は `$0300`、満杯は `$0400`。
+**Recommended**: grow upward. `push` = `STA ($02),Y : INY ×4`. Bottom at `$0300`, full at `$0400`.
 
-### push/pop マクロ
+### push/pop macros
 
 ```asm
-; push A/X/Y (型/lo/hi) into VM stack
+; push A/X/Y (type/lo/hi) onto VM stack
 .macro PUSH_LXH
     LDY #0
     STA (VM_SP),Y       ; type
@@ -139,133 +139,108 @@ byte 3: payload ext (type により意味が変わる、下表)
 .endmacro
 ```
 
-(疑似コード、実際の実装は [03-vm-dispatch](./03-vm-dispatch.md) と合わせて調整)
+(Pseudocode; align with [03-vm-dispatch](./03-vm-dispatch.md) for the actual implementation.)
 
 ---
 
-## CV スロットと TMP スロット
+## CV slots and TMP slots
 
-- **CV** (`$0400-$04FF`): Zend の「コンパイル済みローカル変数」。PHP の `$a`, `$b` 等がスロット番号に割り当てられる。serializer は op_array header の `num_cvs` を出力、VM はそれを超えるスロット番号を検出したら panic
-- **TMP** (`$0500-$05FF`): Zend の `IS_TMP_VAR` / `IS_VAR`。短寿命の中間値
+- **CV** (`$0400-$04FF`): Zend's "compiled local variables". PHP's `$a`, `$b` etc. get assigned slot numbers. The serializer emits `num_cvs` in the op_array header; if the VM detects an out-of-range slot it panics
+- **TMP** (`$0500-$05FF`): Zend's `IS_TMP_VAR` / `IS_VAR`. Short-lived intermediates
 
-### アクセス
+### Access
 
 ```
 CV slot n  →  $0400 + n*4  
 TMP slot n →  $0500 + n*4  
 ```
 
-どちらも 4B tagged value 1 個分。最大スロット数 64 (= 256B / 4)。
+Each is one 4B tagged value. Maximum slot count is 64 (= 256B / 4).
 
-### スロット解決の 16-bit 化 (重要)
+### 16-bit slot resolution (important)
 
-zend_op の `op.var` フィールドには **`slot * 16`** が 16-bit で入る (Zend 流)。
-VM 側はこれを `/4` して `slot * 4` (RAM オフセット) を計算する。
+The `op.var` field in `zend_op` carries **`slot * 16`** as a 16-bit value (Zend convention). The VM divides by 4 to get `slot * 4` (the RAM offset).
 
-**slot ≥ 16** のとき `slot*16 ≥ 256` となり下位 1 byte だけでは表現できないため、
-解決は必ず 16-bit で行う。`vm/nesphp.s` の `cv_addr_y` / `tmp_addr_y` ヘルパーがこの計算を集約しており、
-res_cv / res_tmp / wr_cv / wr_tmp / assign_to_cv / incdec_cv_addr すべてここを通る。
+**When slot ≥ 16**, `slot*16 ≥ 256` and a single byte can't hold it, so the resolution must be 16-bit. `vm/nesphp.s`'s `cv_addr_y` / `tmp_addr_y` helpers consolidate this calculation; res_cv / res_tmp / wr_cv / wr_tmp / assign_to_cv / incdec_cv_addr all go through them.
 
 ---
 
-## USER_RAM ($0700-$07FF, 256B、runtime のみ)
+## USER_RAM ($0700-$07FF, 256B, runtime only)
 
-L3S コンパイル完了後、CV シンボル表は不要になるため、同領域 256B を **peek/poke 用の汎用バイト領域**として再利用する。
+After L3S compile finishes, the CV symbol table is no longer needed, so we reuse those 256B as a **generic byte region for peek/poke**.
 
-| 用途 | 例 |
+| Use case | Example |
 |---|---|
-| 大きな定数テーブル | Tetris の 28 回転 shape table を 56 byte string で `nes_pokestr(0, $data)` で bulk load |
-| ゲーム状態の生バイト保存 | `nes_poke(64, $byte)` / `$x = nes_peek(64)` |
-| 16-bit テーブル | `nes_peek16($ofs)` で little-endian 2 byte 復元 |
+| Large constant tables | Tetris bulk-loads its 28-rotation shape table (56-byte string) via `nes_pokestr(0, $data)` |
+| Game-state raw byte storage | `nes_poke(64, $byte)` / `$x = nes_peek(64)` |
+| 16-bit tables | `nes_peek16($ofs)` reconstructs a little-endian 2-byte value |
 
-**設計理由**: 配列 (`$a = [...]`) は 1 要素あたり 16 byte の zval オーバーヘッドがあるため、
-バイト単位の大量データ (例: 56 byte の 28 entry shape table) では 7 倍のメモリを食う。
-USER_RAM はオーバーヘッドゼロでバイトアクセスできる。
+**Why**: arrays (`$a = [...]`) carry 16-byte zval overhead per element, so byte-grained large data (like a 56-byte 28-entry shape table) costs 7× the memory. USER_RAM lets you do byte-level access with zero overhead.
 
-詳細は [04-opcode-mapping § peek/poke](./04-opcode-mapping.md) と [13-compiler](./13-compiler.md) を参照。
+Details: [04-opcode-mapping § peek/poke](./04-opcode-mapping.md), [13-compiler](./13-compiler.md).
 
 ---
 
-## PRG-RAM ($6000-$7FFF、SXROM 4 bank × 8KB = 32KB)
+## PRG-RAM ($6000-$7FFF, SXROM 4 banks × 8KB = 32KB)
 
-カートリッジ側 PRG-RAM 32KB を 8KB 窓 ($6000-$7FFF) に bank 切替で出し分ける。
-MMC1 の `$A000` レジスタ bit 2-3 が PRG-RAM bank select (CHR-RAM 環境では bit 0-1
-は no-op)。`cur_prg_ram_bank` ZP byte で現状を追跡。
+The cartridge's 32KB of PRG-RAM is multiplexed into an 8KB window ($6000-$7FFF) via bank switching. MMC1's `$A000` register bits 2-3 select the PRG-RAM bank (in CHR-RAM mode, bits 0-1 are no-ops). The ZP byte `cur_prg_ram_bank` tracks the current bank.
 
-**iNES ヘッダ要件**: FCEUX は **NES 2.0 ヘッダ** で PRG-RAM 32KB を明示的に申告
-した場合のみ bank 切替を honor する (Flags 7 bit 2-3 = `10`、byte 10 = `$09`)。
-iNES 1.0 ヘッダだと 8KB 固定扱いで bank 1-3 が bank 0 にエイリアスする。詳細は
-[01-rom-format § iNES ヘッダ](./01-rom-format.md)。
+**iNES header requirement**: FCEUX honors bank switching only if the **NES 2.0 header** declares 32KB of PRG-RAM (Flags 7 bit 2-3 = `10`, byte 10 = `$09`). With an iNES 1.0 header, it treats PRG-RAM as a fixed 8KB and aliases banks 1-3 onto bank 0. Details: [01-rom-format § iNES header](./01-rom-format.md).
 
-### 各 bank の用途
+### Bank assignments
 
-| bank | 用途 | 切替タイミング |
+| bank | role | switch timing |
 |---|---|---|
-| **0** (デフォルト) | header + op_array + literals + CMP_LIT_STAGE | dispatch loop の常時マップ |
-| **1** | ARR_POOL 8KB (配列専用) | 配列 handler の入口/出口で atomic 切替 |
-| **2** | STR_POOL 8KB (文字列リテラル pool) | 文字列を読む handler / `cln_string` で atomic 切替 |
-| **3** | USER_RAM_EXT 8KB (peek/poke_ext 用) | `nes_*_ext` intrinsic 内で atomic 切替 |
+| **0** (default) | header + op_array + literals + CMP_LIT_STAGE | Always mapped during the dispatch loop |
+| **1** | ARR_POOL 8KB (arrays only) | Atomic switch at array-handler entry/exit |
+| **2** | STR_POOL 8KB (string literal pool) | Atomic switch in handlers that read strings / `cln_string` |
+| **3** | USER_RAM_EXT 8KB (peek/poke_ext) | Atomic switch inside `nes_*_ext` intrinsics |
 
-### bank 0 内訳 (現行 8KB レイアウト)
+### Bank 0 contents (current 8KB layout)
 
 ```
 $6000-$600F  header (16 B)
-$6010-...    op_array (12B × 命令数、最大 ~617 op)
-...-$7CFF    literals (op_array の直後に memcpy、~48 zval × 16B)
-$7D00-$7FFF  CMP_LIT_STAGE (768 B、コンパイル中のみ。post-compile は free)
+$6010-...    op_array (12B × num_ops, max ~617 op)
+...-$7CFF    literals (memcpy'd right after op_array, ~48 zval × 16B)
+$7D00-$7FFF  CMP_LIT_STAGE (768 B, compile-only — free post-compile)
 ```
 
-zend_op を 24B → 12B に圧縮 (lineno 削除 + 各 znode_op を 4B→2B、spec/01) した
-ことで op 上限が ~308 → ~617 に倍増。tetris.php (op_array 6.1KB) で bank 0
-使用率が 97.8% → 83% まで下がり余裕ができた。
+Compressing zend_op from 24B → 12B (drop lineno + compress each znode_op 4B→2B; spec/01) doubled the op cap from ~308 to ~617. tetris.php (op_array 6.1KB) went from 97.8% bank-0 occupancy to ~83%, restoring headroom.
 
-### bank 1 (ARR_POOL 専用)
+### Bank 1 (ARR_POOL only)
 
 ```
-$6000-$7FFF  ARR_POOL (8 KB、追記型成長、GC なし)
+$6000-$7FFF  ARR_POOL (8 KB, append-only growth, no GC)
 ```
 
-旧 720B (bank 0 内に分割共有) → 8 KB (専有) で **約 11 倍** に拡大。tetris の
-全面再描画など、配列が増える用途のメモリ圧を解消。
+Old 720B (split-shared inside bank 0) → 8 KB (dedicated). **About 11×** larger. Removed the memory pressure for array-heavy patterns like tetris's full repaint.
 
-### bank 2 (STR_POOL 専用)
-
-```
-$6000-$7FFF  STR_POOL (8 KB、文字列リテラル pool)
-```
-
-旧 128B (bank 0 内 `$7F80-$7FFF`) → 8KB で **約 64 倍** に拡大。
-`cln_string` が `\xHH` エスケープを decode した bytes をここに書き、
-IS_STRING zval は STR_POOL 内 offset (= OPS_BASE 相対 = 0..$1FFF) を持つ。
-runtime 側でも文字列を読む handler (`echo` / `nes_put` / `nes_puts` /
-`nes_pokestr` / `nes_pokestr_ext` stage 1 / 文字列等価比較) は呼出前後で
-bank 2 ↔ bank 0 を atomic 切替する。
-
-### bank 3 (USER_RAM_EXT)
+### Bank 2 (STR_POOL only)
 
 ```
-$6000-$7FFF  USER_RAM_EXT (8 KB、汎用 byte 領域)
+$6000-$7FFF  STR_POOL (8 KB, string literal pool)
 ```
 
-`nes_peek_ext` / `nes_peek16_ext` / `nes_poke_ext` / `nes_pokestr_ext` で読み書き。
-13-bit offset (0-8191)、内蔵 RAM の `nes_peek/poke` (256B) より遥かに大容量。
-`nes_pokestr_ext` のソース (STR_POOL = bank 2) と宛先 (USER_RAM_EXT = bank 3) は
-同時マップ不可なので、内蔵 RAM `$0600-$06FF` を中継する 2-stage コピーを使う。
+Old 128B (in bank 0, `$7F80-$7FFF`) → 8KB. **About 64×** larger. `cln_string` writes the bytes decoded from `\xHH` escapes here, and IS_STRING zvals carry the STR_POOL offset (OPS_BASE-relative, 0..$1FFF). At runtime, handlers that read strings (`echo` / `nes_put` / `nes_puts` / `nes_pokestr` / `nes_pokestr_ext` stage 1 / string equality) atomically swap bank 2 ↔ bank 0 around their access.
 
-### bank 切替コスト
+### Bank 3 (USER_RAM_EXT)
 
-MMC1 シリアル書込は 5 STA + 4 LSR = ~30 cycles。bank の入出口で 2 回切替
-= **約 60 cycles オーバーヘッド** per intrinsic 呼出。文字列 handler / 配列
-handler が高頻度で呼ばれる tetris のようなケースでも 10% 程度のスローダウンに
-留まる (許容範囲)。
+```
+$6000-$7FFF  USER_RAM_EXT (8 KB, generic byte region)
+```
 
-詳細は [13-compiler § PRG-RAM bank 構成](./13-compiler.md) と
-[04-opcode-mapping § ext intrinsic](./04-opcode-mapping.md)。
+Read/write via `nes_peek_ext` / `nes_peek16_ext` / `nes_poke_ext` / `nes_pokestr_ext`. 13-bit offsets (0-8191) — far larger than internal-RAM `nes_peek/poke` (256B). Since the source of `nes_pokestr_ext` (STR_POOL = bank 2) and the destination (USER_RAM_EXT = bank 3) cannot be mapped simultaneously, it uses a 2-stage copy through internal RAM `$0600-$06FF`.
+
+### Bank-switching cost
+
+MMC1 serial writes are 5 STA + 4 LSR = ~30 cycles. Switching at entry and exit is **~60 cycles per intrinsic call**. Even tetris-style scenarios that hit string and array handlers heavily slow down only ~10% (acceptable).
+
+Details: [13-compiler § PRG-RAM bank layout](./13-compiler.md), [04-opcode-mapping § ext intrinsic](./04-opcode-mapping.md).
 
 ---
 
-## 関連ドキュメント
+## Related documents
 
-- [01-rom-format](./01-rom-format.md) — ROM 側の 16B zval レイアウト
-- [03-vm-dispatch](./03-vm-dispatch.md) — operand resolver がこのレイアウトをどう読むか
-- [04-opcode-mapping](./04-opcode-mapping.md) — 各 opcode で使うスロット数
+- [01-rom-format](./01-rom-format.md) — ROM-side 16B zval layout
+- [03-vm-dispatch](./03-vm-dispatch.md) — How operand resolvers consume this layout
+- [04-opcode-mapping](./04-opcode-mapping.md) — Slots used by each opcode

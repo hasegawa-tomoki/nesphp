@@ -1,129 +1,129 @@
-# 13. on-NES コンパイラ (self-hosted, L3S)
+# 13. On-NES compiler (self-hosted, L3S)
 
 [← README](./README.md) | [← 12-zend-diff](./12-zend-diff.md)
 
-この文書は **PHP ソースを NES 起動時に 6502 がコンパイルする**構成 (自己ホスト版) の単一の真実。`vm/compiler.s` と host 側 `tools/pack_src.php`、および VM 本体 (`vm/nesphp.s`) のうち文字列リテラル処理に関わる箇所はこの spec を参照する。
+This document is the single source of truth for the **PHP-source-compiled-by-the-6502-at-boot** configuration (the self-hosted variant). `vm/compiler.s`, the host-side `tools/pack_src.php`, and the parts of the VM core (`vm/nesphp.s`) related to string literal processing all reference this spec.
 
-## 位置付け: 忠実度 L3S
+## Position: fidelity L3S
 
-[00-overview](./00-overview.md) の忠実度表に次の段を追加:
+Adds another row to the fidelity table in [00-overview](./00-overview.md):
 
-| 段階 | 内容 |
+| Level | Description |
 |------|------|
-| L3  | ホスト側 `serializer.php` が NESPHP 圧縮形 `zend_op 12B` (handler/lineno 削除 + 各 znode_op 4B→2B) / Zend 互換 `zval 16B` / `zend_string 24B` を ROM に焼く。NES VM は `ZOP_*` シンボル経由でフィールドオフセットを参照 |
-| **L3S** | **PHP ソースを ROM に焼き、起動時に 6502 コンパイラが PRG-RAM に `zend_op 12B` / `zval 16B` を emit する。zend_string 構造体は持たず、`value` フィールドに (ROM offset, length) を直接埋め込む** |
+| L3 | Host-side `serializer.php` bakes NESPHP-compressed `zend_op 12B` (handler/lineno dropped + each znode_op compressed 4B→2B) / Zend-compatible `zval 16B` / `zend_string 24B` into the ROM. The NES VM references field offsets through the `ZOP_*` symbols |
+| **L3S** | **PHP source is burned into the ROM. At boot the 6502 compiler emits `zend_op 12B` / `zval 16B` into PRG-RAM. No `zend_string` struct — the `value` field directly carries (ROM offset, length)** |
 
-L3S は L3 から「`zend_string` を使わない」という 1 点だけ意図的に逸脱する。[12-zend-diff](./12-zend-diff.md) 改変 10 参照。
+L3S deliberately deviates from L3 in exactly one point: "no `zend_string`". See [12-zend-diff](./12-zend-diff.md) deviation 10.
 
-## ロマン軸
+## Romance axis
 
-> 「実 php コマンドが吐いた opcode」という L3 のロマンは `make build/X.host.nes` で残す。L3S の**新しいロマン**は「**PHP ソースが ROM に焼かれ、電源 ON で 6502 自身が lex/parse/codegen して実行する**」。ホスト側 `pack_src.php` は「ファイル長を前置して ASCII チェックするだけ」まで縮退させ、**PHP 構文の知識は NES 側のみに存在する**ことを担保する。
+> The L3 romance ("opcodes the real php command emitted") survives via `make build/X.host.nes`. The L3S **new romance** is "**PHP source is burned into the ROM, and at power-on the 6502 itself lex/parse/codegens and runs**". The host-side `pack_src.php` is degraded to "prepend file length, ASCII-check" so that **the knowledge of PHP syntax exists only on the NES side**.
 
 ---
 
-## 全体フロー
+## End-to-end flow
 
 ```
-[ホスト]
+[Host]
   examples/NAME.php
     │
-    ▼ tools/pack_src.php (15 行)
-    │   - <?php タグは剥がさない
-    │   - ASCII チェックのみ
-    │   - u16 src_len を前置
+    ▼ tools/pack_src.php (15 lines)
+    │   - <?php tag preserved
+    │   - ASCII check only
+    │   - Prepend u16 src_len
     │
   build/NAME.src.bin
     │
     ▼ ca65 + ld65
-    │   - src.bin は .segment "PHPSRC" に焼かれる
-    │   - VM + compiler.s は .segment "CODE"
+    │   - src.bin → .segment "PHPSRC"
+    │   - VM + compiler.s → .segment "CODE"
     │
   build/NAME.nes
 
 
-[NES 起動時]
+[NES at boot]
   reset → PPU init → JSR compile_and_emit
     │
     ▼ compile_and_emit (vm/compiler.s)
-    │   - cmp_init:          ZP 状態初期化
-    │   - cmp_skip_php_tag:  先頭 `<?php` を消費
-    │   - cmp_parse_program: 文法規則に従い opcode と zval を emit
-    │   - cmp_finalize:      literals を最終位置に memcpy、header を書く
+    │   - cmp_init:          init ZP state
+    │   - cmp_skip_php_tag:  consume the leading `<?php`
+    │   - cmp_parse_program: emit opcodes and zvals per grammar
+    │   - cmp_finalize:      memcpy literals to their final spot, write the header
     │
-  PRG-RAM $6000-$7FFF に op_array 完成
+  op_array assembled in PRG-RAM $6000-$7FFF
     │
-    ▼ 既存 VM init / main_loop
-  PHP プログラム実行
+    ▼ Existing VM init / main_loop
+  PHP program runs
 ```
 
 ---
 
-## ROM レイアウト ($8000 起点)
+## ROM layout (relative to $8000)
 
-pack_src.php が出力する src.bin のバイトレイアウト:
+Byte layout `pack_src.php` produces in src.bin:
 
 ```
-offset   size  意味
-0        2     src_len (u16, little-endian)。$8002 以降の ASCII バイト数
-2        N     PHP ソース (生 ASCII、<?php タグ含む、src_len バイト)
+offset   size  meaning
+0        2     src_len (u16, little-endian). ASCII byte count after $8002
+2        N     PHP source (raw ASCII, including <?php tag, src_len bytes)
 ```
 
-N の上限は PRG bank 0 の残容量 = 16384 − 2 = 16382 バイト。それ以上は `pack_src.php` が compile error。
+N's cap is "PRG bank 0 remaining" = 16384 − 2 = 16382 bytes. Anything more is a `pack_src.php` compile error.
 
-**何が入っていないか**:
-- ❌ zend_string プール (旧試作版にはあったが撤廃)
-- ❌ 関数名テーブル / 識別子インターン表
-- ❌ lineno テーブル
-- ❌ 任意のホスト側 pre-digest データ
+**What's NOT in there**:
+- ❌ zend_string pool (early prototypes had it, removed)
+- ❌ Function-name table / identifier intern table
+- ❌ lineno table
+- ❌ Any host-side pre-digest data
 
 ---
 
-## 16B zval の nesphp 独自解釈 (L3S)
+## nesphp's interpretation of 16B zval (L3S)
 
-`_zval_struct` の 16B フィールドオフセットは [01-rom-format](./01-rom-format.md) と完全一致。**意味**だけ L3S で変更:
+`_zval_struct`'s 16B field offsets exactly match [01-rom-format](./01-rom-format.md). Only the **meaning** changes for L3S:
 
-| offset | size | L3 (host serializer) | L3S (NES コンパイラ) |
+| offset | size | L3 (host serializer) | L3S (NES compiler) |
 |--------|------|---------------------|----------------------|
-| 0-1    | 2    | IS_STRING 時: ROM 内 `zend_string` への offset | **IS_STRING 時: ROM 内 val[] への OPS_BASE 相対 offset** |
-| 2-3    | 2    | 未使用 (0 埋め) | **IS_STRING 時: 文字列長 (unsigned 16bit)** |
-| 4-7    | 4    | 未使用 (0 埋め) | 未使用 (0 埋め) |
-| 8      | 1    | u1.type_info 下位 1B = type ID | 同じ |
-| 9-15   | 7    | 0 埋め | 0 埋め |
+| 0-1    | 2    | When IS_STRING: offset to a ROM-resident `zend_string` | **When IS_STRING: OPS_BASE-relative offset to the val[] in ROM** |
+| 2-3    | 2    | Unused (zero-fill) | **When IS_STRING: string length (unsigned 16-bit)** |
+| 4-7    | 4    | Unused (zero-fill) | Unused (zero-fill) |
+| 8      | 1    | u1.type_info low 1B = type ID | Same |
+| 9-15   | 7    | Zero-fill | Zero-fill |
 
-IS_LONG など他の type は L3 と同じ。
+Other types (IS_LONG etc.) are identical to L3.
 
-### value フィールドの意味 (IS_STRING 時)
+### Meaning of value (when IS_STRING)
 
 ```
-L3 (host):  value.str → zend_string (24B ヘッダ) → offset 16 に len, offset 24 から val[]
-L3S:        value 下位 2B → ROM 上の val[] 先頭 (OPS_BASE 相対)
-            value 次の 2B → length
-            (zend_string 構造体は存在しない)
+L3 (host):  value.str → zend_string (24B header) → len at offset 16, val[] at offset 24
+L3S:        value low 2B → ROM offset of val[] (relative to OPS_BASE)
+            value next 2B → length
+            (no zend_string struct exists)
 ```
 
-VM はこの offset+length を読めば済むので、header/hash/refcount を辿るサイクルが消え、`echo_string` や `vec_string` が劇的に短くなる ([12-zend-diff](./12-zend-diff.md) 改変 10)。
+The VM only needs to read offset+length, eliminating the cycles to chase header/hash/refcount; `echo_string` and `vec_string` get dramatically shorter ([12-zend-diff](./12-zend-diff.md) deviation 10).
 
 ---
 
-## 4B tagged value (runtime) の拡張
+## 4B tagged value (runtime) extension
 
-[02-ram-layout](./02-ram-layout.md) の 4B tagged value は L3S で **byte 3 の意味**が変わる:
+The 4B tagged value in [02-ram-layout](./02-ram-layout.md) gets a **new meaning for byte 3** in L3S:
 
 ```
-byte 0: type ID              (Zend 互換)
+byte 0: type ID              (Zend-compatible)
 byte 1: payload lo
 byte 2: payload hi
-byte 3: IS_STRING 時 → length lo  ← L3S での新用途
-        その他の type → 0 のまま
+byte 3: When IS_STRING → length lo  ← new in L3S
+        Other types     → 0
 ```
 
-resolve_op1 / resolve_op2 の IS_CONST パスは、16B zval の offset 2 を読んで OP1_VAL+3 に格納する。IS_LONG 等では zval の offset 2 は 0 固定なので、byte 3 も 0 のまま。
+The IS_CONST path of resolve_op1 / resolve_op2 reads zval offset 2 and stores it in OP1_VAL+3. For IS_LONG etc. zval offset 2 is fixed at 0, so byte 3 stays 0.
 
-CV / TMP スロット間の代入 (`ZEND_ASSIGN` / `ZEND_QM_ASSIGN`) は 4 バイト丸ごとコピーなので、length 情報はスロット経由で自動的に伝搬する。
+Slot-to-slot copies (`ZEND_ASSIGN` / `ZEND_QM_ASSIGN`) copy all 4 bytes, so the length information propagates automatically through slots.
 
 ---
 
-## 対応文法 (2026-04-19 時点、M-A' + P1 + P2 + P3 + P4 + Q1-Q4 + R1-R3 実装済)
+## Supported grammar (as of 2026-04-19, M-A' + P1 + P2 + P3 + P4 + Q1-Q4 + R1-R3 implemented)
 
 ```ebnf
 program      ::= "<?php" stmt* EOF
@@ -132,8 +132,8 @@ stmt         ::= echo_stmt | call_stmt | assign_stmt | inc_stmt | while_stmt
 echo_stmt    ::= "echo" expr ";"
 call_stmt    ::= IDENT "(" args? ")" ";"
 assign_stmt  ::= CV "=" expr ";"
-             |   CV "[" expr "]" "=" expr ";"  (配列の index 書換)
-             |   CV "[" "]" "=" expr ";"        (配列への append)
+             |   CV "[" expr "]" "=" expr ";"  (array index write)
+             |   CV "[" "]" "=" expr ";"        (array append)
              |   CV ("++" | "--") ";"      (post-inc/dec as stmt)
 inc_stmt     ::= ("++" | "--") CV ";"      (pre-inc/dec as stmt)
 while_stmt   ::= "while" "(" expr ")" body
@@ -141,7 +141,7 @@ if_stmt      ::= "if" "(" expr ")" body
 for_stmt     ::= "for" "(" init? ";" cond? ";" update? ")" body
 init         ::= assign_stmt body (without trailing ';' consumption) | inc_stmt | …
 update       ::= expr                       (side-effect: $i++, --$j, etc.)
-body         ::= "{" stmt* "}" | stmt      (single stmt 許可)
+body         ::= "{" stmt* "}" | stmt      (single stmt allowed)
 expr         ::= cmp_expr (("&&" | "||") cmp_expr)*
 cmp_expr     ::= add_expr (cmp_op add_expr)?
 cmp_op       ::= "===" | "!==" | "==" | "!=" | "<"
@@ -149,295 +149,293 @@ add_expr     ::= primary (("+" | "-" | "&" | "|" | "<<" | ">>") primary)*
 primary      ::= INT | STRING | CV | "true" | call_expr
              |   ("++" | "--") CV           (prefix inc/dec in expr)
              |   CV ("++" | "--")           (postfix inc/dec in expr)
-             |   CV ("[" expr "]")+         (チェーン読取、ネスト可: $a[i][j][k])
-             |   "[" (expr ("," expr)*)? "]"  (配列リテラル、ネスト可、最大 15 要素)
-call_expr    ::= IDENT "(" args? ")"        (fgets(STDIN) / nes_btn() / count($a) 等)
+             |   CV ("[" expr "]")+         (chained read, nestable: $a[i][j][k])
+             |   "[" (expr ("," expr)*)? "]"  (array literal, nestable, max 15 elems)
+call_expr    ::= IDENT "(" args? ")"        (fgets(STDIN) / nes_btn() / count($a) etc.)
 args         ::= arg ("," arg)*
 arg          ::= expr | "STDIN"
 CV           ::= "$" IDENT
 INT          ::= [0-9]+ | "0" ("x"|"X") [0-9a-fA-F]+ | "0" ("b"|"B") [01]+
 STRING       ::= '"' (char | escape)* '"'
-escape       ::= "\x" hex2                  ; 任意 byte (0x00-0xFF)
-             |   "\\"                        ; リテラル `\`
-             |   "\""                        ; リテラル `"`
+escape       ::= "\x" hex2                  ; arbitrary byte (0x00-0xFF)
+             |   "\\"                        ; literal `\`
+             |   "\""                        ; literal `"`
 hex2         ::= [0-9a-fA-F]{2}
-char         ::= [^"\\]                      (non-ASCII byte を含む)
-IDENT        ::= [a-zA-Z_] [a-zA-Z0-9_]*    (ASCII のみ)
+char         ::= [^"\\]                      (non-ASCII bytes allowed)
+IDENT        ::= [a-zA-Z_] [a-zA-Z0-9_]*    (ASCII only)
 COMMENT      ::= "//" [^\n]* "\n"
              |   "#" [^\n]* "\n"
              |   "/*" ... "*/"              (non-ASCII OK)
 ```
 
-### トークン種別
+### Token kinds
 
-| kind       | 入力 | 備考 |
+| kind       | input | note |
 |------------|------|------|
 | `TK_EOF`   | (end) | |
-| `TK_ECHO`  | `echo` | keyword (cln_ident が分類) |
+| `TK_ECHO`  | `echo` | keyword (cln_ident classifies) |
 | `TK_WHILE` | `while` | keyword |
 | `TK_IF`    | `if` | keyword |
 | `TK_FOR`   | `for` | keyword |
-| `TK_TRUE`  | `true` | keyword、`IS_TRUE` zval として emit |
-| `TK_IDENT` | `[a-zA-Z_]\w*` | キーワード以外の識別子 (関数名等) |
-| `TK_STRING`| `"..."` | 内容は decoded で **PRG-RAM bank 2 全域 ($6000-$7FFF, 8KB)** の STR_POOL に置かれ、zval は pool への OPS_BASE 相対 offset (0..$1FFF) を持つ。`\xHH` / `\\` / `\"` のエスケープ対応 (それ以外の `\` で compile error)、non-ASCII byte は pass-through |
-| `TK_INT`   | `[0-9]+` / `0x..` / `0b..` | 10 進 / 16 進 / 2 進、16bit signed narrow |
+| `TK_TRUE`  | `true` | keyword, emitted as `IS_TRUE` zval |
+| `TK_IDENT` | `[a-zA-Z_]\w*` | non-keyword identifiers (function names etc.) |
+| `TK_STRING`| `"..."` | Decoded contents go into the **PRG-RAM bank 2 STR_POOL ($6000-$7FFF, 8KB)**; the zval carries an OPS_BASE-relative offset (0..$1FFF). Supports `\xHH` / `\\` / `\"` (other `\` escapes are compile errors). Non-ASCII bytes pass through |
+| `TK_INT`   | `[0-9]+` / `0x..` / `0b..` | decimal / hex / binary, narrowed to 16-bit signed |
 | `TK_CV`    | `$name` | compile variable |
 | `TK_SEMI` / `TK_LPAREN` / `TK_RPAREN` / `TK_COMMA` / `TK_LBRACE` / `TK_RBRACE` | `; ( ) , { }` | |
 | `TK_ASSIGN` | `=` | |
-| `TK_PLUS` / `TK_MINUS` | `+` `-` | 単項 - は非対応 |
-| `TK_INC` / `TK_DEC` | `++` / `--` | lexer が `+`/`-` の後ろを lookahead |
+| `TK_PLUS` / `TK_MINUS` | `+` `-` | unary `-` not supported |
+| `TK_INC` / `TK_DEC` | `++` / `--` | lexer lookaheads after `+`/`-` |
 | `TK_LT` | `<` | |
-| `TK_EQ2` / `TK_EQ3` | `==` / `===` | lexer が `=` の後ろを lookahead |
-| `TK_NEQ2` / `TK_NEQ3` | `!=` / `!==` | `!` 単独はエラー |
+| `TK_EQ2` / `TK_EQ3` | `==` / `===` | lexer lookaheads after `=` |
+| `TK_NEQ2` / `TK_NEQ3` | `!=` / `!==` | bare `!` is an error |
 | `TK_AMP` / `TK_PIPE` | `&` / `\|` | bitwise AND / OR |
-| `TK_AMPAMP` / `TK_PIPEPIPE` | `&&` / `\|\|` | **論理 AND / OR (短絡評価)**。両オペランドを bool に正規化して 0/1 を返す |
-| `TK_SL` / `TK_SR` | `<<` / `>>` | 16bit 論理左 / 算術右シフト。単体 `>` は未対応でエラー |
-| `TK_LBRACKET` / `TK_RBRACKET` | `[` / `]` | 配列リテラル / 配列要素アクセス用 |
+| `TK_AMPAMP` / `TK_PIPEPIPE` | `&&` / `\|\|` | **logical AND / OR (short-circuit)**. Normalizes both operands to bool and returns 0/1 |
+| `TK_SL` / `TK_SR` | `<<` / `>>` | 16-bit logical-left / arithmetic-right shift. Bare `>` is unsupported and errors |
+| `TK_LBRACKET` / `TK_RBRACKET` | `[` / `]` | array literals / element access |
 
-### マイルストーン進行
+### Milestone progression
 
-| マイルストーン | 内容 | 状況 |
+| Milestone | Content | Status |
 |---------------|------|------|
-| **M-A'** | `<?php`、`echo "..."`、`;`、暗黙 return | ✅ |
-| **P1** | intrinsic 呼出 (nes_cls/puts/chr_bg/chr_spr/bg_color/palette)、整数リテラル、STDIN | ✅ |
-| **P2** | CV、`=` 代入、`+` `-`、echo $var、CV as intrinsic arg、**エラー画面表示** | ✅ |
-| **P3 (M-C)** | `while { }`、`if { }`、比較演算 (`===` `!==` `==` `!=` `<`)、`$k = fgets(STDIN)`、`true` リテラル、backpatch stack | ✅ |
-| **P4 (コメント + non-ASCII)** | `//`, `#`, `/* */`、文字列内の non-ASCII byte pass through | ✅ |
-| **Q1-Q4** | 残り intrinsic (nes_put / nes_sprite (1-sprite 版、後に W1 で nes_sprite_at に拡張) / nes_attr)、16 進リテラル `0x..`、`++` / `--` (PRE/POST INC/DEC)、`for` ループ、if/while の単文 body | ✅ |
-| **R1** | リアルタイム入力: `nes_vsync()` (VBlank 同期 + sprite_mode 自動有効化) | ✅ |
-| **R2** | `nes_btn()` を 0 引数化。コントローラ状態 (下位 1B = bitmask) を IS_LONG で返す | ✅ |
-| **R3** | ビット演算子 `&` / `\|` (`ZEND_BW_AND` / `ZEND_BW_OR`)、2 進リテラル `0b..` | ✅ |
-| **S1-S4** | 論理演算 `&&` / `\|\|` (短絡評価、JMPZ/JMPNZ + QM_ASSIGN パターン)、シフト `<<` / `>>` (`ZEND_SL` / `ZEND_SR`) | ✅ |
-| **T1** | 文字列リテラルに `\xHH` / `\\` / `\"` エスケープ追加。decoded bytes を PRG-RAM bank 2 ($6000-$7FFF, 8KB) の STR_POOL に書き zval は pool 内 offset を指す。本物の PHP 互換構文で任意 byte を埋めこめる (CHR タイル index 直接指定で非 ASCII テキストを扱うため) | ✅ |
-| **U1** | 整数キー配列 MVP: `[expr,...]` リテラル + `$a[idx]` 読取 + `count($a)`。IS_ARRAY=7、2KB runtime array pool ($7000-$77FF)。ZEND_INIT_ARRAY / ZEND_ADD_ARRAY_ELEMENT / ZEND_FETCH_DIM_R / ZEND_COUNT opcode | ✅ |
-| **V1-V4** | 配列: **書換 `$a[i] = v`** + **append `$a[] = v`** (ZEND_ASSIGN_DIM + ZEND_OP_DATA、2-op sequence)、**ネスト読取 `$a[i][j]...`** (FETCH_DIM_R チェーン)、**ネストリテラル `[[1,2],[3,4]]`** (CMP_ARR_* を stack で退避)。連想配列/foreach は未対応 | ✅ |
-| **W1** | マルチスプライト: `nes_sprite_at($idx, $x, $y, $tile)` (4 引数、$idx は runtime int 可)、`nes_sprite_attr($idx, $attr)`。NESPHP_NES_SPRITE (0xF2) の意味を「OAM[0] 固定」→「OAM[$idx]」に拡張、result スロットを 3 番目の入力 ($y) として流用。NESPHP_NES_SPRITE_ATTR (0xFC) を新設 | ✅ |
-| **W2** | `nes_rand()` (戻り値 IS_LONG) / `nes_srand($seed)`。16-bit Galois LFSR (周期 65535)。あわせて `$xs[$i] = $xs[$i] + 1` パターンの ASSIGN_DIM bug を修正 (RHS パースを ASSIGN_DIM emit より先にして、間に sub-op が挟まらないようにした) | ✅ |
-| **W3** | parser 拡張: `else` / `elseif` チェーン、`<=` (新 ZEND_IS_SMALLER_OR_EQUAL handler)、`>` / `>=` (operand swap で `<` / `<=` に畳み込み)、括弧式 `(expr)`。あわせて `cmp_parse_expr` 入口/出口で CMP_LHS_VAL/TYPE / CMP_INTRINSIC_ID を 6502 stack に save/restore する修正 (`1 + (2 << 3)` 等の再帰 expr で外側 binop 状態が clobber されていた潜在 bug を解消) | ✅ |
-| **W4** | `nes_putint($x, $y, $value)` (NESPHP_NES_PUTINT 0xFF)。5-char 右詰め unsigned int 表示 (スコア HUD 用)、3 引数全て runtime int 可。div_tmp0_by_10 の X clobber を回避するため Y register で loop counter を持つ | ✅ |
-| **W5** | 算術演算子拡張: `*` (ZEND_MUL 3) / `/` (ZEND_DIV 4) / `%` (ZEND_MOD 5)。16bit signed、divide-by-0 は silent 0 fallback。`parse_mul_expr` レイヤー新設で `* / %` が `+ -` より優先。あわせて `parse_add_expr` / `parse_mul_expr` 両方で CMP_LHS / CMP_INTRINSIC_ID を save/restore (W3 の parse_expr 修正と同じ動機の latent bug を解消)。`print_int16` の負数時 X clobber bug も修正 | ✅ |
-| 次 | `foreach`、単項 `-` / `!`、`^` (BW_XOR) | 未着手 |
-| 対象外 | 配列、オブジェクト、foreach、例外、double | L3 方針 |
+| **M-A'** | `<?php`, `echo "..."`, `;`, implicit return | ✅ |
+| **P1** | Intrinsic calls (nes_cls/puts/chr_bg/chr_spr/bg_color/palette), integer literals, STDIN | ✅ |
+| **P2** | CV, `=`, `+` `-`, echo $var, CV as intrinsic arg, **on-screen error display** | ✅ |
+| **P3 (M-C)** | `while { }`, `if { }`, comparisons (`===` `!==` `==` `!=` `<`), `$k = fgets(STDIN)`, `true`, backpatch stack | ✅ |
+| **P4 (comments + non-ASCII)** | `//`, `#`, `/* */`; non-ASCII bytes inside string literals pass through | ✅ |
+| **Q1-Q4** | Remaining intrinsics (nes_put / nes_sprite (1-sprite version, later expanded by W1 to nes_sprite_at) / nes_attr), hex literals `0x..`, `++` / `--` (PRE/POST INC/DEC), `for` loop, single-statement if/while bodies | ✅ |
+| **R1** | Real-time input: `nes_vsync()` (VBlank sync + auto-enable sprite_mode) | ✅ |
+| **R2** | `nes_btn()` becomes 0-arg, returns the controller state (low 1B = bitmask) as IS_LONG | ✅ |
+| **R3** | Bitwise operators `&` / `\|` (`ZEND_BW_AND` / `ZEND_BW_OR`), binary literal `0b..` | ✅ |
+| **S1-S4** | Logical operators `&&` / `\|\|` (short-circuit, JMPZ/JMPNZ + QM_ASSIGN pattern), shifts `<<` / `>>` (`ZEND_SL` / `ZEND_SR`) | ✅ |
+| **T1** | `\xHH` / `\\` / `\"` escapes inside string literals. Decoded bytes go to PRG-RAM bank 2 STR_POOL ($6000-$7FFF, 8KB); the zval points to a pool offset. Authentic PHP-compatible syntax for arbitrary bytes (so we can target CHR tile indices for non-ASCII text directly) | ✅ |
+| **U1** | Integer-keyed array MVP: `[expr,...]` literal + `$a[idx]` read + `count($a)`. IS_ARRAY=7, 2KB runtime array pool ($7000-$77FF). ZEND_INIT_ARRAY / ZEND_ADD_ARRAY_ELEMENT / ZEND_FETCH_DIM_R / ZEND_COUNT opcodes | ✅ |
+| **V1-V4** | Arrays: **write `$a[i] = v`** + **append `$a[] = v`** (ZEND_ASSIGN_DIM + ZEND_OP_DATA, 2-op sequence), **nested read `$a[i][j]...`** (FETCH_DIM_R chain), **nested literal `[[1,2],[3,4]]`** (CMP_ARR_* saved on the stack). Associative arrays / foreach unsupported | ✅ |
+| **W1** | Multi-sprite: `nes_sprite_at($idx, $x, $y, $tile)` (4 args, $idx runtime-int OK), `nes_sprite_attr($idx, $attr)`. Repurpose NESPHP_NES_SPRITE (0xF2) from "OAM[0] fixed" to "OAM[$idx]" by reusing the result slot as the third input ($y). Add NESPHP_NES_SPRITE_ATTR (0xFC) | ✅ |
+| **W2** | `nes_rand()` (returns IS_LONG) / `nes_srand($seed)`. 16-bit Galois LFSR (period 65535). Also fixed the ASSIGN_DIM bug in the `$xs[$i] = $xs[$i] + 1` pattern (now parses RHS before emitting ASSIGN_DIM, so no sub-ops sneak in between) | ✅ |
+| **W3** | Parser extension: `else` / `elseif` chains, `<=` (new ZEND_IS_SMALLER_OR_EQUAL handler), `>` / `>=` (operand swap to fold into `<` / `<=`), parenthesized `(expr)`. Also fixed `cmp_parse_expr` to save/restore CMP_LHS_VAL/TYPE / CMP_INTRINSIC_ID across recursive calls (closes a latent bug where `1 + (2 << 3)` etc. clobbered the outer binop state) | ✅ |
+| **W4** | `nes_putint($x, $y, $value)` (NESPHP_NES_PUTINT 0xFF). 5-char right-justified unsigned int display (HUD score), all 3 args runtime-int. Uses Y for the loop counter to avoid div_tmp0_by_10's X clobber | ✅ |
+| **W5** | Arithmetic operator extensions: `*` (ZEND_MUL 3) / `/` (ZEND_DIV 4) / `%` (ZEND_MOD 5). Signed 16-bit, divide-by-0 silent 0 fallback. Introduces `parse_mul_expr` so `* / %` outranks `+ -`. Both `parse_add_expr` and `parse_mul_expr` save/restore CMP_LHS / CMP_INTRINSIC_ID (same motive as W3's parse_expr fix). Also fixed the negative-number X clobber in `print_int16` | ✅ |
+| Next | `foreach`, unary `-` / `!`, `^` (BW_XOR) | Not started |
+| Out of scope | Associative arrays, objects, foreach, doubles | L3 policy |
 
-### 数値リテラル
+### Numeric literals
 
-PHP 準拠の 3 つの表記を実装 (全て `IS_LONG`、16bit signed narrow):
+PHP-faithful three notations (all `IS_LONG`, narrowed to 16-bit signed):
 
-| 表記 | 例 | 意味 |
+| Notation | Examples | Meaning |
 |------|-----|------|
-| 10 進 | `42`、`255`、`0` | `[0-9]+` |
-| 16 進 | `0x0F`、`0xFF`、`0X80` | `0x` / `0X` prefix + `[0-9a-fA-F]+` |
-| 2 進 | `0b1010`、`0b10000000`、`0B11` | `0b` / `0B` prefix + `[01]+` |
+| Decimal | `42`, `255`, `0` | `[0-9]+` |
+| Hex | `0x0F`, `0xFF`, `0X80` | `0x` / `0X` prefix + `[0-9a-fA-F]+` |
+| Binary | `0b1010`, `0b10000000`, `0B11` | `0b` / `0B` prefix + `[01]+` |
 
-**範囲**: 符号付き 16bit (`-32768 .. 32767`)。範囲外は未定義 (lexer が overflow を検出しない、下位 16bit のみが残る)。
+**Range**: signed 16-bit (`-32768 .. 32767`). Out-of-range is undefined (the lexer doesn't detect overflow; only the lower 16 bits remain).
 
-**用途別推奨**:
-- **ボタン mask**: 2 進 (`0b10000000` = A) が視覚的にわかりやすい
-- **NES カラーコード**: 16 進 (`0x0F` = 黒、`0x30` = 白)
-- **座標・カウンタ**: 10 進
+**Recommended use**:
+- **Button masks**: binary (`0b10000000` = A) is visually clearest
+- **NES color codes**: hex (`0x0F` = black, `0x30` = white)
+- **Coordinates / counters**: decimal
 
-例:
+Examples:
 ```php
 $b = nes_btn();
 if ($b & 0b10000000) { /* A */ }
-nes_bg_color(0x0F);                   // 黒
+nes_bg_color(0x0F);                   // black
 $i = 0; while ($i < 10) { $i = $i + 1; }
 ```
 
-### 生成される opcode (opcode 番号は PHP 8.4 準拠、[04-opcode-mapping](./04-opcode-mapping.md))
+### Emitted opcodes (numbers per PHP 8.4, [04-opcode-mapping](./04-opcode-mapping.md))
 
-| 構文 | 発行 opcode |
+| Construct | Emitted opcode |
 |------|-------------|
 | `echo expr;` | `ZEND_ECHO` (op1 = expr result) |
-| 暗黙 `return` | `ZEND_RETURN` op1 = IS_LONG(1) literal |
+| Implicit `return` | `ZEND_RETURN` op1 = IS_LONG(1) literal |
 | `$x = expr;` | `ZEND_ASSIGN` (op1 = CV, op2 = expr result) |
-| `$a + $b` / `$a - $b` | `ZEND_ADD` / `ZEND_SUB` (result = 新 TMP) |
-| `$a & $b` / `$a \| $b` | `ZEND_BW_AND` / `ZEND_BW_OR` (result = 新 TMP、IS_LONG) |
-| `$a << $b` / `$a >> $b` | `ZEND_SL` / `ZEND_SR` (result = 新 TMP、16bit シフト) |
-| `$a && $b` / `$a \|\| $b` | JMPZ/JMPNZ + QM_ASSIGN + JMP による短絡評価。result = 新 TMP (IS_LONG 0 or 1)。5 opcode emit/演算子 |
-| `$a === $b` etc. | `ZEND_IS_IDENTICAL` / `ZEND_IS_NOT_IDENTICAL` / `ZEND_IS_EQUAL` / `ZEND_IS_NOT_EQUAL` / `ZEND_IS_SMALLER` (result = 新 TMP) |
+| `$a + $b` / `$a - $b` | `ZEND_ADD` / `ZEND_SUB` (result = new TMP) |
+| `$a & $b` / `$a \| $b` | `ZEND_BW_AND` / `ZEND_BW_OR` (result = new TMP, IS_LONG) |
+| `$a << $b` / `$a >> $b` | `ZEND_SL` / `ZEND_SR` (result = new TMP, 16-bit shift) |
+| `$a && $b` / `$a \|\| $b` | Short-circuit via JMPZ/JMPNZ + QM_ASSIGN + JMP. result = new TMP (IS_LONG 0 or 1). 5 opcodes / operator |
+| `$a === $b` etc. | `ZEND_IS_IDENTICAL` / `ZEND_IS_NOT_IDENTICAL` / `ZEND_IS_EQUAL` / `ZEND_IS_NOT_EQUAL` / `ZEND_IS_SMALLER` (result = new TMP) |
 | `$x++;` / `$x--;` (stmt) | `ZEND_POST_INC` / `ZEND_POST_DEC` result_type = IS_UNUSED |
 | `++$x;` / `--$x;` (stmt) | `ZEND_PRE_INC` / `ZEND_PRE_DEC` result_type = IS_UNUSED |
-| `$x++` / `$x--` (expr) | `ZEND_POST_INC` / `ZEND_POST_DEC` result = 新 TMP (旧値) |
-| `++$x` / `--$x` (expr) | `ZEND_PRE_INC` / `ZEND_PRE_DEC` result = 新 TMP (新値) |
+| `$x++` / `$x--` (expr) | `ZEND_POST_INC` / `ZEND_POST_DEC` result = new TMP (old value) |
+| `++$x` / `--$x` (expr) | `ZEND_PRE_INC` / `ZEND_PRE_DEC` result = new TMP (new value) |
 | `while (c) {}` | `ZEND_JMPZ c, end` (backpatched); body; `ZEND_JMP top` |
 | `if (c) {}` | `ZEND_JMPZ c, end` (backpatched); body |
 | `for (init; cond; upd) body` | init; `JMPZ cond, end`; `JMP body-start`; upd; `JMP loop_top`; body; `JMP upd-start`; end (double-JMP scheme) |
-| `nes_xxx(...)` (10 種) | 対応する `NESPHP_NES_*` (0xF1-0xF9) / `NESPHP_FGETS` (0xF0) |
-| `fgets(STDIN)` 単独 | `NESPHP_FGETS` result_type = IS_UNUSED |
-| `$k = fgets(STDIN)` | `NESPHP_FGETS` result = TMP、`ZEND_ASSIGN $k, TMP` |
-| `nes_vsync();` | `NESPHP_NES_VSYNC` (戻り値なし、sprite_mode 自動有効化 → NMI 待ち) |
-| `nes_btn();` 単独 | `NESPHP_NES_BTN` (0 引数、result_type = IS_UNUSED、副作用のみ = read_controller) |
-| `nes_btn()` (expr) | `NESPHP_NES_BTN` result = TMP (IS_LONG = buttons bitmask)。呼び出し側で `$b & mask` 等で検査 |
-| `[expr, expr, ...]` | `ZEND_INIT_ARRAY` (op1 = 要素数 raw、result = 新 TMP) + 要素ごとに `ZEND_ADD_ARRAY_ELEMENT` (op1 = array TMP、op2 = element)。結果は IS_ARRAY TMP、pool 内 ptr 保持 |
-| `$a[idx]` | `ZEND_FETCH_DIM_R` (op1 = CV array, op2 = index、result = 新 TMP)。element 16B zval を 4B tagged に展開 |
-| `count($a)` | `ZEND_COUNT` (op1 = array、result = 新 TMP、IS_LONG = 要素数) |
-| `$a[i] = v;` | `ZEND_ASSIGN_DIM` (op1=CV array, op2=index) + `ZEND_OP_DATA` (op1=value)。ハンドラは 2-op セットで array[i] に 16B zval 書込、count = max(count, i+1) |
-| `$a[] = v;` | 上と同じだが op2_type = IS_UNUSED (append)。slot = 現在 count、書込後 count++ |
-| `$a[i][j]...` | `ZEND_FETCH_DIM_R` を必要なだけチェーン emit。途中 TMP を次の op1 として再利用 |
-| `[[1,2],[3,4]]` | 外側 INIT_ARRAY → 内側 INIT_ARRAY + ADD × 2 → 外側 ADD → ... (再帰、CMP_ARR_* の stack 退避で対応) |
+| `nes_xxx(...)` (10 kinds) | The corresponding `NESPHP_NES_*` (0xF1-0xF9) / `NESPHP_FGETS` (0xF0) |
+| `fgets(STDIN)` standalone | `NESPHP_FGETS` result_type = IS_UNUSED |
+| `$k = fgets(STDIN)` | `NESPHP_FGETS` result = TMP, `ZEND_ASSIGN $k, TMP` |
+| `nes_vsync();` | `NESPHP_NES_VSYNC` (no return value, auto-enables sprite_mode → wait NMI) |
+| `nes_btn();` standalone | `NESPHP_NES_BTN` (0 args, result_type = IS_UNUSED, side-effect = read_controller) |
+| `nes_btn()` (expr) | `NESPHP_NES_BTN` result = TMP (IS_LONG = buttons bitmask). Caller checks bits with `$b & mask` |
+| `[expr, expr, ...]` | `ZEND_INIT_ARRAY` (op1 = elem count raw, result = new TMP) + `ZEND_ADD_ARRAY_ELEMENT` per element (op1 = array TMP, op2 = element). Result is an IS_ARRAY TMP holding a pool pointer |
+| `$a[idx]` | `ZEND_FETCH_DIM_R` (op1 = CV array, op2 = index, result = new TMP). Narrows the 16B element zval to 4B tagged |
+| `count($a)` | `ZEND_COUNT` (op1 = array, result = new TMP, IS_LONG = element count) |
+| `$a[i] = v;` | `ZEND_ASSIGN_DIM` (op1=CV array, op2=index) + `ZEND_OP_DATA` (op1=value). Handler writes a 16B zval into array[i] across the 2-op set, count = max(count, i+1) |
+| `$a[] = v;` | Same as above but op2_type = IS_UNUSED (append). slot = current count, count++ after the write |
+| `$a[i][j]...` | Chain of `ZEND_FETCH_DIM_R` as needed. Reuse the intermediate TMP as the next op1 |
+| `[[1,2],[3,4]]` | Outer INIT_ARRAY → inner INIT_ARRAY + ADD × 2 → outer ADD → ... (recursive; CMP_ARR_* are saved on the stack) |
 
-### 比較式の精度
+### Comparison-expression precision
 
-`expr` は左結合の 2 階建てで、**比較は非連鎖** (`$a < $b < $c` は許容しない、コンパイル時エラー)。優先順位は `+ -` > `== === != !== <`。比較結果は `ZEND_IS_*` が `IS_TRUE` / `IS_FALSE` を TMP に書き、`if` / `while` がその TMP を JMPZ の op1 にする。
+`expr` is left-associative two-tier; **comparisons cannot chain** (`$a < $b < $c` is a compile error). Precedence: `+ -` > `== === != !== <`. The comparison result is a `IS_TRUE` / `IS_FALSE` written to a TMP by `ZEND_IS_*`; `if` / `while` consume that TMP as JMPZ's op1.
 
-### while / if のコード生成
+### Code generation for while / if
 
-backpatch スタック (ZP 16B = 最大 8 段ネスト) に「後で埋めるべき op2 フィールドの PRG-RAM 絶対アドレス」を push する。ブロック終端で `cmp_bp_pop_patch` が現在の `CMP_OP_COUNT` をその位置に 16bit で書き込む。
+Backpatch stack (16B in ZP = up to 8 levels of nesting) keeps "PRG-RAM absolute addresses where the op2 field needs filling later". At block end `cmp_bp_pop_patch` writes the current `CMP_OP_COUNT` at that location as a 16-bit value.
 
 ```
 while (cond) { body }                if (cond) { body }
                                      
-LOOP_TOP:    (op_count を退避)       JMPZ cond, END   (backpatch push)
+LOOP_TOP:    (save op_count)         JMPZ cond, END   (backpatch push)
   JMPZ cond, END  (backpatch push)   body
-  body                               END:   (backpatch pop + CMP_OP_COUNT を書く)
-  JMP LOOP_TOP    (退避値を埋める)
+  body                               END:   (backpatch pop + write CMP_OP_COUNT)
+  JMP LOOP_TOP    (fill saved value)
 END:   (backpatch pop)
 ```
 
-`while` の `LOOP_TOP` は 6502 ハードウェアスタックに PHA × 2 で退避 (ネスト対応)。`JMP` は op1 に op_index を 16bit で直接持つ (op1_type = IS_UNUSED)。
+The `LOOP_TOP` for `while` is saved on the 6502 hardware stack via PHA × 2 (nesting). `JMP` carries the op_index in op1 directly as 16-bit (op1_type = IS_UNUSED).
 
 ---
 
-## WRAM 共用契約 (compile phase vs runtime phase)
+## WRAM sharing contract (compile vs runtime phases)
 
-2KB WRAM ($0000-$07FF) を時間的に分離して使う。compile_and_emit が戻った後、VM main_loop は既存の割当で動く。
+We share the 2KB WRAM ($0000-$07FF) by separating compile-time and runtime in time. After `compile_and_emit` returns, the VM main_loop runs on the existing layout.
 
-### コンパイル中にのみ使う ZP (P3 時点で ~55 バイト)
+### ZP used only during compile (~55 bytes at P3)
 
-| label | size | 用途 |
+| label | size | purpose |
 |-------|------|------|
-| `CMP_SRC_PTR` | 2 | 現在のソース読み出し位置 (ROM $8002-$BFFF 範囲) |
-| `CMP_SRC_END` | 2 | ソース終端 (one-past-last) |
-| `CMP_LINE` / `CMP_COL` | 各 2 | 行/列 (エラー表示用、1-origin) |
-| `CMP_OP_HEAD` | 2 | 次に emit する zend_op の PRG-RAM アドレス ($6010..) |
-| `CMP_LIT_HEAD` | 2 | 次に emit する zval の一時 PRG-RAM アドレス ($7000..) |
-| `CMP_OP_COUNT` / `CMP_LIT_COUNT` | 各 2 | emit 済みカウント |
-| `CMP_TMP_COUNT` | 1 | 発行済 TMP スロット数 (算術 / 比較 / fgets result) |
-| `CMP_CV_COUNT` | 1 | 発行済 CV スロット数 |
-| `CMP_TOK_KIND` | 1 | 現在のトークン種別 |
-| `CMP_TOK_PTR` | 2 | トークン開始 ROM アドレス (STRING/IDENT/CV) |
-| `CMP_TOK_LEN` | 1 | トークン長 (1B、255 上限) |
-| `CMP_TOK_VALUE` | 2 | TK_INT: パース結果の 16bit 値 |
-| `CMP_INTRINSIC_ID` | 1 | intrinsic 番号 (流用: 二項演算の opcode 退避にも使う) |
-| `CMP_ARG_COUNT` | 1 | 関数呼出の引数数 |
-| `CMP_ARG_LITS` | 8 | 4 引数 × 2B、各 arg の operand 値 |
-| `CMP_ARG_TYPES` | 4 | 各 arg の operand 型 |
-| `CMP_ASSIGN_SLOT` | 1 | assign 中の LHS CV slot |
-| `CMP_EXPR_TYPE` / `CMP_EXPR_VAL` | 1 / 2 | parse_expr の戻り operand |
-| `CMP_LHS_TYPE` / `CMP_LHS_VAL` | 1 / 2 | 二項演算 LHS 退避 |
-| `CMP_BP_TOP` | 1 | backpatch stack pointer |
-| `CMP_BP_STACK` | 16 | 8 エントリ × 2B = patch 対象 PRG-RAM アドレス |
+| `CMP_SRC_PTR` | 2 | Current source read pointer (within ROM $8002-$BFFF) |
+| `CMP_SRC_END` | 2 | Source one-past-last |
+| `CMP_LINE` / `CMP_COL` | 2 each | Line / column (1-origin, for error display) |
+| `CMP_OP_HEAD` | 2 | PRG-RAM address of the next zend_op to emit ($6010..) |
+| `CMP_LIT_HEAD` | 2 | PRG-RAM address of the next zval to emit (temporary, $7000..) |
+| `CMP_OP_COUNT` / `CMP_LIT_COUNT` | 2 each | Counts emitted so far |
+| `CMP_TMP_COUNT` | 1 | Allocated TMP slot count (for arithmetic / comparisons / fgets result) |
+| `CMP_CV_COUNT` | 1 | Allocated CV slot count |
+| `CMP_TOK_KIND` | 1 | Current token kind |
+| `CMP_TOK_PTR` | 2 | Token start ROM address (STRING/IDENT/CV) |
+| `CMP_TOK_LEN` | 1 | Token length (1B, max 255) |
+| `CMP_TOK_VALUE` | 2 | TK_INT: parsed 16-bit value |
+| `CMP_INTRINSIC_ID` | 1 | Intrinsic number (also reused to save the binary op opcode) |
+| `CMP_ARG_COUNT` | 1 | Arg count for the current call |
+| `CMP_ARG_LITS` | 8 | 4 args × 2B; per-arg operand value |
+| `CMP_ARG_TYPES` | 4 | Per-arg operand type |
+| `CMP_ASSIGN_SLOT` | 1 | LHS CV slot during assignment |
+| `CMP_EXPR_TYPE` / `CMP_EXPR_VAL` | 1 / 2 | parse_expr's returned operand |
+| `CMP_LHS_TYPE` / `CMP_LHS_VAL` | 1 / 2 | binary op LHS save area |
+| `CMP_BP_TOP` | 1 | Backpatch stack pointer |
+| `CMP_BP_STACK` | 16 | 8 entries × 2B = patch-target PRG-RAM addresses |
 
-これらはコンパイル終了後に未使用。VM は触らない。
+Unused after compile — the VM doesn't touch them.
 
-### CV シンボル表 (WRAM $0700-)
+### CV symbol table (WRAM $0700-)
 
-- エントリ 4B: `[len, name_ptr_lo, name_ptr_hi, pad]`
-- `cmp_cv_intern` が線形探索 + 新規 alloc
-- 最大 64 スロット (= 表領域 256B 全域、VM 側 CV slot 上限と一致)
-- ランタイムでは同じ `$0700-$07FF` を **USER_RAM** (peek/poke 用 256B 汎用バイト領域) として再利用 (aliasing なし、時間的に分離)
+- 4B per entry: `[len, name_ptr_lo, name_ptr_hi, pad]`
+- `cmp_cv_intern` does linear lookup + new alloc
+- Up to 64 slots (= the full 256B region; matches the VM-side CV slot cap)
+- At runtime, the same `$0700-$07FF` is repurposed as **USER_RAM** (a 256B generic byte region for peek/poke). No aliasing — temporally separated
 
-### 作業エリア (PRG-RAM、複数 bank に分散)
+### Workspace (PRG-RAM, spread across multiple banks)
 
-**bank 0** ($6000-$7FFF、デフォルトでマップ):
+**Bank 0** ($6000-$7FFF, mapped by default):
 
 ```
 $6000-$600F  header (16B)
-$6010-...    op_array (12B × num_ops、最大 ~617 op)
-$????-$7CFF  literals (16B × num_lits、最大 ~48 zval、op_array 直後に memcpy)
-$7D00-$7FFF  CMP_LIT_STAGE (768B、compile 中のみ、zval 一時バッファ)
+$6010-...    op_array (12B × num_ops, max ~617 op)
+$????-$7CFF  literals (16B × num_lits, max ~48 zval, memcpy'd right after op_array)
+$7D00-$7FFF  CMP_LIT_STAGE (768B, compile-only, temporary zval buffer)
 ```
 
-**bank 1** ($6000-$7FFF、配列 handler の入出口で atomic 切替): ARR_POOL 8KB
+**Bank 1** ($6000-$7FFF, atomically swapped at array-handler entry/exit): ARR_POOL 8KB
 
-**bank 2** ($6000-$7FFF、文字列 handler / `cln_string` の入出口で atomic 切替):
-STR_POOL 8KB (文字列リテラル pool)
+**Bank 2** ($6000-$7FFF, atomically swapped at string-handler / `cln_string` entry/exit): STR_POOL 8KB (string literal pool)
 
-**bank 3** ($6000-$7FFF、`nes_*_ext` intrinsic の入出口で atomic 切替):
-USER_RAM_EXT 8KB (peek/poke_ext の汎用 byte 領域)
+**Bank 3** ($6000-$7FFF, atomically swapped inside `nes_*_ext` intrinsics): USER_RAM_EXT 8KB (peek/poke_ext generic byte region)
 
-- **op_array**: `$6010` から成長。CMP_LIT_STAGE = $7D00 が上限 (op_finish で 16-bit 比較、超えたら compile error)
-- **literals**: cmp_finalize で CMP_LIT_STAGE の zval を $6010 + ops × 24 にバルク memcpy
-- **STR_POOL** (bank 2): cln_string が decoded bytes をここに書き、zval の IS_STRING value は STR_POOL 内 offset (= OPS_BASE 相対 = 0..$1FFF) を指す。runtime もそのまま参照 (memcpy しない)。pool overflow ($8000 到達) で compile error
-- **ARR_POOL** (bank 1): runtime 中、配列ヘッダ 4B (count, capacity) + capacity × 16B zval を追記型で alloc。GC 無し
+- **op_array**: grows from `$6010`. Cap is CMP_LIT_STAGE = $7D00 (op_finish does a 16-bit compare; overflow → compile error)
+- **literals**: cmp_finalize bulk-memcpys CMP_LIT_STAGE zvals to $6010 + ops × 12
+- **STR_POOL** (bank 2): cln_string writes decoded bytes here; the IS_STRING zval value carries an OPS_BASE-relative STR_POOL offset (0..$1FFF). Runtime references it directly (no memcpy). Pool overflow ($8000 reached) → compile error
+- **ARR_POOL** (bank 1): runtime allocates array headers (4B count, capacity) + capacity × 16B zvals append-style. No GC
 
-### TMP0/TMP1/TMP2 の共有
+### Sharing TMP0/TMP1/TMP2
 
-`TMP0`, `TMP1`, `TMP2` (各 2 バイト、ZP) はコンパイル中も runtime もスクラッチ用に使う。compile_and_emit はランタイムが走る前に終わるので、重複でも問題ない (値の受け渡しは関数内完結)。
+`TMP0`, `TMP1`, `TMP2` (2 bytes each, ZP) are scratch for both compile and runtime. compile_and_emit completes before the runtime starts, so the overlap is fine (values stay within their respective routines).
 
-### CV/TMP スロット解決の 16-bit 化
+### 16-bit slot resolution for CV/TMP
 
-zend_op の `op.var` フィールドには `slot * 16` を 16-bit で格納 (Zend 流)。VM の resolver はこれを `/4` して RAM オフセット (`slot * 4`) を得る。
+The `op.var` field stores `slot * 16` as 16-bit (Zend convention). The VM's resolver divides by 4 to get the RAM offset (`slot * 4`).
 
-**slot ≥ 16** だと `slot * 16 ≥ 256` で下位 1 byte だけでは足りない。`vm/nesphp.s` の `cv_addr_y` / `tmp_addr_y` ヘルパーが (VM_PC, Y), (VM_PC, Y+1) の 16-bit を読んで 16-bit /4 で計算する。res_cv / res_tmp / wr_cv / wr_tmp / assign_to_cv / incdec_cv_addr すべてここを通る。
+When **slot ≥ 16**, `slot * 16 ≥ 256` and a single byte isn't enough. `vm/nesphp.s`'s `cv_addr_y` / `tmp_addr_y` helpers read 16 bits from (VM_PC, Y), (VM_PC, Y+1) and divide by 4 in 16-bit. res_cv / res_tmp / wr_cv / wr_tmp / assign_to_cv / incdec_cv_addr all funnel through them.
 
-### TMP_COUNT は文間でリセット
+### TMP_COUNT resets between statements
 
-`cmp_dispatch_stmt` 入口で `CMP_TMP_COUNT` を 6502 stack に PHA、出口 (`cds_done`) で PLA 復帰する。1 文の中で発行された TMP スロット (cond expr / 二項演算結果 / fgets result 等) は文境界で寿命が尽きるため、文間で再利用できる。これにより 64 スロット制限を超える長いプログラムでも持つ。
+`cmp_dispatch_stmt` PHAs `CMP_TMP_COUNT` on entry and PLAs at exit (`cds_done`). TMP slots emitted within a statement (cond expr, binary results, fgets result, etc.) die at the statement boundary, so they're reusable across statements. This keeps long programs working past the 64-slot cap.
 
 ---
 
-## 制約・制限事項
+## Constraints
 
-1. **PHP ソース先頭は `<?php` 必須**。省略はできない。タグ直後に空白類 1 文字以上が無くても OK (lexer がその後の echo / IDENT で区切る)
-2. **non-ASCII**: **文字列リテラル内とコメント内は透過的に pass through**。それ以外の位置で non-ASCII バイトが出ると NES lexer が compile error (ERR L/C 画面表示)。pack_src.php にチェックなし。文字列内の UTF-8 バイト (例: 「あ」= 3B) はタイル ID として `echo` / `nes_puts` がそのまま PPU に流すので、ユーザ側で CHR タイルを用意する
-3. **文字列は double-quoted のみ**。エスケープは `\xHH` (任意 byte)、`\\`、`\"` の 3 種だけ (`\n` 等は compile error)。decoded 結果は PRG-RAM bank 2 の STR_POOL ($6000-$7FFF、8KB) に溜まる。pool overflow で compile error
-4. **文字列長 ≤ 255 バイト** (現行 `CMP_TOK_LEN` が 1 バイト)。UTF-8 日本語 (1 文字 = 3B) なら ~85 文字まで
-5. **コメント対応済** (P4): `//`, `#`, `/* */`。block コメント未閉は compile error
-6. **ソース長上限 16382 バイト** (PRG bank 0 の 16KB − 2B ヘッダ)
-7. **PRG-RAM 32KB (4 × 8KB bank)** がコンパイル出力の上限。bank 0 (op_array + literal zval, ~308 op + ~48 zval = 8KB)、bank 1 (ARR_POOL 8KB)、bank 2 (STR_POOL 8KB、文字列リテラルもここで PRG-RAM 常駐)、bank 3 (USER_RAM_EXT 8KB)
-8. **CV 最大 64 スロット**、**TMP 最大 64 スロット** (文間でリセット、再利用可能)、**関数引数 ≤ 4**、**関数呼出ネスト無し** (call expr は `fgets` / `nes_btn` / `nes_rand` / `nes_peek` / `nes_peek16` のみ)
-9. **比較式は非連鎖** (`$a < $b < $c` は compile error)
-10. **`!` / 単項 `-` 未対応**、**`^` (BW_XOR) 未対応**、**文字列連結 `.` 未対応**
-11. **if / while / for のボディ**: `{ ... }` または単文どちらも可
-12. **ネスト深さ**: backpatch stack 8 段、6502 HW stack 256B (for ネスト 1 段で 4B 消費)、CV table 64 エントリ
-13. **対応 intrinsic** (合計 20 種): `nes_cls` / `nes_put` / `nes_puts` / `nes_putint` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn` / `nes_rand` / `nes_srand` / `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`
-14. **整数リテラル**: 10 進 (`42`)、16 進 (`0xFF` / `0X0A`)、2 進 (`0b1010` / `0B11`)。16bit signed narrow、overflow 検出なし
-15. **ビット演算**: `&` (BW_AND) / `|` (BW_OR) / `<<` (SL) / `>>` (SR、算術右シフト = 符号保持)。`^` (BW_XOR) / `~` (BW_NOT) は未対応
-16. **論理演算**: `&&` / `||` は短絡評価、結果は 0 or 1 の IS_LONG。`!` (NOT) は未対応
-17. **算術演算**: `+` / `-` / `*` / `/` (truncate-toward-zero signed) / `%` (sign of dividend、PHP/C 流)
-18. **`nes_rand() % N`**: rand は unsigned 16-bit を返すが PHP の `%` は被除数の符号で sign 決定するため、上位 bit が立つと負になる。`(nes_rand() & 0x7FFF) % N` で正値マスクするのが定石
+1. **PHP source must start with `<?php`**. No omission allowed. No trailing whitespace required (the lexer separates by whatever follows: echo / IDENT)
+2. **Non-ASCII**: **bytes inside string literals and comments pass through transparently**. Anywhere else, a non-ASCII byte raises a NES-side compile error (ERR L/C screen). pack_src.php doesn't pre-check. UTF-8 bytes inside strings (e.g. "あ" = 3B) flow as tile IDs through `echo` / `nes_puts` to the PPU — the user is expected to provide matching CHR tiles
+3. **Strings are double-quoted only**. Escapes are `\xHH` (arbitrary byte), `\\`, `\"` (other escapes are compile errors). Decoded bytes accumulate in the PRG-RAM bank 2 STR_POOL ($6000-$7FFF, 8KB). Pool overflow → compile error
+4. **Strings ≤ 255 bytes** (`CMP_TOK_LEN` is 1 byte today). UTF-8 Japanese (1 char = 3B) means up to ~85 chars
+5. **Comments supported** (P4): `//`, `#`, `/* */`. Unclosed block comment → compile error
+6. **Source length cap 16382 bytes** (PRG bank 0 is 16KB minus the 2B header)
+7. **PRG-RAM 32KB (4 × 8KB banks)** is the cap for compile output. Bank 0 (op_array + literal zvals, ~617 op + ~48 zval = 8KB), bank 1 (ARR_POOL 8KB), bank 2 (STR_POOL 8KB; string literals also live in PRG-RAM here), bank 3 (USER_RAM_EXT 8KB)
+8. **CV up to 64 slots**, **TMP up to 64 slots** (reset between statements, reusable), **function args ≤ 4**, **no nested calls** (call expr only `fgets` / `nes_btn` / `nes_rand` / `nes_peek` / `nes_peek16`)
+9. **Comparison expressions don't chain** (`$a < $b < $c` is a compile error)
+10. **`!` / unary `-` not supported**, **`^` (BW_XOR) not supported**, **string concat `.` not supported**
+11. **if / while / for body**: either `{ ... }` or a single statement
+12. **Nesting depth**: backpatch stack 8 levels, 6502 HW stack 256B (a `for` consumes 4B per nest), CV table 64 entries
+13. **Supported intrinsics** (20 total): `nes_cls` / `nes_put` / `nes_puts` / `nes_putint` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn` / `nes_rand` / `nes_srand` / `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`
+14. **Integer literals**: decimal (`42`), hex (`0xFF` / `0X0A`), binary (`0b1010` / `0B11`). 16-bit signed narrow, no overflow detection
+15. **Bitwise**: `&` (BW_AND) / `|` (BW_OR) / `<<` (SL) / `>>` (SR, arithmetic right = sign-preserving). `^` (BW_XOR) / `~` (BW_NOT) unsupported
+16. **Logical**: `&&` / `||` short-circuit, result is IS_LONG 0 or 1. `!` (NOT) unsupported
+17. **Arithmetic**: `+` / `-` / `*` / `/` (signed truncate-toward-zero) / `%` (sign of dividend, PHP/C convention)
+18. **`nes_rand() % N`**: rand returns unsigned 16-bit but PHP's `%` takes the dividend's sign, so a high bit makes it negative. The idiom is `(nes_rand() & 0x7FFF) % N` to mask to a positive value
 
 ---
 
-## エラー処理 (P2 以降、実装済)
+## Error handling (since P2, implemented)
 
-コンパイル失敗時は `show_compile_error` が nametable `$2160` (row 11, col 0) に
+When compile fails, `show_compile_error` writes to nametable `$2160` (row 11, col 0):
 
 ```
 ERR L<line> C<col>
 ```
 
-を書き、`PPUMASK` に BG 有効化ビットを立てて画面表示してから halt。`CMP_LINE` / `CMP_COL` は `cmp_advance1` が `LF` を検出するたびに `line++` / `col=1`、それ以外で `col++`。`cmp_advance_n` (5 文字の `<?php` skip 等) は `col += A` の近似更新 (LF を含まない前提)。
+Then sets the BG-enable bit in `PPUMASK` so the message displays, then halts. `CMP_LINE` / `CMP_COL` are bumped by `cmp_advance1` (LF → `line++` / `col=1`, otherwise `col++`). `cmp_advance_n` (used to skip the 5-char `<?php`) does an approximate `col += A` (assumes no LF in the chunk).
 
-実装: `vm/compiler.s` の `show_compile_error`。既存の `print_int16` (`vm/nesphp.s:1521`) を再利用して数値を ASCII 化し `PPUDATA` にストリーム書き込み。
+Implementation: `show_compile_error` in `vm/compiler.s`. Reuses `print_int16` (`vm/nesphp.s:1521`) to ASCII-ize numbers and stream them into `PPUDATA`.
 
-エラーメッセージの**種類分け (エラーコード)** は現状無し (単一のメッセージ)。将来、文法違反の種別ごとに短いエラーコードを追加する余地あり。
+Error-message **categorization (error codes)** doesn't exist yet (single message). Future work could attach short codes per syntax violation.
 
-**ホスト側 pre-flight lint** (将来): `pack_src.php` 内で簡易構文チェック (ダブルクォート未閉じ等) を行い、ROM ビルド時にエラーを早期検出する選択肢。NES 上のエラー halt は保険として残す。
-
----
-
-## コンパイル速度の目安
-
-6502 @ 1.79MHz での推定値 (1KB PHP ソース):
-
-- cmp_lex_next: 1 トークンあたり ~200 cycle
-- 文字列 scan: 1 バイトあたり ~15 cycle
-- emit_op24 / emit_zval: 1 回あたり ~500 cycle
-
-1KB ソースで合計 ~80ms、4KB で ~250ms。電源 ON から VM main_loop 開始までのラグは体感で「一瞬の点滅」程度。
+**Host-side pre-flight lint** (future): a simple syntax check (unclosed double quotes etc.) inside `pack_src.php` to catch errors early at ROM-build time. The on-NES error halt remains as a safety net.
 
 ---
 
-## 関連ドキュメント
+## Compile-speed estimate
 
-- [00-overview](./00-overview.md) — 3 層アーキテクチャと忠実度 (L3S 追記予定)
-- [01-rom-format](./01-rom-format.md) — ROM バイナリレイアウト (§4 に「L3S では zend_string 省略」を注記)
-- [02-ram-layout](./02-ram-layout.md) — 4B tagged value (byte 3 = IS_STRING 時 length を追記)
-- [04-opcode-mapping](./04-opcode-mapping.md) — intrinsic 一覧 (P1 で実装対象)
-- [07-roadmap](./07-roadmap.md) — マイルストーン進行
-- [12-zend-diff](./12-zend-diff.md) — Zend との対比 (改変 10: zend_string 省略を追記)
-- `vm/compiler.s` — コンパイラ実装
-- `tools/pack_src.php` — ソースパッカー
+Estimates on a 6502 @ 1.79MHz for 1KB of PHP source:
+
+- cmp_lex_next: ~200 cycles per token
+- String scan: ~15 cycles per byte
+- emit_op24 / emit_zval: ~500 cycles per call
+
+Roughly ~80ms total for 1KB source, ~250ms for 4KB. The lag from power-on to VM main_loop is "a brief flash" perceptually.
+
+---
+
+## Related documents
+
+- [00-overview](./00-overview.md) — 3-layer architecture and fidelity (L3S addition planned)
+- [01-rom-format](./01-rom-format.md) — ROM binary layout (note in §4 that L3S omits zend_string)
+- [02-ram-layout](./02-ram-layout.md) — 4B tagged value (byte 3 = length when IS_STRING)
+- [04-opcode-mapping](./04-opcode-mapping.md) — Intrinsic table (P1 implementation targets)
+- [07-roadmap](./07-roadmap.md) — Milestone progression
+- [12-zend-diff](./12-zend-diff.md) — Zend comparison (deviation 10: zend_string omission)
+- `vm/compiler.s` — Compiler implementation
+- `tools/pack_src.php` — Source packer

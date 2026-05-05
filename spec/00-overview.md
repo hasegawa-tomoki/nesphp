@@ -1,113 +1,113 @@
-# 00. プロジェクト概要
+# 00. Project Overview
 
 [← README](./README.md)
 
-## 目的
+## Goal
 
-実用ではなく**ロマン**。「我々が使っている `php` コマンドが実際に吐いた Zend opcode を、ファミコン (6502) で実行する」こと自体がゴール。
+This project is **romance, not utility**. The whole goal is "running on a Famicom (6502) the very Zend opcodes that our `php` command actually emitted".
 
-## 成功の定義
+## Definition of success
 
-- `<?php echo "HELLO, NES!";` を含む `.php` を入力すると `.nes` が出来上がる
-- Mesen で起動すると画面に `HELLO, NES!` が表示される
-- `strings hello.nes` で `HELLO, NES!` がヒットする (PHP ソースの文字列が NES ROM 内にそのまま存在する)
-- L3S では PHP ソース自体が ROM に焼かれ、起動時に on-NES コンパイラが PRG-RAM 上で `zend_op` を生成する。compiled bytecode は ROM に存在しない (L3 host-compile path のオラクル `make build/X.host.ops.bin` には焼かれる)
+- Feed the toolchain a `.php` containing `<?php echo "HELLO, NES!";` and out comes a `.nes`
+- Mesen boots that ROM and prints `HELLO, NES!` on screen
+- `strings hello.nes` finds `HELLO, NES!` (PHP source string lives raw inside the NES ROM)
+- In L3S, the PHP source itself is burned into the ROM, and the on-NES compiler builds `zend_op`s in PRG-RAM at boot. The compiled bytecode is **not** present in the ROM (the L3 host-compile path's oracle `make build/X.host.ops.bin` does bake it though)
 
-詳細な受け入れ基準は [09-verification](./09-verification.md) を参照。
+Detailed acceptance criteria: [09-verification](./09-verification.md).
 
-## 3 層アーキテクチャ
+## 3-layer architecture
 
 ```
-[ホスト (macOS)]                                [ターゲット (NES)]
+[Host (macOS)]                                  [Target (NES)]
  input.php
    │
-   ▼  ★ここが実 php コマンド
+   ▼  ★ This is the real php command
  php -dopcache.enable_cli=1
      -dopcache.opt_debug_level=0x10000 ...
-   │  (第2段階では自作拡張 nesphp_dump.so)
+   │  (Phase 2: a custom extension nesphp_dump.so)
    ▼
- Zend opcode ダンプ (テキスト or バイナリ)
+ Zend opcode dump (text or binary)
    │
-   ▼  serializer.php : Zend op_array → L3 ROM バイナリ
-   │    - zend_op を 12B にパック (handler / lineno 除去 + 各 znode_op を 4B→2B 圧縮)
-   │    - literals を 16B zval 配列に配置 (Zend 互換)
-   │    - zend_string を 24B ヘッダ + content に配置
-   │    - CONST offset を NES ROM 内相対オフセットに解決
- ops.bin (L3 ROM イメージ)
+   ▼  serializer.php : Zend op_array → L3 ROM binary
+   │    - Pack zend_op into 12B (drop handler / lineno, compress each znode_op 4B→2B)
+   │    - Lay literals out as 16B zval array (Zend-compatible)
+   │    - Lay zend_string out as 24B header + content
+   │    - Resolve CONST offsets to NES-ROM-relative offsets
+ ops.bin (L3 ROM image)
    │
    ▼  ca65 + ld65 (.incbin "ops.bin")
  nesphp.nes ──────────────────────────▶  6502 VM
-                                          - PC を op[i] に進める
-                                          - opcode バイトで jump table 分岐
-                                          - op1_type で operand 解釈切替
+                                          - Advance PC to op[i]
+                                          - Branch on opcode byte (jump table)
+                                          - Switch operand interpretation by op1_type
                                           - CONST → literals[] → zend_string → PPU
 ```
 
-### 各層の責務
+### Layer responsibilities
 
-| 層 | 役割 |
+| Layer | Role |
 |----|------|
-| 層 0 (Zend) | 実 php が PHP ソースを公式コンパイル。`zend_op_array` を生成。**完全に無改造** |
-| 層 1 (抽出) | opcache テキストダンプ (MVP) / 自作拡張 (第 2 段階) で `zend_op_array` を取り出す |
-| 層 2 (シリアライザ) | Zend レイアウトを NES ROM 向けに「ポインタ解決 + handler 除去 + version lock」でパック。**レイアウトは Zend 互換のまま** |
-| 層 3 (6502 VM) | ca65 アセンブリ。opcode バイトで jump table 分岐、op1_type/op2_type で operand 解釈切替 |
+| Layer 0 (Zend) | The real php compiles the PHP source officially and emits `zend_op_array`. **Zero modifications** |
+| Layer 1 (extract) | Pull `zend_op_array` out via opcache text dump (MVP) or a custom extension (Phase 2) |
+| Layer 2 (serializer) | Pack the Zend layout for the NES ROM: pointer resolution + handler removal + version lock. **The byte layout stays Zend-compatible** |
+| Layer 3 (6502 VM) | ca65 assembly. Branch on the opcode byte, interpret operands by op1_type / op2_type |
 
-詳細は [05-toolchain](./05-toolchain.md)。
+Details: [05-toolchain](./05-toolchain.md).
 
-### L3S (self-hosted) バリアント
+### L3S (self-hosted) variant
 
-**L3S はホスト側の層 0-2 を NES 側に取り込む**。PHP ソースを生テキストのまま ROM に焼き、電源 ON で 6502 自身が lex/parse/codegen する:
+**L3S folds host-side layers 0-2 into the NES side**. PHP source is burned into the ROM as raw text; at power-on the 6502 itself runs lex/parse/codegen:
 
 ```
-[ホスト (macOS)]                              [ターゲット (NES)]
+[Host (macOS)]                                  [Target (NES)]
  input.php
    │
-   ▼ tools/pack_src.php (~15 行、薄皮)
-   │    u16 length を前置するだけ
+   ▼ tools/pack_src.php (~15 lines, super thin)
+   │    Just prepends a u16 length
  input.src.bin
    │
    ▼ ca65 + ld65
-   │    src.bin を .segment "PHPSRC" に焼く
+   │    Burns src.bin into .segment "PHPSRC"
  output.nes ────────────────────────────▶  reset
                                               │
                                               ▼ compile_and_emit (6502)
                                               │  - lex <?php echo "..." ;
                                               │  - emit 12B zend_op / 16B zval
-                                              │    (zend_string は使わず zval に
-                                              │     ROM offset + length を直接埋め込む)
+                                              │    (no zend_string struct; the zval
+                                              │     directly carries (ROM offset, length))
                                               │
-                                              ▼ VM main_loop で実行
+                                              ▼ VM main_loop runs it
 ```
 
-層 0-2 が NES 側の `vm/compiler.s` に集約される。zend_string 省略の理由や byte レベル仕様は [13-compiler](./13-compiler.md) と [12-zend-diff](./12-zend-diff.md) 改変 10 を参照。
+Layers 0-2 collapse into `vm/compiler.s` on the NES side. Why we drop `zend_string` and the byte-level spec live in [13-compiler](./13-compiler.md) and [12-zend-diff](./12-zend-diff.md) deviation 10.
 
-## 忠実度レベル: L3 / L3S
+## Fidelity levels: L3 / L3S
 
-| 段階 | 内容 | 採用 |
+| Level | Description | Adopted? |
 |------|------|------|
-| L1 | 独自 nesphp-bc に翻訳。opcode 番号・operand 符号化・zval 全て独自 | × (ロマン不足) |
-| **L3** | **Zend の `zend_op` を NESPHP 圧縮形 (12B、handler/lineno 削除 + 各 znode_op を 4B→2B 圧縮) で ROM に焼く。literals は Zend 互換 16B zval のまま、6502 VM が Zend のフィールドオフセットを直読み**。PHP ソースはホスト側 `serializer.php` が opcode にコンパイルして ROM に焼く | **○** (host-compile 経路) |
-| **L3S** | **L3 の発展。PHP ソースを ROM に生で焼き、NES 起動時に 6502 自身が lex/parse/codegen。zend_string 構造体は省略し、zval に (ROM offset, length) を直接埋め込む**。詳細は [13-compiler](./13-compiler.md) | **○** (self-hosted 経路、`make build/X.nes` がデフォルト) |
-| L4 | L3 + zval 16B もそのまま RAM、IS_LONG 64bit 完全再現 | × (2KB RAM 不足) |
+| L1 | Translate to a custom nesphp-bc. Opcode numbers, operand encoding, zval — all custom | × (insufficient romance) |
+| **L3** | **Burn `zend_op` into ROM in NESPHP-compressed form (12B: drop handler/lineno + compress each znode_op 4B→2B). Keep literals as Zend-compatible 16B zval. The 6502 VM reads Zend field offsets directly**. The host-side `serializer.php` compiles PHP source into opcodes and bakes them into ROM | **○** (host-compile path) |
+| **L3S** | **Evolution of L3. PHP source goes into ROM raw; the 6502 lex/parse/codegens at boot. The `zend_string` struct is dropped — (ROM offset, length) is embedded directly in the zval**. Details: [13-compiler](./13-compiler.md) | **○** (self-hosted, default of `make build/X.nes`) |
+| L4 | L3 + 16B zval lives in RAM, full 64-bit IS_LONG | × (2KB RAM is not enough) |
 
-L3 と L3S は**並存**。ホスト側 `serializer.php` は検証オラクルとして残置し、`make build/X.host.nes` で L3 経路のビルドも可能。詳細は [01-rom-format](./01-rom-format.md) と [02-ram-layout](./02-ram-layout.md) と [13-compiler](./13-compiler.md)。
+L3 and L3S **coexist**. The host-side `serializer.php` stays as a verification oracle; `make build/X.host.nes` would build the L3 path. Details: [01-rom-format](./01-rom-format.md), [02-ram-layout](./02-ram-layout.md), [13-compiler](./13-compiler.md).
 
-## やらないこと (明示的に諦めるもの)
+## What we don't do (consciously dropped)
 
-物理的・実装コスト的に不可能なので、serializer で検出次第 compile error にする:
+These are physically or implementation-cost prohibitive, so the serializer hard-fails as soon as it sees them:
 
-- **配列 (`HashTable`)**: 56B + bucket 36B、ファミコン RAM に入らない
-- **オブジェクト**: `HashTable` を内包、同様に不可能
-- **`double` (IEEE 754)**: softfloat ルーチン 1-2KB、諦めた方が幸せ
-- **`IS_LONG` の完全な 64bit 再現**: **16bit に narrow**、範囲外リテラルは serializer で早期 compile error
-- **例外処理 / generator / closure**
-- **nikic/php-parser 経由の独自バイトコード**: ロマン評価を損ねるので不採用
+- **Arrays (`HashTable`)**: 56B + 36B per bucket — won't fit in Famicom RAM
+- **Objects**: contain a `HashTable`, same blocker
+- **`double` (IEEE 754)**: softfloat routines run 1-2KB — better off without
+- **Full 64-bit `IS_LONG`**: **narrow to 16-bit**, the serializer rejects out-of-range literals at compile time
+- **Exception handling / generators / closures**
+- **A custom bytecode via nikic/php-parser**: ruins the romance; not adopted
 
-## 先行事例
+## Prior art
 
-- [Ice-Forth](https://github.com/RussellSprouts/ice-forth) — NES 上の自己ホスト Forth。6502 で ~6000 行。L3 の nesphp VM ~1200 行は十分ペイする規模
-- [Family BASIC](https://ja.wikipedia.org/wiki/%E3%83%95%E3%82%A1%E3%83%9F%E3%83%AA%E3%83%BC%E3%83%99%E3%83%BC%E3%82%B7%E3%83%83%E3%82%AF) — 任天堂公式の NES 上 BASIC。2KB RAM + カートリッジ RAM で BASIC が動いた実例
+- [Ice-Forth](https://github.com/RussellSprouts/ice-forth) — A self-hosted Forth on the NES. ~6000 lines of 6502. The L3 nesphp VM at ~1200 lines is firmly within reason
+- [Family BASIC](https://en.wikipedia.org/wiki/Family_BASIC) — Nintendo's official NES BASIC. Concrete proof that BASIC ran in 2KB RAM + cartridge RAM
 
-## 次に読む
+## What to read next
 
-→ [01-rom-format](./01-rom-format.md): ROM バイナリフォーマット (Zend 互換レイアウト詳細)
+→ [01-rom-format](./01-rom-format.md): ROM binary format (Zend-compatible layout details)

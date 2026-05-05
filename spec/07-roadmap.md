@@ -1,92 +1,92 @@
-# 07. ロードマップ (実装ステップ)
+# 07. Roadmap (implementation steps)
 
 [← README](./README.md) | [← 06-display-io](./06-display-io.md) | [→ 08-risks](./08-risks.md)
 
-## 進捗サマリ
+## Progress summary
 
-| フェーズ | 成果物 | 状態 |
+| Phase | Artifact | Status |
 |---|---|---|
-| MVP: echo のみ | `hello.nes` | ✅ **完了** |
-| 延長 第 1 段階: 整数 + 変数 | `arith.nes` | ✅ **完了** |
-| 延長 第 2 段階: 制御フロー | `loop.nes` | ✅ **完了** |
-| 延長 第 4 段階: コントローラ入力 | `button.nes` | ✅ **完了** |
-| 延長 第 5A: ネームテーブル文字移動 | `move.nes` | ✅ **完了** |
-| 延長 第 5B: ハードウェアスプライト移動 | `sprite.nes` | ✅ **完了** |
-| 延長 第 5C: プレゼン用 `nes_puts` / `nes_cls` | `slides.nes` | ✅ **完了** |
-| 延長 第 5D: CNROM + PPUCTRL bit 4 で CHR 切替 | `chrdemo.nes` | ✅ **完了** |
-| 延長 第 3 段階: NMI 同期 echo / nes_put / nes_puts | `livetext.nes` | ✅ **完了** |
-| 延長 第 3.1 段階: sprite_mode での nes_cls (brief force-blanking) | `livereset.nes` | ✅ **完了** |
-| 延長 第 5E: パレット + attribute + カスタムタイル | `color.nes` | ✅ **完了** |
-| 第 2 段階: 自作 Zend 拡張 | `nesphp_dump.so` | 未着手 |
-| 多スプライト対応 | — | 未着手 (現在 sprite 0 固定) |
+| MVP: echo only | `hello.nes` | ✅ **Done** |
+| Extension stage 1: integers + variables | `arith.nes` | ✅ **Done** |
+| Extension stage 2: control flow | `loop.nes` | ✅ **Done** |
+| Extension stage 4: controller input | `button.nes` | ✅ **Done** |
+| Extension stage 5A: nametable character motion | `move.nes` | ✅ **Done** |
+| Extension stage 5B: hardware sprite motion | `sprite.nes` | ✅ **Done** |
+| Extension stage 5C: presentation `nes_puts` / `nes_cls` | `slides.nes` | ✅ **Done** |
+| Extension stage 5D: CNROM + PPUCTRL bit 4 CHR switching | `chrdemo.nes` | ✅ **Done** |
+| Extension stage 3: NMI-synchronous echo / nes_put / nes_puts | `livetext.nes` | ✅ **Done** |
+| Extension stage 3.1: nes_cls in sprite_mode (brief force-blanking) | `livereset.nes` | ✅ **Done** |
+| Extension stage 5E: palette + attribute + custom tiles | `color.nes` | ✅ **Done** |
+| Phase 2: custom Zend extension | `nesphp_dump.so` | Not started |
+| Multi-sprite support | — | Not started (currently sprite 0 only) |
 
 ---
 
-## L3S (on-NES コンパイラ) 別系統の進捗 ([13-compiler](./13-compiler.md))
+## L3S (on-NES compiler) parallel track ([13-compiler](./13-compiler.md))
 
-2026-04 以降に新しい系統として、**PHP ソースを ROM に焼いて NES 自身が lex/parse/codegen する**構成を立ち上げた。host-compile 系統 (上記) とは独立に存在し、現在は default ビルド (`make build/X.nes`) が L3S、`make build/X.host.ops.bin` が host オラクル。
+Since 2026-04 we've spun up a separate track that **burns PHP source into ROM and lets the NES itself lex/parse/codegen**. It exists independently of the host-compile track (above); today the default build (`make build/X.nes`) is L3S, and `make build/X.host.ops.bin` is the host oracle.
 
-| フェーズ | 内容 | 成果物 | 状態 |
+| Phase | Content | Artifact | Status |
 |---------|------|--------|------|
-| M-A' | lexer (`<?php` 含む) + `echo "..."` + 新文字列方式 | `hello.nes` (self-hosted) | ✅ **完了** |
-| P1 | intrinsic 6 種 + 整数リテラル + fgets 単独 | `presen.nes` | ✅ **完了** |
-| P2 | CV + assign + `+ -` + エラー画面表示 | `arith.nes` (self-hosted), `err_syntax.nes` | ✅ **完了** |
-| P3 (M-C) | `while { }` + `if { }` + 比較 `===/!==/==/!=/<` + `$k = fgets(STDIN)` + `true` + backpatch | `loop.nes`, `button.nes`, `iftest.nes` (self-hosted) | ✅ **完了** |
-| P4 | コメント (`// # /* */`)、文字列内 non-ASCII (UTF-8 日本語など) 透過 | `comments.nes` | ✅ **完了** |
-| Q1-Q4 | 残り intrinsic 3 種 (nes_put / nes_sprite (1-sprite 版、後に W1 で nes_sprite_at に拡張) / nes_attr)、16 進リテラル、`++` / `--` (PRE/POST INC/DEC)、`for` ループ、if/while 単文 body | `move.nes` `sprite.nes` `livetext.nes` `livereset.nes` `color.nes` `for.nes` | ✅ **完了** |
-| R1 | `nes_vsync()` + `nes_btn($mask)` (初期版、mask AND 方式) | — | ✅ **完了** |
-| R2 | `nes_btn()` を 0 引数化し、コントローラ状態を IS_LONG で返す仕様に変更 | `poll.nes` | ✅ **完了** |
-| R3 | ビット演算子 `&` `\|` (ZEND_BW_AND/OR)、2 進リテラル `0b..` | `bintest.nes` | ✅ **完了** |
-| **examples/* 全通** | 現リポジトリの **18 example すべて on-NES self-host で動作** (err_syntax は意図的 compile-error 検証) | — | ✅ **完了** |
-| W1 | マルチスプライト: `nes_sprite_at($idx, $x, $y, $tile)` (4 引数、$idx は runtime int 可)、`nes_sprite_attr($idx, $attr)` (palette / flip / 優先度)。NESPHP_NES_SPRITE (0xF2) を OAM[$idx] 任意化、NESPHP_NES_SPRITE_ATTR (0xFC) 新設 | 既存 `sprite.nes` `livetext.nes` `livereset.nes` `poll.nes` を nes_sprite_at に移行、`multi.nes` 追加 | ✅ **完了** |
-| W2 | `nes_rand()` / `nes_srand($seed)` (16-bit Galois LFSR、周期 65535)。あわせて `$xs[$i] = $xs[$i] + 1` パターンの ASSIGN_DIM bug を発見・修正 (RHS パースを ASSIGN_DIM emit より先に行うよう変更) | `random.nes` (8 sprite ランダムウォーク) | ✅ **完了** |
-| W3 | parser 拡張: `else` / `elseif` チェーン、`<=` / `>` / `>=`、括弧式 `(expr)`。`cmp_parse_expr` で CMP_LHS / CMP_INTRINSIC_ID を save/restore する潜在 bug 修正も含む | `elsetest.nes` `parentest.nes` | ✅ **完了** |
-| W4 | `nes_putint($x, $y, $value)`: 5-char 右詰め unsigned int 表示 (スコア HUD)。sprite_mode でも NMI 同期キュー経由で動く | `putint.nes` `score.nes` | ✅ **完了** |
-| W5 | 算術演算子拡張 `*` / `/` / `%` (signed 16bit、divide-by-0 は 0 fallback)。`parse_mul_expr` レイヤー新設で precedence 適用。print_int16 の負数 X clobber bug も合わせて修正 | `multest.nes` | ✅ **完了** |
-| W6 | `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`: USER_RAM ($0700-$07FF, 256B、コンパイル後の CV table 領域を再利用) でバイト単位のデータアクセス。zval オーバーヘッド (16B/entry) を回避できるため、Tetris の 28 回転 shape table のような大きな定数を 56 byte で持てる | `peek_test.nes`, `tetris.nes` (Phase 5b) | ✅ **完了** |
-| **テトリス Phase 5b** | 7 種ピース + 4 回転 + ライン消去 + スコア + 簡易 game over。**peek/poke + USER_RAM** で shape table を低オーバーヘッドに保持。compile 時に発覚した一連のバグを修正 (CV/TMP slot 16-bit 化 / TMP_COUNT 文間 reset / op_array bound check / nes_rand % N の正値マスク `& 0x7FFF`) | `tetris.nes` | ✅ **完了** |
-| W7 | **SXROM 標準準拠化** (PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 32KB)。CHR-RAM 8KB は起動時に PRG_BANK1 から bulk 転送 (~50 ms)、`nes_chr_bg/spr` も bulk transfer に変更。ARR_POOL を bank 1 に逃して 720B → 8KB (11x 拡大)。新 intrinsic 4 種 `nes_peek_ext / peek16_ext / poke_ext / pokestr_ext` で USER_RAM_EXT (当初 bank 2、W8 で bank 3 に再配置) の 8KB を提供 | `peekext_test.nes`, `tetris.nes` (Phase 5c) | ✅ **完了** |
-| **テトリス Phase 5c** | ライン消去後の全面再描画 (single-loop: `nes_put(' ')` で先にクリア → 必要セルだけ `\x05` で上書き) と GAME OVER メッセージ表示。ARR_POOL 拡大により op_array 余裕が出て実装可能に | `tetris.nes` | ✅ **完了** |
-| W8 | **STR_POOL bank 2 化** (128B → 8KB、64x 拡大)。文字列リテラル overflow で発生していた tetris タイトル化け / `color.php` の ERR L78 C27 を解消。FCEUX が PRG-RAM banking を honor するよう **iNES → NES 2.0 ヘッダ**へ移行。USER_RAM_EXT は bank 3 に移動 | `color.nes`, `tetris.nes` 全通、smoke 40/41 | ✅ **完了** |
-| 次 | テトリス Phase 5d (NEXT preview / speed up) / `!` / 単項 `-` / `^` (BW_XOR) / `foreach` / APU intrinsic (nes_beep) / cross-bank op_array dispatch (op_array > 8KB の場合) | — | 未着手 |
-| 対象外 | 連想配列、オブジェクト、例外、double | — | L3 方針 |
+| M-A' | Lexer (incl. `<?php`) + `echo "..."` + new string mechanism | `hello.nes` (self-hosted) | ✅ **Done** |
+| P1 | 6 intrinsics + integer literals + standalone fgets | `presen.nes` | ✅ **Done** |
+| P2 | CV + assign + `+ -` + on-screen error display | `arith.nes` (self-hosted), `err_syntax.nes` | ✅ **Done** |
+| P3 (M-C) | `while { }` + `if { }` + `===/!==/==/!=/<` + `$k = fgets(STDIN)` + `true` + backpatch | `loop.nes`, `button.nes`, `iftest.nes` (self-hosted) | ✅ **Done** |
+| P4 | Comments (`// # /* */`), non-ASCII bytes inside string literals (UTF-8 Japanese etc.) pass through | `comments.nes` | ✅ **Done** |
+| Q1-Q4 | Remaining 3 intrinsics (nes_put / nes_sprite (1-sprite version, later expanded by W1 to nes_sprite_at) / nes_attr), hex literals, `++` / `--` (PRE/POST INC/DEC), `for` loop, single-statement `if` / `while` bodies | `move.nes` `sprite.nes` `livetext.nes` `livereset.nes` `color.nes` `for.nes` | ✅ **Done** |
+| R1 | `nes_vsync()` + `nes_btn($mask)` (early version, mask AND scheme) | — | ✅ **Done** |
+| R2 | `nes_btn()` becomes 0-arg, returns the controller state as IS_LONG | `poll.nes` | ✅ **Done** |
+| R3 | Bitwise operators `&` `\|` (ZEND_BW_AND/OR), binary literals `0b..` | `bintest.nes` | ✅ **Done** |
+| **All examples passing** | All **18 examples in this repo run on-NES self-host** (err_syntax intentionally verifies compile-error path) | — | ✅ **Done** |
+| W1 | Multi-sprite: `nes_sprite_at($idx, $x, $y, $tile)` (4 args, runtime-int $idx), `nes_sprite_attr($idx, $attr)` (palette / flip / priority). NESPHP_NES_SPRITE (0xF2) made arbitrary-OAM-index, NESPHP_NES_SPRITE_ATTR (0xFC) added | Migrate existing `sprite.nes` `livetext.nes` `livereset.nes` `poll.nes` to nes_sprite_at, add `multi.nes` | ✅ **Done** |
+| W2 | `nes_rand()` / `nes_srand($seed)` (16-bit Galois LFSR, period 65535). Found and fixed the ASSIGN_DIM bug in the `$xs[$i] = $xs[$i] + 1` pattern (parse RHS before emitting ASSIGN_DIM) | `random.nes` (8 sprites random walk) | ✅ **Done** |
+| W3 | Parser extension: `else` / `elseif` chains, `<=` / `>` / `>=`, parenthesized expressions `(expr)`. Includes a latent bug fix for `cmp_parse_expr` saving/restoring CMP_LHS / CMP_INTRINSIC_ID | `elsetest.nes` `parentest.nes` | ✅ **Done** |
+| W4 | `nes_putint($x, $y, $value)`: 5-char right-justified unsigned int display (HUD score). Goes through the NMI sync queue in sprite_mode | `putint.nes` `score.nes` | ✅ **Done** |
+| W5 | Arithmetic operator extensions `*` / `/` / `%` (signed 16-bit, divide-by-0 falls back to 0). Introduced `parse_mul_expr` for proper precedence. Also fixed the negative-number X-clobber bug in print_int16 | `multest.nes` | ✅ **Done** |
+| W6 | `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`: byte-level data access in USER_RAM ($0700-$07FF, 256B; reuses the post-compile CV table region). Avoids the 16B/entry zval overhead so a 28-rotation Tetris shape table fits in 56 bytes | `peek_test.nes`, `tetris.nes` (Phase 5b) | ✅ **Done** |
+| **Tetris Phase 5b** | 7 piece types + 4 rotations + line clears + score + simple game over. **peek/poke + USER_RAM** holds the shape table at low overhead. Fixed several bugs uncovered during compile (16-bit-ize CV/TMP slot resolution / reset TMP_COUNT between statements / op_array bound check / positive mask `& 0x7FFF` for `nes_rand % N`) | `tetris.nes` | ✅ **Done** |
+| W7 | **SXROM-spec compliance** (PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 32KB). The 8KB CHR-RAM is bulk-transferred from PRG_BANK1 at boot (~50 ms); `nes_chr_bg/spr` switched to bulk transfer. ARR_POOL escapes to bank 1, growing 720B → 8KB (11×). New 4 intrinsics `nes_peek_ext / peek16_ext / poke_ext / pokestr_ext` provide 8KB of USER_RAM_EXT (initially bank 2; relocated to bank 3 by W8) | `peekext_test.nes`, `tetris.nes` (Phase 5c) | ✅ **Done** |
+| **Tetris Phase 5c** | Full repaint after line clear (single-loop: clear with `nes_put(' ')` first → overlay only the cells that need `\x05`) and on-screen GAME OVER. The ARR_POOL expansion finally gave op_array enough room | `tetris.nes` | ✅ **Done** |
+| W8 | **STR_POOL bank 2** (128B → 8KB, 64×). Resolved the tetris title corruption / `color.php` ERR L78 C27 caused by string-literal overflow. Migrated **iNES → NES 2.0 header** so FCEUX honors PRG-RAM banking. USER_RAM_EXT moved to bank 3 | `color.nes`, all `tetris.nes` paths, smoke 40/41 | ✅ **Done** |
+| Next | Tetris Phase 5d (NEXT preview / speed up) / `!` / unary `-` / `^` (BW_XOR) / `foreach` / APU intrinsic (nes_beep) / cross-bank op_array dispatch (when op_array > 8KB) | — | Not started |
+| Out of scope | Associative arrays, objects, exceptions, doubles | — | L3 policy |
 
-各フェーズの設計判断の経緯と躓きは [10-devlog](./10-devlog.md) に記録している。
+The design rationale and stumbling blocks per phase are recorded in [10-devlog](./10-devlog.md).
 
-## MVP (`echo "HELLO, NES!";` を NES で表示する)
+## MVP (display `echo "HELLO, NES!";` on the NES)
 
-### ステップ 1: リポジトリ骨格
+### Step 1: repo skeleton
 
-以下のフォルダを切る:
+Create the following directories:
 
 ```
 nesphp/
-  spec/         仕様ドキュメント (このフォルダ)
-  extractor/    opcache ダンプを呼ぶシェルラッパー
-  serializer/   serializer.php と composer.json
-  vm/           nesphp.s (ca65) と nesphp.cfg
+  spec/         Spec docs (this folder)
+  extractor/    Shell wrapper for opcache dump
+  serializer/   serializer.php and composer.json
+  vm/           nesphp.s (ca65) and nesphp.cfg
   chr/          font.chr
-  examples/     hello.php 等
-  build/        中間生成物と .nes (gitignore)
-  Makefile      1 コマンドビルド (make / make clean / make verify)
-  README.md     プロジェクト説明 (3 層図を含む)
+  examples/     hello.php etc.
+  build/        Intermediate artifacts and .nes (gitignored)
+  Makefile      One-command build (make / make clean / make verify)
+  README.md     Project description (with the 3-layer diagram)
 ```
 
-### ステップ 2: NES 側の素 Hello World (PHP 抜き)
+### Step 2: Bare NES Hello World (no PHP yet)
 
-ca65 で `HELLO WORLD` を固定表示する `.nes` を先に作る。この段階で:
+First make a `.nes` in ca65 that statically displays `HELLO WORLD`. At this stage:
 
-- PPU 初期化 / パレット / nametable クリア ([06-display-io](./06-display-io.md))
-- iNES ヘッダ / NROM マッパー / リセットベクタ
-- CHR-ROM (font.chr) の作成と配置
-- `ca65 + ld65` のビルド確立
-- Mesen でロードして `HELLO WORLD` が見えることを確認
+- PPU init / palette / nametable clear ([06-display-io](./06-display-io.md))
+- iNES header / NROM mapper / reset vector
+- Build font.chr (CHR-ROM) and place it
+- Establish the `ca65 + ld65` build
+- Confirm `HELLO WORLD` displays in Mesen
 
-雛形: [bbbradsmith/NES-ca65-example](https://github.com/bbbradsmith/NES-ca65-example)
+Template: [bbbradsmith/NES-ca65-example](https://github.com/bbbradsmith/NES-ca65-example)
 
-**このステップを独立させる理由**: PHP 側が動いていない段階で NES ビルド基盤を確立しておくと、後で切り分けがしやすい。
+**Why isolate this step**: standing up the NES build infrastructure before PHP is involved makes later debugging much easier.
 
-### ステップ 3: opcache ダンプの検証
+### Step 3: Verify the opcache dump
 
 ```bash
 cat > examples/hello.php <<'EOF'
@@ -99,7 +99,7 @@ php -dopcache.enable_cli=1 -dopcache.opt_debug_level=0x10000 \
 cat build/ops.txt
 ```
 
-期待する出力:
+Expected output:
 ```
 $_main:
      ; (lines=2, ...)
@@ -107,74 +107,74 @@ $_main:
 0001 RETURN int(1)
 ```
 
-PHP バージョン (`php -v` で 8.4.x) を `spec/README.md` の動作確認欄に記録。
+Record the PHP version (`php -v` for 8.4.x) in the verified-versions section of `spec/README.md`.
 
-### ステップ 4: L3 フォーマット仕様の凍結
+### Step 4: Freeze the L3 format
 
-`spec/01-rom-format.md` の内容が実装の単一の真実。このステップでは仕様を確定させ、serializer 実装と VM 実装のどちらもこのファイルだけを参照するようにする。
+`spec/01-rom-format.md` is the single source of truth for the implementation. Lock the spec at this step so both serializer and VM consult only that file.
 
-### ステップ 5: シリアライザ v0
+### Step 5: Serializer v0
 
-`serializer/serializer.php` で MVP 最小機能を実装:
+Implement the MVP-minimum in `serializer/serializer.php`:
 
-- `ops.txt` をパースして ZEND_ECHO と ZEND_RETURN の 2 命令、`string("...")` と `int(N)` の 2 literal 型のみ対応
-- `spec/01-rom-format.md` と `spec/04-opcode-mapping.md` を元に `ops.bin` を出力
-- ZEND_ECHO=0x88 (=136)、ZEND_RETURN=0x3e (=62) 等の番号は PHP 8.4 の `zend_vm_opcodes.h` を見てハードコード
-- PHP バージョンが 8.4 でなければ abort
+- Parse `ops.txt`, support only ZEND_ECHO and ZEND_RETURN, only `string("...")` and `int(N)` literals
+- Emit `ops.bin` based on `spec/01-rom-format.md` and `spec/04-opcode-mapping.md`
+- Hardcode numbers like ZEND_ECHO=0x88 (=136), ZEND_RETURN=0x3e (=62) from PHP 8.4's `zend_vm_opcodes.h`
+- Abort if PHP version isn't 8.4
 
-テスト: `hexdump -C build/ops.bin` の出力が `spec/01-rom-format.md` の hex dump 例と一致すること。
+Test: `hexdump -C build/ops.bin` matches the hex dump example in `spec/01-rom-format.md`.
 
-### ステップ 6: VM ループ (ca65)
+### Step 6: VM loop (ca65)
 
-`vm/nesphp.s` に `spec/03-vm-dispatch.md` の設計をそのまま実装:
+Translate the design from `spec/03-vm-dispatch.md` straight into `vm/nesphp.s`:
 
-- ゼロページの VM_PC / VM_SP / VM_LITBASE / VM_CVBASE / VM_TMPBASE
-- 256 エントリ jump table (未実装は handle_unimpl)
-- `handle_zend_echo` と `handle_zend_return` の 2 ハンドラだけ実装
-- `resolve_op1` / `resolve_op2` の汎用 operand resolver
-- `ppu_write_string_forced_blank` で nametable に書き込む
-- 起動時に op_array header を読んで php_version を確認、不一致なら halt
+- Zero-page VM_PC / VM_SP / VM_LITBASE / VM_CVBASE / VM_TMPBASE
+- 256-entry jump table (unimplemented entries point at handle_unimpl)
+- Implement only `handle_zend_echo` and `handle_zend_return`
+- `resolve_op1` / `resolve_op2` generic operand resolvers
+- `ppu_write_string_forced_blank` writes to the nametable
+- At boot, read the op_array header and check php_version, halt on mismatch
 
-### ステップ 7: 統合ビルド
+### Step 7: Integrated build
 
-`Makefile` で (1) 抽出 → (2) シリアライズ → (3) アセンブル → (4) リンク を pattern rule で繋ぐ ([05-toolchain](./05-toolchain.md))。
+Connect (1) extract → (2) serialize → (3) assemble → (4) link as a `Makefile` pattern rule ([05-toolchain](./05-toolchain.md)).
 
 ```bash
-make                     # デフォルトで build/hello.nes
-make build/foo.nes       # examples/foo.php から build/foo.nes
-make verify              # L3 ロマン検証
-make clean               # build/ を消す
+make                     # Default: build/hello.nes
+make build/foo.nes       # examples/foo.php → build/foo.nes
+make verify              # L3 romance verification
+make clean               # Remove build/
 ```
 
-### ステップ 8: Mesen で動作確認
+### Step 8: Verify in Mesen
 
-`build/hello.nes` を開き、画面に `HELLO, NES!` が表示されることを確認。
+Open `build/hello.nes` and confirm `HELLO, NES!` shows.
 
-### ステップ 9: ロマン検証
+### Step 9: Romance verification
 
-`spec/09-verification.md` の「L3 ロマン検証」セクションを実行:
+Run the "L3 romance verification" section in `spec/09-verification.md`:
 
-- `strings build/hello.nes | grep HELLO` → `HELLO, NES!` がヒット
-- `xxd build/hello.nes | grep '28 01 08 08'` → ZEND_ECHO バイト列がヒット
-- `xxd build/hello.nes | grep '3e 01 08 08'` → ZEND_RETURN バイト列がヒット
+- `strings build/hello.nes | grep HELLO` → finds `HELLO, NES!`
+- `xxd build/hello.nes | grep '88 01 00 00'` → finds the ZEND_ECHO byte sequence
+- `xxd build/hello.nes | grep '3e 01 00 00'` → finds the ZEND_RETURN byte sequence
 
-ここまでで **MVP 完了**。
+That marks **MVP complete**.
 
-### ステップ 10 (第 2 段階): 自作 Zend 拡張 `nesphp_dump.so`
+### Step 10 (Phase 2): custom Zend extension `nesphp_dump.so`
 
-- `nesphp_dump/config.m4` と `nesphp_dump/nesphp_dump.c` (~300 行 C) を書く
-- `zend_compile_file()` を呼んで `zend_op_array*` を直接歩き、`spec/01-rom-format.md` 準拠のバイナリを直接出力
-- serializer.php のテキストパース層を削除し、拡張出力を直接使う
-- テキスト経路版とバイト一致することを確認
-- 完成すると「PHP エンジンが吐いた `zend_op` を拡張がバイナリ化し、6502 がそのまま解釈」のロマン最大構成になる
+- Write `nesphp_dump/config.m4` and `nesphp_dump/nesphp_dump.c` (~300 lines of C)
+- Call `zend_compile_file()`, walk the `zend_op_array*` directly, emit binary that matches `spec/01-rom-format.md`
+- Delete the text parser layer in serializer.php and use the extension output
+- Confirm byte-equality with the text path
+- Final form: "the PHP engine emits `zend_op`, the extension binary-encodes it, the 6502 interprets it directly" — peak romance
 
 ---
 
-## 延長ゴール (MVP 後)
+## Extension goals (post-MVP)
 
-### 第 1 段階: 整数 + ローカル変数
+### Stage 1: integers + locals
 
-対応 opcode 追加:
+New opcodes:
 - `ZEND_ASSIGN`, `ZEND_ADD`, `ZEND_SUB`, `ZEND_IS_SMALLER`
 
 ```php
@@ -184,11 +184,11 @@ $a = $a + 1;
 echo $a;
 ```
 
-が動くことを目指す。CV スロット 1 個 (`$0400`) と VM スタック 2-3 段を使う。
+Goal: get this running. Uses 1 CV slot (`$0400`) and 2-3 VM stack entries.
 
-### 第 2 段階: 制御フロー
+### Stage 2: control flow
 
-対応 opcode 追加:
+New opcodes:
 - `ZEND_JMP`, `ZEND_JMPZ`, `ZEND_JMPNZ`
 - `ZEND_IS_EQUAL`, `ZEND_IS_NOT_EQUAL`
 
@@ -201,28 +201,23 @@ while ($i < 10) {
 }
 ```
 
-が動くことを目指す。`ZEND_JMP` の `op1.jmp_offset` を serializer で NES ROM 内 op index に解決する実装を追加。
+Goal: get this running. The serializer resolves `ZEND_JMP`'s `op1.jmp_offset` to a NES ROM op index.
 
-### 第 3 段階: 動的 echo (NMI 同期) ✅ 完了
+### Stage 3: dynamic echo (NMI sync) ✅ Done
 
-ステップ 2 の時点で `echo` は強制 blanking 中のみ有効だったが、NMI 同期書き込みキュー (`$0300-$03FF` 256B のリングバッファ) を実装して sprite_mode 中でも `echo` / `nes_put` / `nes_puts` が透過的に動くように昇格した。
+`echo` was forced-blanking-only after step 2; the NMI-synchronous write queue (`$0300-$03FF` 256B ring buffer) now lets `echo` / `nes_put` / `nes_puts` work transparently in sprite_mode.
 
-実装詳細は [06-display-io](./06-display-io.md) の「NMI 同期書き込みキュー」節、設計経緯は [10-devlog](./10-devlog.md) の Phase 3 参照。`examples/livetext.php` がスプライト操作中の動的テキスト描画デモ。
+Implementation: see "NMI-synchronous write queue" in [06-display-io](./06-display-io.md). Design history: Phase 3 in [10-devlog](./10-devlog.md). `examples/livetext.php` demos dynamic text drawing while sprites move.
 
-残課題: `nes_chr_bank` / `nes_chr_bg` は tearing する (将来 NMI キューに CHR 切替コマンドを追加する予定)。
+Open issue: `nes_chr_bank` / `nes_chr_bg` still tear (CHR-switch commands will be added to the NMI queue later).
 
-### 第 3.1 段階: sprite_mode 中の nes_cls ✅ 完了
+### Stage 3.1: nes_cls in sprite_mode ✅ Done
 
-nes_cls は 1024B が 1 VBlank 予算に入らず NMI 同期キューでは無理なので、
-**brief force-blanking** 方式を採用: sprite_mode 中に nes_cls を呼ぶと、
-一時的に `PPUMASK = 0` + NMI 無効化で rendering を止め、clear し、次 VBlank で
-rendering を再開する。可視効果は 1-2 フレームの黒フラッシュでスライド遷移の
-トランジションとして自然。`examples/livereset.php` が sprite 表示中の
-スライドクリア + 再描画を実演。
+The 1024B clear of `nes_cls` doesn't fit a single VBlank, so the NMI sync queue can't handle it. We use a **brief force-blanking** approach: temporarily set `PPUMASK = 0` + disable NMI to stop rendering, clear, then re-enable rendering on the next VBlank. The visible effect is a 1-2 frame black flash that reads naturally as a slide transition. `examples/livereset.php` demos slide clear + repaint while sprites are visible.
 
-### 第 4 段階: 標準入力 = コントローラ
+### Stage 4: stdin = controller
 
-PHP 側で `fgets(STDIN)` を使い、serializer が `INIT_FCALL "fgets"` パターンを `BUILTIN_READ_INPUT` に畳み込み、VM が `$4016` コントローラ読み取りを呼ぶ。
+Use `fgets(STDIN)` in PHP; the serializer folds the `INIT_FCALL "fgets"` pattern into `BUILTIN_READ_INPUT` and the VM reads `$4016` from the controller.
 
 ```php
 <?php
@@ -232,11 +227,11 @@ while (true) {
 }
 ```
 
-が動くことを目指す。
+Goal: get this running.
 
-### 第 5 段階: スプライト
+### Stage 5: sprites
 
-ビルトイン関数 `nes_sprite_set($id, $x, $y, $tile)` を serializer で畳み込み、OAM シャドウ書き込み + NMI での OAM DMA。
+The serializer folds the built-in `nes_sprite_set($id, $x, $y, $tile)` and the VM writes to the OAM shadow + does OAM DMA in NMI.
 
 ```php
 <?php
@@ -252,32 +247,32 @@ while (true) {
 }
 ```
 
-これで `README.md` の延長ゴール (「画面の文字やスプライトをコントローラで動かす」) が達成される。
+This satisfies the README's extension goal ("move on-screen text or sprites with the controller").
 
-### 第 6 段階: バンクスイッチ (必要なら)
+### Stage 6: bank switching (if needed)
 
-PRG-ROM が 32KB に収まらなくなったら UxROM に昇格し、VM を固定バンク、op_array/literals を切替バンクに配置。
+If PRG-ROM exceeds 32KB, promote to UxROM with VM in the fixed bank and op_array/literals in the switched bank.
 
 ---
 
-## スケジュール感
+## Schedule sense
 
-| ステージ | 所要 |
+| Stage | Effort |
 |---------|------|
-| MVP (ステップ 1-9) | 1-2 週間 |
-| 第 2 段階 (自作拡張) | 数日 |
-| 延長 第 1 段階 (整数+変数) | 1 週間 |
-| 延長 第 2 段階 (制御フロー) | 1 週間 |
-| 延長 第 3 段階 (動的 echo) | 数日 |
-| 延長 第 4 段階 (コントローラ) | 数日 |
-| 延長 第 5 段階 (スプライト) | 1 週間 |
+| MVP (steps 1-9) | 1-2 weeks |
+| Phase 2 (custom extension) | A few days |
+| Stage 1 (integers + variables) | 1 week |
+| Stage 2 (control flow) | 1 week |
+| Stage 3 (dynamic echo) | A few days |
+| Stage 4 (controller) | A few days |
+| Stage 5 (sprites) | 1 week |
 
-合計 2-3 ヶ月で延長ゴール全達成 (週末プロジェクトとして週 10 時間想定)。
+Total: 2-3 months to clear all extension goals (assuming ~10 hours/week as a weekend project).
 
 ---
 
-## 関連ドキュメント
+## Related documents
 
-- [09-verification](./09-verification.md) — 各ステップの受け入れ基準
-- [08-risks](./08-risks.md) — 各ステージで遭遇しうるリスク
-- [05-toolchain](./05-toolchain.md) — ビルドパイプラインの詳細
+- [09-verification](./09-verification.md) — Acceptance criteria per step
+- [08-risks](./08-risks.md) — Risks you may hit at each stage
+- [05-toolchain](./05-toolchain.md) — Build pipeline details

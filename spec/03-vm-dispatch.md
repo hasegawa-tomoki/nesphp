@@ -1,43 +1,43 @@
-# 03. 6502 VM fetch-dispatch 設計
+# 03. 6502 VM Fetch-Dispatch Design
 
 [← README](./README.md) | [← 02-ram-layout](./02-ram-layout.md) | [→ 04-opcode-mapping](./04-opcode-mapping.md)
 
-VM 本体は ca65 で書かれた 6502 アセンブリ。目標行数は ~1200 行。
+The VM core is 6502 assembly written in ca65. Target line count: ~1200 lines.
 
-## ハイレベル構成
+## High-level structure
 
 ```
-リセットハンドラ (RESET)
-  ├ ゼロページ & スタック初期化
-  ├ PPU ウォームアップ (2 回の VBL 待ち)
-  ├ パレット書き込み
-  ├ nametable クリア
-  ├ op_array ヘッダを読んで VM_PC/VM_LITBASE/VM_CVBASE/VM_TMPBASE 初期化
-  ├ 強制 blanking 中 ($2001 = 0) で VM メインループ開始
-  └ ZEND_RETURN に到達後、$2001 を有効化して無限ループ (NMI 待ち)
+Reset handler (RESET)
+  ├ Init zero page & stack
+  ├ PPU warm-up (wait two VBLs)
+  ├ Load palette
+  ├ Clear nametable
+  ├ Read the op_array header to set VM_PC/VM_LITBASE/VM_CVBASE/VM_TMPBASE
+  ├ Start the VM main loop in forced blanking ($2001 = 0)
+  └ After ZEND_RETURN, enable $2001 and loop forever (waiting for NMI)
 
-VM メインループ (main_loop:)
-  ├ fetch:  opcode バイトを VM_PC + ZOP_OPCODE (=8) から読む
-  ├ dispatch: jump table で handler にジャンプ
-  ├ handler: operand resolver + 本体処理
-  └ advance: VM_PC += ZOP_SIZE (=12)、main_loop へ
+VM main loop (main_loop:)
+  ├ fetch:    read the opcode byte at VM_PC + ZOP_OPCODE (=8)
+  ├ dispatch: branch to a handler via jump table
+  ├ handler:  operand resolver + body
+  └ advance:  VM_PC += ZOP_SIZE (=12), back to main_loop
 
-NMI ハンドラ
-  └ (MVP ではほぼ空、延長ゴールで OAM DMA / nametable 差分転送)
+NMI handler
+  └ (almost empty in MVP; OAM DMA / nametable diff transfer for extension goals)
 ```
 
-## メインループ (fetch-dispatch)
+## Main loop (fetch-dispatch)
 
 ```asm
 main_loop:
-    ; opcode を読む (zend_op のオフセット 8)
+    ; Read the opcode (zend_op offset 8)
     LDY #ZOP_OPCODE          ; = 8
-    LDA (VM_PC),Y       ; A = opcode byte (例: 0x88 = ZEND_ECHO)
-    ; (実装は順次比較 + JMP handler。jump table 方式は採用していない)
+    LDA (VM_PC),Y       ; A = opcode byte (e.g. 0x88 = ZEND_ECHO)
+    ; (Implementation: serial compare + JMP handler. No jump table.)
 ```
 
-- 実装は順次 `CMP #OPCODE / BNE :+ / JMP handle_xxx` の長い分岐チェーン (`main_loop:` は ~210 行)。MVP ではこのほうが ROM 配置と相性が良かった。jump table 方式に切替えるなら 256 entry × 2B = 512B 追加で実現可能
-- 各 handler の末尾で `JMP advance` に飛び、VM_PC を +ZOP_SIZE (12) して `JMP main_loop`
+- The implementation is a long chain of `CMP #OPCODE / BNE :+ / JMP handle_xxx` (`main_loop:` is ~210 lines). It worked better with our ROM placement during MVP. A jump table would cost an extra 256 entries × 2B = 512B
+- Each handler ends with `JMP advance`, which advances VM_PC by ZOP_SIZE (12) and `JMP main_loop`s
 
 ### advance
 
@@ -55,44 +55,44 @@ advance:
 
 ---
 
-## jump table
+## Jump table (alternative)
 
-256 エントリ × 2B (lo/hi) = **512B** を ROM に置く。
+256 entries × 2B (lo/hi) = **512B** in ROM.
 
 ```asm
 .segment "RODATA"
 handler_lo:
     .byte <handle_zend_nop      ; 0x00
     .byte <handle_zend_add      ; 0x01
-    .byte <handle_unimpl        ; 0x02 (ZEND_SUB, MVP 未実装)
+    .byte <handle_unimpl        ; 0x02 (ZEND_SUB, MVP unimplemented)
     ...
-    .byte <handle_zend_echo     ; 0x88 (例、ZEND_ECHO=136)
+    .byte <handle_zend_echo     ; 0x88 (example, ZEND_ECHO=136)
     ...
-    .byte <handle_zend_return   ; 0x3e (例)
+    .byte <handle_zend_return   ; 0x3e (example)
     ...
-    ; 残りは handle_unimpl
+    ; The remaining slots all point at handle_unimpl
 
 handler_hi:
     .byte >handle_zend_nop
     ...
 ```
 
-- 未実装 opcode は全て `handle_unimpl` (画面に opcode 番号と `UNIMPL` を表示して halt) を指す
-- ca65 のマクロで `OP_ENTRY ZEND_ECHO, handle_zend_echo` のように書けると保守しやすい
+- All unimplemented opcodes point at `handle_unimpl` (display the opcode number and `UNIMPL` on screen, then halt)
+- A ca65 macro like `OP_ENTRY ZEND_ECHO, handle_zend_echo` would help maintenance
 
-### PHP 8.4 の opcode 番号ハードコード
+### PHP 8.4 opcode hardcoding
 
-正確な番号は [04-opcode-mapping](./04-opcode-mapping.md) を参照。MVP で必要なのは 2 個だけ (`ZEND_ECHO`, `ZEND_RETURN`)。
+For exact opcode numbers, see [04-opcode-mapping](./04-opcode-mapping.md). MVP only needs two (`ZEND_ECHO`, `ZEND_RETURN`).
 
 ---
 
-## operand resolver
+## Operand resolver
 
-各ハンドラ先頭で op1/op2 を「4B tagged value」として `OP1_VAL` / `OP2_VAL` に取り出す共通ルーチン:
+Each handler starts by extracting op1/op2 as 4B tagged values into `OP1_VAL` / `OP2_VAL` via shared routines:
 
 ```
 resolve_op1:
-    LDY #ZOP_OP1_TYPE   ; = 9 (op1_type のオフセット)
+    LDY #ZOP_OP1_TYPE   ; = 9 (op1_type offset)
     LDA (VM_PC),Y
     CMP #0x01           ; IS_CONST
     BEQ resolve_const
@@ -102,24 +102,24 @@ resolve_op1:
     BEQ resolve_tmp
     CMP #0x04           ; IS_VAR
     BEQ resolve_var
-    ; IS_UNUSED: OP1_VAL に IS_UNDEF を入れて return
+    ; IS_UNUSED: store IS_UNDEF in OP1_VAL and return
     ...
 ```
 
-### IS_CONST の解決
+### IS_CONST resolution
 
 ```
-; op1.constant は zend_op のオフセット 0-3 (4B)
-; これを literals 配列内のバイトオフセットとして扱う
+; op1.constant lives at zend_op offset 0-3 (4B)
+; Treat it as a byte offset into the literals array
 LDY #0
 LDA (VM_PC),Y            ; A = op1.constant lo
 STA TMP0
 INY
 LDA (VM_PC),Y            ; A = op1.constant mid
 STA TMP0+1
-; (hi/ext は 0 のはず、無視)
+; (hi/ext should be 0; ignore)
 
-; literals[] の先頭 + TMP0 = 該当 zval の先頭
+; literals[] base + TMP0 = address of the zval
 CLC
 LDA VM_LITBASE
 ADC TMP0
@@ -128,12 +128,12 @@ LDA VM_LITBASE+1
 ADC TMP0+1
 STA TMP1+1
 
-; TMP1 が指す 16B zval から 4B tagged に narrow
-; (type は u1.type_info の下位 1B = オフセット 8)
+; Narrow the 16B zval at TMP1 to a 4B tagged value
+; (type is the low byte of u1.type_info at offset 8)
 LDY #8
 LDA (TMP1),Y
-STA OP1_VAL              ; type ID を OP1_VAL のオフセット 0 に
-; IS_LONG/IS_STRING の場合は value の下位 2B を payload lo/hi に
+STA OP1_VAL              ; type ID into OP1_VAL byte 0
+; For IS_LONG/IS_STRING, copy the low 2B of value to payload lo/hi
 LDY #0
 LDA (TMP1),Y
 STA OP1_VAL+1            ; payload lo
@@ -143,23 +143,23 @@ STA OP1_VAL+2            ; payload hi
 RTS
 ```
 
-### IS_CV の解決
+### IS_CV resolution
 
 ```
-; op1.var は CV スロット番号 × 4 (Zend の慣習)
-; スロット n の RAM アドレスは VM_CVBASE + n (スロット番号 = op1.var / 4 ではなく、
-; Zend では var フィールドに直接バイトオフセットが入る実装が多い。PHP 8.4 での
-; 正確な意味は 04-opcode-mapping 参照)
+; op1.var = CV slot number × 4 (Zend convention)
+; The RAM address of slot n is VM_CVBASE + n. Note that the var field carries
+; a byte offset directly in many Zend implementations rather than slot/4.
+; See 04-opcode-mapping for the exact PHP 8.4 semantics.
 LDY #0
-LDA (VM_PC),Y            ; op1.var lo (バイトオフセット)
+LDA (VM_PC),Y            ; op1.var lo (byte offset)
 CLC
 ADC VM_CVBASE
 STA TMP0
 LDA #0
 ADC VM_CVBASE+1
 STA TMP0+1
-; TMP0 が CV スロットの RAM アドレス (4B tagged value)
-; そのまま OP1_VAL にコピー
+; TMP0 now holds the RAM address of the CV slot (a 4B tagged value)
+; Copy directly into OP1_VAL
 LDY #0
 LDA (TMP0),Y
 STA OP1_VAL
@@ -175,31 +175,31 @@ STA OP1_VAL+3
 RTS
 ```
 
-### 速度より実装量を優先
+### Code volume over speed
 
-各 handler ごとに operand 種別の組み合わせを特殊化する (CONST-UNUSED, CV-CONST, CV-CV 等) と速度は出るが実装量が爆発する。MVP は **resolve_op1 / resolve_op2 を毎回呼ぶ汎用方式**で書き、ボトルネックが見えてから特殊化する。
+Specializing every handler for each operand combination (CONST-UNUSED, CV-CONST, CV-CV, ...) would be fast but explode the code size. The MVP **calls `resolve_op1` / `resolve_op2` from every handler** and specializes only after a bottleneck appears.
 
 ---
 
-## handler の例: ZEND_ECHO
+## Example handler: ZEND_ECHO
 
 ```asm
 handle_zend_echo:
-    ; op1 を解決
+    ; Resolve op1
     JSR resolve_op1
 
-    ; OP1_VAL の type が IS_STRING (6) であることを確認
+    ; Confirm OP1_VAL.type is IS_STRING (6)
     LDA OP1_VAL
     CMP #6
     BNE echo_type_error
 
-    ; OP1_VAL の payload lo/hi が zend_string への ROM オフセット
+    ; OP1_VAL payload lo/hi is the ROM offset to a zend_string
     LDA OP1_VAL+1
     STA TMP0
     LDA OP1_VAL+2
     STA TMP0+1
 
-    ; TMP0 を ROM ベース ($8000 等) と足して絶対アドレスに
+    ; Add ROM_BASE (e.g. $8000) to make TMP0 absolute
     CLC
     LDA TMP0
     ADC #<ROM_BASE
@@ -208,7 +208,7 @@ handle_zend_echo:
     ADC #>ROM_BASE
     STA TMP0+1
 
-    ; zend_string のオフセット 16 から len を取る (2B 有効)
+    ; Read len from zend_string offset 16 (2B significant)
     LDY #16
     LDA (TMP0),Y
     STA TMP1             ; len lo
@@ -216,7 +216,7 @@ handle_zend_echo:
     LDA (TMP0),Y
     STA TMP1+1           ; len hi
 
-    ; val[] はオフセット 24 から
+    ; val[] starts at offset 24
     LDA TMP0
     CLC
     ADC #24
@@ -225,44 +225,44 @@ handle_zend_echo:
     INC TMP0+1
 :
 
-    ; TMP1 バイトを PPU nametable に書く
+    ; Write TMP1 bytes to the PPU nametable
     JSR ppu_write_string_forced_blank
 
-    ; ZEND_ECHO は値を push しない (void)
+    ; ZEND_ECHO doesn't push (void)
     JMP advance
 ```
 
-`ppu_write_string_forced_blank` の中身は [06-display-io](./06-display-io.md)。
+`ppu_write_string_forced_blank` lives in [06-display-io](./06-display-io.md).
 
 ---
 
-## handler の例: ZEND_RETURN
+## Example handler: ZEND_RETURN
 
 ```asm
 handle_zend_return:
-    ; ZEND_RETURN op1 は return 値 (MVP では無視)
-    ; PPU を有効化してから halt
+    ; ZEND_RETURN op1 is the return value (ignored in MVP)
+    ; Enable PPU and halt
 
     LDA #%00011110       ; PPUMASK: BG + sprite on
     STA $2001
 
 halt_loop:
-    JMP halt_loop        ; NMI 待ちの無限ループ
+    JMP halt_loop        ; Spin forever, NMI handles things
 ```
 
-延長ゴールでは NMI が動的 echo や OAM DMA を処理するため、ここは `WAI` 相当の NOP ループになる。
+In extension goals NMI handles dynamic echo and OAM DMA, so this becomes a `WAI`-equivalent NOP loop.
 
 ---
 
-## 未実装 opcode: handle_unimpl
+## Unimplemented opcode: handle_unimpl
 
 ```asm
 handle_unimpl:
-    ; 画面に "UNIMPL <opcode>" を表示して halt
+    ; Display "UNIMPL <opcode>" on screen and halt
     LDY #20
-    LDA (VM_PC),Y        ; A = opcode 番号
+    LDA (VM_PC),Y        ; A = opcode number
     PHA
-    ; ... 文字列 "UNIMPL " と opcode 番号を hex で nametable に書く
+    ; ... write the string "UNIMPL " and the opcode number in hex to the nametable
     PLA
 
     LDA #%00011110
@@ -271,24 +271,24 @@ unimpl_halt:
     JMP unimpl_halt
 ```
 
-デバッグ時にどの opcode が未実装なのか一目で分かる。
+Lets you see at a glance which opcode is missing during debugging.
 
 ---
 
-## リセットハンドラ (概要)
+## Reset handler (overview)
 
 ```asm
 reset:
-    SEI                  ; 割り込み禁止
-    CLD                  ; 10進数モード off
+    SEI                  ; Disable interrupts
+    CLD                  ; Decimal mode off
     LDX #$FF
-    TXS                  ; スタックポインタ初期化
+    TXS                  ; Reset stack pointer
     INX
     STX $2000            ; PPUCTRL = 0
-    STX $2001            ; PPUMASK = 0 (強制 blanking)
-    STX $4010            ; DMC 無効化
+    STX $2001            ; PPUMASK = 0 (forced blanking)
+    STX $4010            ; Disable DMC
 
-    ; PPU ウォームアップ (2 回の VBL 待ち)
+    ; PPU warm-up (wait two VBLs)
     BIT $2002
 vblankwait1:
     BIT $2002
@@ -297,33 +297,33 @@ vblankwait2:
     BIT $2002
     BPL vblankwait2
 
-    ; RAM クリア ($0000-$07FF)
+    ; Clear RAM ($0000-$07FF)
     JSR clear_wram
 
-    ; パレット書き込み
+    ; Load palette
     JSR load_palette
 
-    ; nametable クリア
+    ; Clear nametable
     JSR clear_nametable
 
-    ; op_array ヘッダから VM 初期化
+    ; Initialize VM from op_array header
     JSR vm_init_from_op_array
 
-    ; VM メインループへ (強制 blanking のまま)
+    ; Enter VM main loop (still in forced blanking)
     JMP main_loop
 ```
 
 `vm_init_from_op_array`:
-- ROM 先頭 (`$8000` 等) の op_array header を読む
-- `num_opcodes`, `literals_off`, `num_literals`, `num_cvs`, `num_tmps`, `php_version` を取る
-- `php_version` が 8.4 でなければ即 halt (エラー表示)
-- VM_PC = op[0] 先頭アドレス、VM_LITBASE = 親 ROM base + literals_off、VM_SP = `$0300`、VM_CVBASE = `$0400`、VM_TMPBASE = `$0500`
-- CV/TMP スロットを IS_UNDEF で初期化
+- Read the op_array header at the ROM head (e.g. `$8000`)
+- Pull `num_opcodes`, `literals_off`, `num_literals`, `num_cvs`, `num_tmps`, `php_version`
+- If `php_version` ≠ 8.4, halt immediately (error)
+- VM_PC = address of op[0]; VM_LITBASE = ROM base + literals_off; VM_SP = `$0300`; VM_CVBASE = `$0400`; VM_TMPBASE = `$0500`
+- Initialize CV/TMP slots to IS_UNDEF
 
 ---
 
-## 関連ドキュメント
+## Related documents
 
-- [02-ram-layout](./02-ram-layout.md) — ゼロページの VM レジスタ割り当て
-- [04-opcode-mapping](./04-opcode-mapping.md) — 各 opcode の対応状況
-- [06-display-io](./06-display-io.md) — `ppu_write_string_forced_blank` の実装
+- [02-ram-layout](./02-ram-layout.md) — Zero-page VM register assignments
+- [04-opcode-mapping](./04-opcode-mapping.md) — Status of each opcode
+- [06-display-io](./06-display-io.md) — Implementation of `ppu_write_string_forced_blank`

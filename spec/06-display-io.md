@@ -1,175 +1,172 @@
-# 06. PPU 表示とコントローラ入力
+# 06. PPU display and controller input
 
 [← README](./README.md) | [← 05-toolchain](./05-toolchain.md) | [→ 07-roadmap](./07-roadmap.md)
 
-## CHR-ROM とフォント
+## CHR-ROM and the font
 
-- CHR-ROM 8KB のうち、最初の 2KB (パターンテーブル 0) をフォントに使う
-- **タイル番号 = ASCII コード**と決め打ち配置:
-  - タイル `0x20` = スペース
-  - タイル `0x41` = 'A'
-  - タイル `0x48` = 'H'
+- We use the first 2KB of the 8KB CHR-ROM (pattern table 0) for the font
+- **Tile number = ASCII code** layout:
+  - Tile `0x20` = space
+  - Tile `0x41` = 'A'
+  - Tile `0x48` = 'H'
   - …
-- これにより `zend_string.val[]` のバイトをそのまま nametable に書ける (`LDA val_byte : STA PPUDATA`)
-- 8KB のうち、0x00-0x1F と 0x80-0xFF は未使用 (将来のスプライト用に予備)
+- This lets us write `zend_string.val[]` bytes straight into the nametable (`LDA val_byte : STA PPUDATA`)
+- Within the 8KB, 0x00-0x1F and 0x80-0xFF are unused (reserved for future sprites)
 
-### font.chr の作り方
+### How to make font.chr
 
-- NES 向けのフリーフォント (例: `8x8-ascii-bitmap-font`) を使う
-- 1 タイル = 8×8 ピクセル = 16 バイト (CHR 形式)
-- 96 タイル (0x20-0x7F) = 1536 バイト
-- 残り 6656 バイトは `00` 埋め
-
----
-
-## PPU 初期化シーケンス (リセットハンドラ内)
-
-1. `$2000 = 0` (PPUCTRL 無効化)
-2. `$2001 = 0` (PPUMASK 無効化 = 強制 blanking)
-3. `$4010 = 0` (DMC 無効化)
-4. 2 回の VBL 待ち (`BIT $2002` → `BPL $-3` を 2 回)
-5. RAM クリア
-6. **OAM shadow `$0200-$02FF` を y=$FF で初期化** (64 スプライトを画面外に隠す)
-7. パレット書き込み (`$3F00-$3F1F` に 32 バイト)
-8. nametable クリア (スペース `$20` で埋める 960 + attr 64 バイト)
+- Use a free NES-style font (e.g. `8x8-ascii-bitmap-font`)
+- 1 tile = 8×8 pixels = 16 bytes (CHR format)
+- 96 tiles (0x20-0x7F) = 1536 bytes
+- The remaining 6656 bytes are zero-filled
 
 ---
 
-## 実装済み表示モード state machine
+## PPU init sequence (inside the reset handler)
 
-現行の nesphp VM は 2 つの PPU state を持つ。
+1. `$2000 = 0` (disable PPUCTRL)
+2. `$2001 = 0` (disable PPUMASK = forced blanking)
+3. `$4010 = 0` (disable DMC)
+4. Wait two VBLs (`BIT $2002` → `BPL $-3` twice)
+5. Clear RAM
+6. **Init OAM shadow `$0200-$02FF` to y=$FF** (hide all 64 sprites off-screen)
+7. Write the palette (32 bytes to `$3F00-$3F1F`)
+8. Clear nametable (fill with space `$20`, 960 bytes + 64 attribute bytes)
+
+---
+
+## Implemented display-mode state machine
+
+The current nesphp VM has 2 PPU states.
 
 ```
          [forced_blanking]                       [sprite_mode]
          PPUMASK = 0                             PPUMASK = %00011110 (BG+sprite)
          NMI off                                 NMI on
-         nametable に直接書ける                    echo/nes_put/nes_puts は NMI キュー経由
-                                                  nes_cls は brief force-blanking
-                                                   (~1-2 フレーム黒フラッシュ)
-         sprite は表示されない                     OAM DMA が毎 VBlank で走る
+         Direct nametable writes                 echo/nes_put/nes_puts via NMI queue
+                                                  nes_cls via brief force-blanking
+                                                   (~1-2 frame black flash)
+         Sprites not displayed                   OAM DMA every VBlank
                │                                        ▲
-               │  ┌── fgets: 一時的に rendering on, 待機, off ──┐
+               │  ┌── fgets: temporarily on, wait, off ─┐
                │  │                                            │
                │  └────────────────────────────────────────────┘
                │                                        │
                │                                        │
-               │        最初の nes_sprite_at 呼び出し       │
+               │      First nes_sprite_at call          │
                └────────────────────────────────────────┘
 ```
 
-### forced_blanking (初期状態 / sprite_mode に遷移前)
+### forced_blanking (initial state, before sprite_mode)
 
-- `PPUMASK = 0`、レンダリング停止 → 画面は黒
-- `echo` / `nes_put` / `nes_puts` / `nes_cls` は強制 blanking 中に `PPUADDR` / `PPUDATA` を直接叩ける
-- `fgets` は以下のサブフロー:
-  1. `PPUSCROLL = 0,0` + `PPUMASK = %00001110` (rendering 一時 on)
-  2. コントローラ全ボタン release 待ち → 新押下待ち
-  3. `PPUMASK = 0` (forced blanking 復帰) + `PPUADDR = PPU_CURSOR` 再セット
-  4. button 対応の `button_str_X` の ROM offset を result に書き戻し
-- ユーザから見ると「ボタン押してる間だけ画面が見える」体験
+- `PPUMASK = 0`, rendering off → screen is black
+- `echo` / `nes_put` / `nes_puts` / `nes_cls` can hit `PPUADDR` / `PPUDATA` directly during forced blanking
+- `fgets` runs the following sub-flow:
+  1. `PPUSCROLL = 0,0` + `PPUMASK = %00001110` (rendering temporarily on)
+  2. Wait for all buttons released → wait for new press
+  3. `PPUMASK = 0` (back to forced blanking) + reset `PPUADDR = PPU_CURSOR`
+  4. Write the ROM offset of the matching `button_str_X` to result
+- From the user's perspective: "the screen is visible only while a button is held"
 
-### sprite_mode (初回 nes_sprite_at 後)
+### sprite_mode (after the first nes_sprite_at)
 
-初回 `nes_sprite_at` 呼び出しで `enable_sprite_mode` ルーチンが走る:
+The first `nes_sprite_at` call runs `enable_sprite_mode`:
 
-1. VBlank 待ち (`BIT PPUSTATUS` / `BPL :-`)
-2. 初回 OAM DMA (`STA $4014`) で隠しスプライト (y=$FF) を反映
-3. `PPUSCROLL = 0,0` (スクロールリセット)
-4. `PPUCTRL = %10000000` (NMI enable、sprite/BG pattern table 0)
-5. `PPUMASK = %00011110` (BG + sprite rendering、左端 8 ピクセル表示)
+1. Wait for VBlank (`BIT PPUSTATUS` / `BPL :-`)
+2. First OAM DMA (`STA $4014`) so the hidden sprites (y=$FF) propagate
+3. `PPUSCROLL = 0,0` (reset scroll)
+4. `PPUCTRL = %10000000` (NMI enable, sprite/BG pattern table 0)
+5. `PPUMASK = %00011110` (BG + sprite rendering, show the leftmost 8 pixels)
 6. `sprite_mode_on = 1`
 
-以降:
+Going forward:
 
-- `nes_sprite_at` は OAM shadow `$0200 + $idx*4` 先頭から (y, tile, x) を書く (attr は触らない、`nes_sprite_attr` で別途設定)。NMI が毎 VBlank で全 64 sprite 分を OAM に DMA
-- `fgets` は rendering を切らずにボタン待ち (NMI が走り続けるので画面表示継続)
-- `echo` / `nes_put` / `nes_puts` は **Phase 3 (NMI 同期書き込みキュー) により動く**。実際の PPU 書き込みは NMI ハンドラが VBlank 中に行う (下記参照)
-- `nes_cls` は **Phase 3.1 (brief force-blanking) により動く**。1024 バイトは 1 VBlank 予算 (~2273 cycle) に入らないため NMI キュー経由ではなく、呼び出し時に一時的に `PPUMASK = 0` で rendering を止めて clear し、次 VBlank 同期で rendering を再開する方式。可視効果は 1-2 フレームの黒フラッシュで、スライド遷移のトランジションとして自然
+- `nes_sprite_at` writes (y, tile, x) starting at OAM shadow `$0200 + $idx*4` (doesn't touch attr; `nes_sprite_attr` does that). NMI DMAs all 64 sprites every VBlank
+- `fgets` waits for buttons without disabling rendering (NMI keeps running, screen stays visible)
+- `echo` / `nes_put` / `nes_puts` are powered by **Phase 3 (NMI sync write queue)**. Actual PPU writes happen inside the NMI handler during VBlank (see below)
+- `nes_cls` is powered by **Phase 3.1 (brief force-blanking)**. Since 1024 bytes don't fit in the VBlank budget (~2273 cycles), we can't go through the NMI queue; instead we temporarily set `PPUMASK = 0` to stop rendering, clear, and resume rendering on the next VBlank. Visually you get a 1-2 frame black flash that reads naturally as a slide transition
 
-### 状態遷移の制約
+### State transition constraints
 
-- **一度 sprite_mode に入ったら forced_blanking に戻れない** (MVP では意図的に単方向、`sprite_mode_on` フラグは一度 1 になったら 0 に戻らない)
-- `echo` / `nes_put` / `nes_puts` は **Phase 3 以降、両モードで動く** (sprite_mode では NMI 同期書き込みキュー経由)
-- `nes_cls` は **Phase 3.1 以降、両モードで動く** (sprite_mode では brief force-blanking、rendering を一時的に切って clear、次 VBlank で再開)
+- **Once you enter sprite_mode you cannot return to forced_blanking** (intentionally one-way in MVP; `sprite_mode_on` only flips 0 → 1 and never back)
+- `echo` / `nes_put` / `nes_puts` **work in both modes since Phase 3** (in sprite_mode they go through the NMI sync queue)
+- `nes_cls` **works in both modes since Phase 3.1** (brief force-blanking in sprite_mode: kill rendering, clear, resume next VBlank)
 
-### NMI 同期書き込みキュー (Phase 3)
+### NMI sync write queue (Phase 3)
 
-sprite_mode 中の nametable 書き込みを「呼んだ瞬間にキューへ積む → 次 VBlank で実際に PPU に流し込む」モデルで実現する。これにより rendering を止めずに nametable 更新ができる。
+We model nametable writes during sprite_mode as "enqueue when called → flush at the next VBlank". Lets us update the nametable without stopping rendering.
 
-キュー実体: `NMI_QUEUE_ADDR = $0300`、256 バイトのリングバッファ。フォーマット:
+Queue: `NMI_QUEUE_ADDR = $0300`, a 256-byte ring buffer. Format:
 
 ```
-[addr_hi addr_lo len data_0 ... data_{len-1}]  ← 1 エントリ
-[addr_hi addr_lo len data_0 ... data_{len-1}]  ← 次エントリ
+[addr_hi addr_lo len data_0 ... data_{len-1}]  ← 1 entry
+[addr_hi addr_lo len data_0 ... data_{len-1}]  ← next entry
 ...
 ```
 
-- **`nmi_queue_write`** (zero page, 1B): main CPU が次に append するオフセット (producer)
-- **`nmi_queue_read`** (zero page, 1B): NMI が次に処理するオフセット (consumer)
-- **両方ともモノトニック増加**する uint8 で、256 で自然 wrap。`read == write` で空、`(write - read - 1) & $FF` が使用中バイト数
-- **page 境界整列 ($0300)** にしてあるので、`LDA NMI_QUEUE_ADDR, X` の X 自動 wrap で終端をまたぐエントリも透過アクセス
+- **`nmi_queue_write`** (zero page, 1B): the offset main appends to (producer)
+- **`nmi_queue_read`** (zero page, 1B): the offset NMI processes next (consumer)
+- **Both monotonically increase** as uint8s, wrapping at 256. `read == write` is empty; `(write - read - 1) & $FF` is the bytes in use
+- Aligned to a **page boundary ($0300)** so X auto-wraps in `LDA NMI_QUEUE_ADDR, X` and entries that straddle the end stay accessible
 
-Race-free 設計:
+Race-free design:
 
-- `write` は main のみ、`read` は NMI のみが更新する
-- main は空き容量を `(read - write - 1) & $FF` で計算して、3 + len 以上あれば append
-- append 中に NMI が fire しても、NMI は commit 前の `write` を見るので新エントリ領域には触れず、old entries を flush して `read` を `write` に追いつかせるだけ
-- main が X レジスタに cache した write_head は NMI に影響されない (NMI は reset をしない設計)
+- `write` is updated only by main; `read` only by NMI
+- main computes free space as `(read - write - 1) & $FF` and appends if >= 3 + len
+- If NMI fires mid-append, NMI sees pre-commit `write`, ignores the new entry's space, and just flushes old entries while pulling `read` toward `write`
+- The write_head main caches in X is unaffected by NMI (NMI doesn't reset)
 
-`flush_nmi_queue` は NMI ハンドラ内から呼ばれ、`read..write-1` のエントリを順に PPUADDR/PPUDATA へ流し込む。1 VBlank で 256 バイト全部を flush しても ~1300 cycle で予算内。
+`flush_nmi_queue` runs from inside the NMI handler and streams entries `read..write-1` to PPUADDR/PPUDATA. Even flushing all 256 bytes in one VBlank takes ~1300 cycles — within budget.
 
-`enqueue_ppu_nt` は producer 側のヘルパで、TMP0/TMP1/TMP2 に (addr, src ptr, len) を入れて JSR する。空きが足りない場合は NMI drain を busy-wait。
+`enqueue_ppu_nt` is the producer-side helper. Caller fills TMP0/TMP1/TMP2 with (addr, src ptr, len) and JSRs. If there isn't enough space, it busy-waits for NMI to drain.
 
-ハンドラは `ppu_write_bytes` に集約されていて、`sprite_mode_on` を見て「forced_blanking なら PPUADDR/PPUDATA 直書き、sprite_mode なら enqueue」に分岐する。
+Handlers route through `ppu_write_bytes`, which checks `sprite_mode_on` and branches between "forced_blanking → direct PPUADDR/PPUDATA" and "sprite_mode → enqueue".
 
-### nes_cls の brief force-blanking (Phase 3.1)
+### Brief force-blanking for nes_cls (Phase 3.1)
 
-`nes_cls` は nametable 0 全域 (1024B) を空白で埋めるため、1 VBlank 予算 (~2273 cycle) には収まらず NMI キュー方式を使えない。代わりに sprite_mode 中の `nes_cls` 呼び出しでは以下を行う:
+`nes_cls` clears the entire 1024B nametable 0, which doesn't fit a VBlank budget (~2273 cycles), so the NMI queue isn't viable. In sprite_mode, `nes_cls` does:
 
-1. `ppu_ctrl_shadow` を 6502 スタックに退避
-2. `PPUCTRL` bit 7 クリア (NMI 一時無効化)。clear 中に NMI が発火して `flush_nmi_queue` が PPUADDR を上書きしないようにする
-3. `PPUMASK = 0` で rendering OFF → PPU は強制 blanking 状態へ
-4. 既存の 1024B clear ループを実行
-5. `BIT PPUSTATUS` / `BPL` で次 VBlank 開始まで wait (NMI 無効化済みなので flag が勝手にクリアされない)
-6. `STA $4014` で OAM DMA を手動実行 (NMI 無効化期間中の OAM 更新の補償、1 回だけ)
-7. `PPUSCROLL = 0, 0` で scroll 復帰
-8. `PPUMASK = %00011110` で rendering 再開
-9. `ppu_ctrl_shadow` をスタックから復元、`PPUCTRL` に書き戻す (NMI 再有効化)
-10. `PPU_CURSOR` を `NAMETABLE_START` に戻して `JMP advance`
+1. Save `ppu_ctrl_shadow` to the 6502 stack
+2. Clear `PPUCTRL` bit 7 (disable NMI temporarily) so an NMI can't fire mid-clear and overwrite PPUADDR via `flush_nmi_queue`
+3. Set `PPUMASK = 0` to stop rendering → forced blanking
+4. Run the existing 1024B clear loop
+5. Wait for the next VBlank with `BIT PPUSTATUS` / `BPL` (NMI is disabled, so the flag isn't auto-cleared)
+6. Manually run OAM DMA via `STA $4014` (compensates for the NMI-disabled OAM update window, once)
+7. Reset scroll with `PPUSCROLL = 0, 0`
+8. Resume rendering with `PPUMASK = %00011110`
+9. Pop `ppu_ctrl_shadow` and restore `PPUCTRL` (re-enable NMI)
+10. Reset `PPU_CURSOR` to `NAMETABLE_START` and `JMP advance`
 
-可視効果は「呼び出した瞬間から次 VBlank までの ~1-2 フレーム間、画面が真っ黒になる」。スライド遷移のトランジションとしては自然なフラッシュで、sprite 表示中に清潔にスライドを切り替えられる。forced_blanking パスは完全に無変更で、`sprite_mode_on == 0` のときは従来通りの高速直書き。
+The visible effect is "the screen blacks out for ~1-2 frames between the call and the next VBlank". Reads naturally as a slide-transition flash; lets you cleanly swap slides while sprites stay on screen. The forced_blanking path is unmodified — when `sprite_mode_on == 0`, classic fast direct writes still happen.
 
-### NMI ハンドラ (現行実装)
+### NMI handler (current implementation)
 
 ```asm
 nmi:
-    PHA : TXA : PHA : TYA : PHA    ; A/X/Y 保存
+    PHA : TXA : PHA : TYA : PHA    ; Save A/X/Y
     LDA #>OAM_SHADOW               ; $02
-    STA OAM_DMA                    ; $4014: OAM DMA 512+ cycle 停止
-    BIT PPUSTATUS                  ; latch reset
+    STA OAM_DMA                    ; $4014: OAM DMA stalls 512+ cycles
+    BIT PPUSTATUS                  ; reset latch
     LDA #0
     STA PPUSCROLL : STA PPUSCROLL  ; scroll 0, 0
     PLA : TAY : PLA : TAX : PLA
     RTI
 ```
 
-単純に OAM DMA + scroll reset するだけ。nametable 転送 / 任意の VBlank 処理は現段階では未実装。
+Just OAM DMA + scroll reset. No nametable transfers / general VBlank chores yet.
 
 ---
 
-## パレット
+## Palette
 
-黒背景に白文字で統一。BG / sprite ともに同じパターンテーブル (pattern table 0) のフォントを参照する。
+Unified white-on-black. Both BG and sprites reference the same pattern table (pattern table 0).
 
-`nes_chr_bg($n)` で BG 用 4KB CHR bank (0-7) を、`nes_chr_spr($n)` で sprite 用
-4KB CHR bank (0-7) を独立に切り替えられる (MMC1 の 4KB CHR banking)。
-PPUCTRL bit 4 = 0 (BG → $0000) / bit 3 = 1 (sprite → $1000) により両者が完全
-に分離している。詳細は [11-chr-banks](./11-chr-banks.md)。
+`nes_chr_bg($n)` switches the BG-side 4KB CHR bank (0-7) and `nes_chr_spr($n)` switches the sprite-side 4KB CHR bank (0-7) independently (MMC1 4KB CHR banking). PPUCTRL bit 4 = 0 (BG → $0000) / bit 3 = 1 (sprite → $1000) keeps them fully separated. See [11-chr-banks](./11-chr-banks.md).
 
 ```asm
 palette_data:
-    .byte $0F, $30, $10, $00   ; BG palette 0  (背景=黒, 文字=白)
-    .byte $0F, $30, $10, $00   ; BG palette 1-3 (同上)
+    .byte $0F, $30, $10, $00   ; BG palette 0  (bg=black, text=white)
+    .byte $0F, $30, $10, $00   ; BG palette 1-3 (same)
     .byte $0F, $30, $10, $00
     .byte $0F, $30, $10, $00
     .byte $0F, $30, $10, $00   ; sprite palette 0
@@ -178,45 +175,45 @@ palette_data:
     .byte $0F, $30, $10, $00
 ```
 
-sprite はフォントの 1bit glyph を使うので色 1 (白) が見え、色 0 は透明。
+Sprites use the font's 1bit glyph, so color 1 (white) shows and color 0 is transparent.
 
 ---
 
-## nametable への ASCII 書き込み (MVP: 強制 blanking 方式)
+## Writing ASCII to the nametable (MVP: forced-blanking)
 
-PPU の VRAM `$2000-$23FF` が nametable 0 (32×30 タイル = 960 バイト)。
+PPU VRAM `$2000-$23FF` is nametable 0 (32×30 tiles = 960 bytes).
 
-### 書き込み手順
+### Procedure
 
-1. `PPUADDR` ($2006) に書き込み先アドレスを high, low の順で書く
-2. `PPUDATA` ($2007) にタイル番号 (ASCII コード) を順次書き込む。`PPUCTRL` の VRAM 増分フラグで自動的に +1 進む
+1. Write the destination address to `PPUADDR` ($2006) high then low
+2. Write tile numbers (ASCII codes) to `PPUDATA` ($2007). The VRAM-increment flag in `PPUCTRL` advances by +1 automatically
 
-### `ppu_write_string_forced_blank` ルーチン
+### `ppu_write_string_forced_blank`
 
 ```asm
-; 入力:
-;   TMP0  zend_string.val[] の先頭 ROM アドレス (16bit)
-;   TMP1  len (下位 2B)
-; 副作用:
-;   PPU_CURSOR を更新 (次の echo の継続位置)
+; Inputs:
+;   TMP0  ROM head address of zend_string.val[] (16 bits)
+;   TMP1  len (low 2B)
+; Side effects:
+;   Updates PPU_CURSOR (continuation point for the next echo)
 ppu_write_string_forced_blank:
-    ; PPUADDR を PPU_CURSOR にセット
-    LDA $2002            ; ラッチリセット
+    ; Set PPUADDR to PPU_CURSOR
+    LDA $2002            ; reset latch
     LDA PPU_CURSOR+1     ; high
     STA $2006
     LDA PPU_CURSOR       ; low
     STA $2006
 
-    ; len バイトを PPUDATA に書き出す
+    ; Write len bytes to PPUDATA
     LDY #0
 write_loop:
     LDA (TMP0),Y
     STA $2007
     INY
     CPY TMP1             ; len == Y ?
-    BNE write_loop       ; (len が 256 以上なら要拡張)
+    BNE write_loop       ; (extend if len ≥ 256)
 
-    ; PPU_CURSOR を進める
+    ; Advance PPU_CURSOR
     LDA PPU_CURSOR
     CLC
     ADC TMP1
@@ -227,31 +224,31 @@ write_loop:
     RTS
 ```
 
-### カーソル初期位置
+### Cursor initial position
 
-`PPU_CURSOR` は `$2000 + 行*32 + 列` で初期化。MVP では 10 行目 6 列目あたり (`$20C6`) から開始すると見やすい。
+Initialize `PPU_CURSOR` as `$2000 + row*32 + col`. In MVP, starting around row 10 col 6 (`$20C6`) keeps things readable.
 
-### 注意
+### Caveats
 
-- 強制 blanking 中 (`$2001 = 0`) 以外で `PPUADDR`/`PPUDATA` を叩くと PPU 内部状態が壊れる
-- MVP は VM メインループ全体が強制 blanking 中に実行されるので問題ない
-- 延長ゴールで動的 echo (実行中の表示更新) が必要になったら NMI 同期方式に昇格
+- Hitting `PPUADDR`/`PPUDATA` outside forced blanking (`$2001 = 0`) corrupts PPU internal state
+- The MVP runs the entire VM main loop in forced blanking, so this is fine
+- When extension goals require dynamic echo (display updates while running), promote to NMI-synchronous
 
 ---
 
-## 延長ゴール: NMI 同期方式
+## Extension goal: NMI-synchronous transfer
 
-### 問題
+### Problem
 
-VM が長時間動き続ける (while ループ等) と、強制 blanking のままでは画面が真っ黒のまま。VM 実行中にも画面を見せるには、レンダリングを有効化した状態で ecore できる必要がある。
+If the VM keeps running (in a while loop, etc.), the screen stays black during forced blanking. To show output during VM execution, we need to echo with rendering enabled.
 
-### 解決: テキスト行バッファ + NMI 転送
+### Solution: text-row buffer + NMI transfer
 
-1. `ZEND_ECHO` ハンドラは **RAM 上のテキスト行バッファ** (`$0600-$06FF`) に書き、PPU は触らない
-2. NMI ハンドラが VBlank 中に行バッファの内容を nametable にコピー
-3. コピー後、行バッファをクリア
+1. The `ZEND_ECHO` handler writes to a **text-row buffer in RAM** (`$0600-$06FF`) and never touches the PPU
+2. The NMI handler copies the buffer to the nametable during VBlank
+3. Clear the buffer after copying
 
-### NMI ハンドラ (延長版)
+### NMI handler (extended)
 
 ```asm
 nmi:
@@ -261,15 +258,15 @@ nmi:
     TYA
     PHA
 
-    ; OAM DMA (スプライト用)
+    ; OAM DMA (for sprites)
     LDA #$02
     STA $4014
 
-    ; テキスト行バッファを nametable に転送
+    ; Transfer the text-row buffer into the nametable
     JSR flush_text_buffer
 
-    ; PPU_CURSOR 更新
-    ; (scroll 等は MVP では不要)
+    ; Update PPU_CURSOR
+    ; (Scroll etc. unnecessary in MVP)
 
     PLA
     TAY
@@ -279,22 +276,22 @@ nmi:
     RTI
 ```
 
-1 フレーム (1/60 秒) あたり VBlank で転送できるバイト数は約 2000 バイト (CPU サイクル予算 ~2273)。MVP の 32×30 = 960 文字は 1 フレームで余裕。
+You can transfer ~2000 bytes per VBlank (CPU cycle budget ~2273). The MVP's 32×30 = 960 chars fit in a single frame with room to spare.
 
 ---
 
-## リアルタイム入力 API (`nes_vsync` + `nes_btn`)
+## Real-time input API (`nes_vsync` + `nes_btn`)
 
-`fgets(STDIN)` は release→press を待つ blocking 仕様で「押した瞬間」を 1 文字返す。対して L3S コンパイラは **poll 型 API** も持つ:
+`fgets(STDIN)` is a release→press blocking spec that returns one character "the moment of the press". The L3S compiler also provides a **poll-style API**:
 
-### intrinsic
+### Intrinsics
 
-| 関数 | 動作 |
+| Function | Behavior |
 |------|------|
-| `nes_vsync()` | 次の VBlank (NMI) まで spin wait。sprite_mode が off なら `enable_sprite_mode` を自動で呼び、NMI + rendering を有効化する。1 フレーム = 1/60 秒を同期単位にしたい時に呼ぶ |
-| `nes_btn()` | **0 引数**。現在のコントローラ状態を IS_LONG で返す (下位 1B = bitmask)。呼び出し側でビット演算 (`&` / `\|`) でボタンを判定する |
+| `nes_vsync()` | Spin until the next VBlank (NMI). If sprite_mode is off, automatically calls `enable_sprite_mode` to enable NMI + rendering. Use it when you want 1 frame = 1/60s as your sync unit |
+| `nes_btn()` | **0 args**. Returns the current controller state as IS_LONG (low 1B = bitmask). Caller does bit ops (`&` / `\|`) for button checks |
 
-### ビットマスク対応表
+### Bitmask reference
 
 ```
 A     = 0x80   (bit 7)
@@ -307,58 +304,58 @@ Left  = 0x02
 Right = 0x01
 ```
 
-ビット演算 (`&`) で個別検査。複数 bit の OR で「A or L」同時検出:
+Use `&` to check a single bit, OR multiple bits to detect "A or L" simultaneously:
 ```php
 $b = nes_btn();
-if ($b & 0x82) { /* A または L */ }
+if ($b & 0x82) { /* A or L */ }
 ```
 
-### 典型的な game loop
+### Typical game loop
 
 ```php
 <?php
 $x = 120; $y = 120;
 nes_sprite_at(0, $x, $y, 88);
 while (true) {
-    nes_vsync();                   // 1 フレーム待つ
-    $b = nes_btn();                // コントローラ状態を 1 回取得
+    nes_vsync();                   // wait one frame
+    $b = nes_btn();                // poll the controller once
     if ($b & 0x02) { $x = $x - 1; }  // L
     if ($b & 0x01) { $x = $x + 1; }  // R
     if ($b & 0x08) { $y = $y - 1; }  // U
     if ($b & 0x04) { $y = $y + 1; }  // D
-    nes_sprite_at(0, $x, $y, 88);  // 座標反映
+    nes_sprite_at(0, $x, $y, 88);  // apply
 }
 ```
 
-押しっぱなしで毎フレーム座標が変わる = 60 px/sec の連続移動。`fgets` での release-press 方式では不可能だったゲーム的な UX が実現する (`examples/poll.php`)。
+Hold a direction → coordinates change every frame = 60 px/sec continuous motion. Game-style UX that wasn't possible with the release-press `fgets` (`examples/poll.php`).
 
-### VM 側の実装
+### VM-side implementation
 
-`handle_nesphp_nes_vsync` (`vm/nesphp.s`) は、まず `sprite_mode_on` が 0 なら `enable_sprite_mode` を呼んで NMI を有効化。その後:
+`handle_nesphp_nes_vsync` (`vm/nesphp.s`) first checks `sprite_mode_on`; if 0, calls `enable_sprite_mode` to turn on NMI. Then:
 
 ```asm
-LDA vblank_frame         ; NMI で INC される 8bit カウンタ
+LDA vblank_frame         ; 8-bit counter incremented in NMI
 STA TMP0
 :
 LDA vblank_frame
 CMP TMP0
-BEQ :-                   ; 値が変わる = NMI が 1 回発火した
+BEQ :-                   ; value changed = NMI fired once
 ```
 
-`handle_nesphp_nes_btn` は `read_controller` でコントローラ状態を更新し、`buttons` ZP の値を `IS_LONG` の下位 1B として result スロットへ書く (0 引数)。ビット検査は呼び出し側が `ZEND_BW_AND` (`&` 演算子) で行う。
+`handle_nesphp_nes_btn` updates the controller state via `read_controller` and writes `buttons` (ZP) into the result slot's IS_LONG low byte (0 args). Callers check bits with `ZEND_BW_AND` (the `&` operator).
 
-### `fgets` との使い分け
+### When to use which
 
-- **`fgets(STDIN)`**: モーダル UI (メニュー、スライド遷移)、1 回押したら確定
-- **`nes_vsync()` + `nes_btn($mask)`**: ゲームループ、アニメーション、押しっぱなし連続移動
+- **`fgets(STDIN)`**: Modal UI (menus, slide transitions); confirms on a single press
+- **`nes_vsync()` + `nes_btn()`**: game loops, animations, hold-to-repeat motion
 
-両方を同じプログラム内で混在させることも可能 (`nes_sprite_at` 呼出で sprite_mode に入れば NMI が回るので、`fgets` も `nes_vsync` も動く)。
+You can mix both in one program (once a `nes_sprite_at` puts you in sprite_mode, NMI keeps running so both `fgets` and `nes_vsync` work).
 
 ---
 
-## 延長ゴール: コントローラ入力 (`fgets(STDIN)` マッピング)
+## Extension goal: controller input (`fgets(STDIN)` mapping)
 
-### PHP 側の書き方
+### How it looks in PHP
 
 ```php
 <?php
@@ -369,76 +366,76 @@ while (true) {
 }
 ```
 
-### シリアライザの畳み込み
+### Serializer fold
 
-opcache ダンプでは:
+In opcache dumps:
 
 ```
 INIT_FCALL 1 "fgets"
-SEND_VAL CONST "STDIN"  (実際はリソース定数)
+SEND_VAL CONST "STDIN"  (a resource constant in practice)
 DO_FCALL
 ASSIGN CV($key) TMP#N
 ```
 
-この `INIT_FCALL`+`SEND_VAL`+`DO_FCALL` の 3 命令シーケンスを serializer が検出し、`ZEND_DO_FCALL` の `op1.extended_value` に特殊組み込み ID `BUILTIN_READ_INPUT` を埋め込む。
+The serializer detects this 3-instruction sequence (`INIT_FCALL`+`SEND_VAL`+`DO_FCALL`) and embeds the special built-in ID `BUILTIN_READ_INPUT` in `ZEND_DO_FCALL`'s `op1.extended_value`.
 
-### VM 側の実装
+### VM-side
 
 ```asm
 handle_do_fcall:
-    ; op1.extended_value に組み込み ID が入っている
+    ; op1.extended_value carries the built-in ID
     LDY #12
     LDA (VM_PC),Y
     CMP #BUILTIN_READ_INPUT
     BEQ do_read_input
     CMP #BUILTIN_SPRITE_SET
     BEQ do_sprite_set
-    ; 他の組み込みは未対応
+    ; Other built-ins unsupported
     JMP handle_unimpl
 
 do_read_input:
     JSR read_controller
-    ; A に押されたボタンの ASCII コード (U/D/L/R/A/B/S/T、なし=0)
-    ; これを IS_STRING の 1 文字文字列として result スロットに push
+    ; A holds the ASCII for the pressed button (U/D/L/R/A/B/S/T, none=0)
+    ; Push it as a 1-character IS_STRING into the result slot
     ...
     JMP advance
 ```
 
-### コントローラ読み取り (NESdev Wiki のリトライ版)
+### Controller read (NESdev Wiki retry version)
 
-DPCM グリッチ対策のため、同じ結果が 2 回連続で得られるまでループ:
+DPCM glitch protection — loop until the same result reads twice in a row:
 
 ```asm
 read_controller:
 read_loop:
     LDA #$01
-    STA $4016            ; コントローララッチ
+    STA $4016            ; latch the controller
     LDA #$00
-    STA $4016            ; 読み取り開始
+    STA $4016            ; start reading
 
-    LDX #$08             ; 8 ボタン
+    LDX #$08             ; 8 buttons
 read_bit:
     LDA $4016
-    LSR A                ; bit 0 を C に
-    ROL ctrl_temp        ; C を ctrl_temp に shift in
+    LSR A                ; bit 0 → C
+    ROL ctrl_temp        ; shift C into ctrl_temp
     DEX
     BNE read_bit
 
-    ; DPCM 干渉対策: 2 回読んで一致すれば信頼
+    ; DPCM-interference guard: read twice and trust if they match
     LDA ctrl_temp
     CMP ctrl_prev
     BNE read_loop
     STA ctrl_current
 
-    ; ボタンマッピング表でビット → ASCII に変換
-    ; 優先順位: A > B > Start > Select > Up > Down > Left > Right
+    ; Use the button-mapping table to convert a bit to ASCII
+    ; Priority: A > B > Start > Select > Up > Down > Left > Right
     ...
     RTS
 ```
 
-### ボタン → ASCII マッピング
+### Button → ASCII mapping
 
-| ビット位置 (NES 標準) | ボタン | ASCII |
+| Bit position (NES standard) | Button | ASCII |
 |---------------------|--------|-------|
 | 0 | A | `A` (0x41) |
 | 1 | B | `B` (0x42) |
@@ -449,52 +446,52 @@ read_bit:
 | 6 | Left | `L` (0x4C) |
 | 7 | Right | `R` (0x52) |
 
-「直前フレームで新規押下された中で最優先のボタン 1 個の ASCII」を返す。何も押されていなければ `IS_NULL` を返す (PHP 側では `while` で待てる)。
+Returns "the highest-priority new press in the last frame, as an ASCII character". If nothing is pressed, returns `IS_NULL` (PHP can wait with a `while`).
 
 ---
 
-## マルチスプライト: `nes_sprite_at` / `nes_sprite_attr`
+## Multi-sprite: `nes_sprite_at` / `nes_sprite_attr`
 
-### PHP 側
+### PHP side
 
 ```php
 <?php
-// 任意 OAM スロット (0-63) を更新。$idx は runtime int 可
+// Update arbitrary OAM slot (0-63). $idx accepts runtime int
 for ($i = 0; $i < 8; $i = $i + 1) {
     nes_sprite_at($i, 32 + $i*16, 100, 0xA0);
 }
 
-// 属性を別途設定 (palette / flip / 優先度)
+// Set the attribute separately (palette / flip / priority)
 nes_sprite_attr(0, 0b01000001);   // bit 6=hflip, bit 0-1=palette 1
 ```
 
 `nes_sprite_at($idx, $x, $y, $tile)`:
-- `$idx`: 0-63 (VM 側で `& 0x3F` クランプ)。runtime int 可
-- `$x` / `$y`: runtime int 可
-- `$tile`: コンパイル時リテラル必須 (extended_value に literal 焼込み)
-- `attr` バイトは触らない (= 既存値保持、初期値 0 = palette 0 / no flip / front)
-- 初回呼び出しで sprite_mode に遷移 (rendering ON + NMI ON)
+- `$idx`: 0-63 (clamped with `& 0x3F` on the VM side). Runtime int OK
+- `$x` / `$y`: runtime int OK
+- `$tile`: must be a literal at compile time (baked into extended_value)
+- Doesn't touch the attr byte (= keeps existing value; default 0 = palette 0 / no flip / front)
+- First call enters sprite_mode (rendering ON + NMI ON)
 
 `nes_sprite_attr($idx, $attr)`:
-- 両引数とも runtime int 可
-- attr バイト構成: bit 0-1=palette / bit 5=priority / bit 6=hflip / bit 7=vflip
-- sprite_mode は本 intrinsic 単独では起動しない (位置を設定する `nes_sprite_at` と組み合わせる前提)
+- Both args runtime int OK
+- attr byte: bit 0-1=palette / bit 5=priority / bit 6=hflip / bit 7=vflip
+- This intrinsic alone doesn't enter sprite_mode (it's expected to pair with `nes_sprite_at`, which sets position)
 
-### VM 側
+### VM side
 
 ```asm
 handle_nesphp_nes_sprite:               ; nes_sprite_at
     LDA sprite_mode_on
     BNE :+
-    JSR enable_sprite_mode               ; 初回のみ rendering + NMI 有効化
+    JSR enable_sprite_mode               ; First call: rendering + NMI on
 :
     JSR resolve_op1                      ; OP1_VAL = $idx
     JSR resolve_op2                      ; OP2_VAL = $x
-    JSR resolve_result                   ; RESULT_VAL = $y (result スロット流用)
-    ; extended_value から $tile literal を読む (TYPE_LONG チェック)
+    JSR resolve_result                   ; RESULT_VAL = $y (reuse result slot)
+    ; Read $tile literal from extended_value (TYPE_LONG check)
     ...
     LDA OP1_VAL+1
-    AND #$3F                             ; 0-63 にクランプ
+    AND #$3F                             ; clamp 0-63
     ASL A
     ASL A                                ; * 4
     TAX                                  ; X = OAM offset
@@ -503,23 +500,23 @@ handle_nesphp_nes_sprite:               ; nes_sprite_at
     LDA TMP2
     STA OAM_SHADOW + 1, X                ; tile
     LDA OP2_VAL+1
-    STA OAM_SHADOW + 3, X                ; x (attr は触らない)
+    STA OAM_SHADOW + 3, X                ; x (attr left untouched)
     JMP advance
 ```
 
-OAM シャドウ ($0200-$02FF) は次の VBlank で NMI ハンドラが `$4014` に書いて OAM DMA でハードウェアに転送する (これは sprite_mode 遷移後ずっと毎フレーム自動)。
+The OAM shadow ($0200-$02FF) is DMA'd to hardware OAM by the NMI handler on the next VBlank (this happens automatically every frame after entering sprite_mode).
 
 ---
 
-## パレット / attribute 制御 (Phase 5E)
+## Palette / attribute control (Phase 5E)
 
-NES の PPU は 32 バイトのパレット RAM ($3F00-$3F1F) と、nametable 末尾 64 バイトの attribute table で色を管理する。nesphp は 3 つの intrinsic でこれを PHP から操作できる。
+The PPU manages colors via 32 bytes of palette RAM ($3F00-$3F1F) and a 64-byte attribute table at the end of the nametable. nesphp exposes them through three intrinsics.
 
-### NES パレットメモリマップ
+### NES palette memory map
 
 ```
-$3F00: universal background color (全パレット共通の背景色)
-$3F01-$3F03: BG palette 0 (色 1, 2, 3)
+$3F00: universal background color (shared across palettes)
+$3F01-$3F03: BG palette 0 (colors 1, 2, 3)
 $3F05-$3F07: BG palette 1
 $3F09-$3F0B: BG palette 2
 $3F0D-$3F0F: BG palette 3
@@ -529,104 +526,104 @@ $3F19-$3F1B: sprite palette 2 (= palette 6)
 $3F1D-$3F1F: sprite palette 3 (= palette 7)
 ```
 
-各パレットの色 0 ($3F04, $3F08, $3F0C, $3F10, $3F14, $3F18, $3F1C) は $3F00 のミラーで、実質 universal background color と同じ。
+Each palette's color 0 ($3F04, $3F08, $3F0C, $3F10, $3F14, $3F18, $3F1C) mirrors $3F00 — effectively the same as the universal background color.
 
-### NES カラーコード ($00-$3F)
+### NES color codes ($00-$3F)
 
 ```
-上位 2 bit = 明るさ (0=暗い, 1=普通, 2=明るい, 3=白寄り)
-下位 4 bit = 色相
+Top 2 bits = brightness (0=dark, 1=normal, 2=bright, 3=whitish)
+Bottom 4 bits = hue
 
-  $0x: 暗い        $1x: 普通        $2x: 明るい      $3x: 白寄り
-  x0: 灰 (gray)    x1: 青 (blue)    x2: 紺 (indigo)   x3: 紫 (violet)
-  x4: 赤紫         x5: ピンク       x6: 赤 (red)      x7: オレンジ
-  x8: 黄           x9: 黄緑         xA: 緑 (green)    xB: 青緑
-  xC: 水色 (cyan)  xD: 黒 (dark)    xE: 黒 (mirror)   xF: 黒 (mirror)
+  $0x: dark        $1x: normal      $2x: bright       $3x: whitish
+  x0: gray         x1: blue         x2: indigo        x3: violet
+  x4: magenta      x5: pink         x6: red           x7: orange
+  x8: yellow       x9: yellow-green xA: green         xB: blue-green
+  xC: cyan         xD: dark         xE: black mirror  xF: black mirror
 
-  よく使う色:
-    $0F = 黒
-    $30 = 白
-    $16 = 暗い赤    $26 = 赤        $36 = 明るい赤
-    $12 = 暗い青    $22 = 青        $32 = 明るい青
-    $1A = 暗い緑    $2A = 緑        $3A = 明るい緑
-    $21 = 水色      $28 = 黄
+  Common picks:
+    $0F = black
+    $30 = white
+    $16 = dark red    $26 = red        $36 = bright red
+    $12 = dark blue   $22 = blue       $32 = bright blue
+    $1A = dark green  $2A = green      $3A = bright green
+    $21 = cyan        $28 = yellow
 ```
 
-### `nes_bg_color($c)` — 背景色設定
+### `nes_bg_color($c)` — set background color
 
-PPU $3F00 (universal background color) を NES カラーコードで設定する。全パレット共通の背景色 (色 0) が変わる。
+Sets PPU $3F00 (universal background color) to a NES color code. Color 0, shared across all palettes, changes.
 
 ```php
-nes_bg_color(0x0F);  // 黒背景 (デフォルト)
-nes_bg_color(0x02);  // 暗い紺背景
+nes_bg_color(0x0F);  // Black background (default)
+nes_bg_color(0x02);  // Dark navy background
 ```
 
-forced_blanking 中は PPU に直書き、sprite_mode 中は NMI キュー経由。
+Direct write in forced_blanking; through the NMI queue in sprite_mode.
 
-### `nes_palette($id, $c1, $c2, $c3)` — パレット色設定
+### `nes_palette($id, $c1, $c2, $c3)` — set palette colors
 
-パレットの色 1-3 を設定する。nesphp 初の 4 引数 intrinsic で、zend_op の op1/op2/result/extended_value を全て入力として使用する。
+Sets palette colors 1-3. Our first 4-arg intrinsic — uses zend_op's op1/op2/result/extended_value all as inputs.
 
 ```php
-nes_palette(0, 0x30, 0x16, 0x26);  // BG palette 0: 白, 暗い赤, 赤
-nes_palette(1, 0x30, 0x2A, 0x1A);  // BG palette 1: 白, 緑, 暗い緑
-nes_palette(4, 0x30, 0x16, 0x00);  // sprite palette 0: 白, 暗い赤, 灰
+nes_palette(0, 0x30, 0x16, 0x26);  // BG palette 0: white, dark red, red
+nes_palette(1, 0x30, 0x2A, 0x1A);  // BG palette 1: white, green, dark green
+nes_palette(4, 0x30, 0x16, 0x00);  // sprite palette 0: white, dark red, gray
 ```
 
-id 0-3 が BG パレット、4-7 が sprite パレット。PPU の $3F01+id*4 から 3 バイトを書く。
+id 0-3 is BG, 4-7 is sprite. Writes 3 bytes starting at PPU $3F01+id*4.
 
-### `nes_attr($x, $y, $pal)` — attribute table 設定
+### `nes_attr($x, $y, $pal)` — set attribute table
 
-BG の attribute table で、2×2 タイル (16×16 ピクセル) のブロック単位にパレット番号 (0-3) を割り当てる。
+Assigns a palette index (0-3) to a 2×2 tile (16×16 px) block in the BG attribute table.
 
 ```php
-nes_attr(0, 0, 1);   // 左上 16×16 px ブロックに BG palette 1 を割当
-nes_attr(2, 3, 2);   // x=2, y=3 の 16×16 px ブロックに BG palette 2 を割当
+nes_attr(0, 0, 1);   // Top-left 16×16 px block uses BG palette 1
+nes_attr(2, 3, 2);   // Block at x=2, y=3 (16×16 px) uses BG palette 2
 ```
 
-x は 0-15 (32 タイル / 2)、y は 0-14 (30 タイル / 2、端数切り捨て)。
+x is 0-15 (32 tiles / 2), y is 0-14 (30 tiles / 2, truncated).
 
-### Attribute table の仕組み
+### How the attribute table works
 
-NES の attribute table は nametable 末尾の 64 バイト ($23C0-$23FF) にあり、4×4 タイル (32×32 ピクセル) を 1 バイトで管理する。1 バイト内の 2bit ずつが 2×2 タイル (16×16 px) サブブロックのパレット番号を指定:
+The NES attribute table sits at the end of the nametable ($23C0-$23FF, 64 bytes). One byte controls a 4×4 tile (32×32 pixel) area, with 2 bits per 2×2-tile (16×16 px) sub-block:
 
 ```
 1 byte = [TL:2][TR:2][BL:2][BR:2]
-  bit 1-0: 左上 2×2 タイル
-  bit 3-2: 右上 2×2 タイル
-  bit 5-4: 左下 2×2 タイル
-  bit 7-6: 右下 2×2 タイル
+  bits 1-0: top-left 2×2 tile
+  bits 3-2: top-right 2×2 tile
+  bits 5-4: bottom-left 2×2 tile
+  bits 7-6: bottom-right 2×2 tile
 ```
 
-### RAM shadow (ATTR_SHADOW = $0608, 64 バイト)
+### RAM shadow (ATTR_SHADOW = $0608, 64 bytes)
 
-attribute table は 1 バイトに 4 つのサブブロック情報が詰まっているため、個別のサブブロックだけを書き換えるには read-modify-write が必要。しかし PPU VRAM は読み出しに 1 cycle のバッファ遅延があり直接 RMW が困難。
+Since each attribute byte packs four sub-block fields, mutating just one sub-block requires read-modify-write. PPU VRAM has a 1-cycle buffered read, so direct RMW is impractical.
 
-nesphp は RAM 上に 64 バイトの shadow ($0608-$0647) を保持し:
+nesphp keeps a 64-byte shadow in RAM ($0608-$0647):
 
-1. `nes_attr` 呼び出しで shadow のバイトを read-modify-write (2bit だけ差し替え)
-2. 変更後の shadow 全体を PPU $23C0-$23FF に書き出す
+1. `nes_attr` does read-modify-write on the shadow byte (just swap 2 bits)
+2. Write the modified shadow byte to PPU $23C0-$23FF
 
-これにより任意の 16×16 px ブロック単位で安全にパレットを変更できる。
+This lets us safely change palettes per 16×16 px block.
 
-### 3 つの intrinsic の組み合わせ例
+### Combined example
 
 ```php
-// 黒背景に設定
+// Set black background
 nes_bg_color(0x0F);
 
-// BG palette 0: 白文字 (タイトル用)
+// BG palette 0: white text (titles)
 nes_palette(0, 0x30, 0x10, 0x00);
-// BG palette 1: 赤文字 (強調用)
+// BG palette 1: red text (highlights)
 nes_palette(1, 0x26, 0x16, 0x06);
-// BG palette 2: 緑文字 (本文用)
+// BG palette 2: green text (body)
 nes_palette(2, 0x2A, 0x1A, 0x0A);
 
-// 行ごとにパレットを割り当て
+// Assign per row
 for ($x = 0; $x < 16; $x++) {
-    nes_attr($x, 0, 0);  // row 0-1: palette 0 (白)
-    nes_attr($x, 1, 1);  // row 2-3: palette 1 (赤)
-    nes_attr($x, 2, 2);  // row 4-5: palette 2 (緑)
+    nes_attr($x, 0, 0);  // rows 0-1: palette 0 (white)
+    nes_attr($x, 1, 1);  // rows 2-3: palette 1 (red)
+    nes_attr($x, 2, 2);  // rows 4-5: palette 2 (green)
 }
 
 nes_puts(2, 0, "WHITE TITLE");
@@ -636,20 +633,20 @@ nes_puts(2, 4, "GREEN BODY");
 
 ---
 
-## 延長ゴール: `ZEND_CONCAT` 用の RAM 文字列バッファ
+## Extension goal: a RAM string buffer for `ZEND_CONCAT`
 
-固定 256B のバッファを 1 本だけ `$0600-$06FF` に配置。`ZEND_CONCAT` 実行時:
+A single fixed 256B buffer at `$0600-$06FF`. On `ZEND_CONCAT`:
 
-1. OP1 (IS_STRING) をバッファにコピー
-2. 続けて OP2 (IS_STRING) をコピー
-3. 結果 zval の type = IS_STRING、payload = RAM バッファオフセット
+1. Copy OP1 (IS_STRING) into the buffer
+2. Append OP2 (IS_STRING)
+3. Result zval: type = IS_STRING, payload = RAM buffer offset
 
-RAM 文字列は **実行フレーム内でのみ有効** という割り切り (次の `ZEND_CONCAT` で上書きされる)。これで GC 不要。同時に 2 本以上の RAM 文字列を持てない制約があるが、MVP + 延長第 1 段階では問題にならない。
+A RAM string is **valid only within the current execution frame** (the next `ZEND_CONCAT` overwrites it). No GC needed. You can only have one RAM string at a time, but that's fine for MVP + extension stage 1.
 
 ---
 
-## 関連ドキュメント
+## Related documents
 
-- [02-ram-layout](./02-ram-layout.md) — テキスト行バッファ / OAM シャドウ / CONCAT バッファの RAM 配置
-- [03-vm-dispatch](./03-vm-dispatch.md) — `ZEND_ECHO` handler から `ppu_write_string_forced_blank` を呼ぶ流れ
-- [04-opcode-mapping](./04-opcode-mapping.md) — 組み込み関数畳み込みの詳細
+- [02-ram-layout](./02-ram-layout.md) — RAM placement of the text-row buffer / OAM shadow / CONCAT buffer
+- [03-vm-dispatch](./03-vm-dispatch.md) — How `ZEND_ECHO` calls `ppu_write_string_forced_blank`
+- [04-opcode-mapping](./04-opcode-mapping.md) — Built-in folding details

@@ -1,107 +1,107 @@
-# 09. 受け入れ基準とロマン検証
+# 09. Acceptance criteria and romance verification
 
 [← README](./README.md) | [← 08-risks](./08-risks.md)
 
-## MVP 受け入れ基準
+## MVP acceptance criteria
 
-### 環境構築
+### Environment
 
-- [ ] `brew install cc65 php` 完了
-- [ ] `php -v` が `PHP 8.4.x` を表示
-- [ ] `ca65 --version` が動く
+- [ ] `brew install cc65 php` completed
+- [ ] `php -v` shows `PHP 8.4.x`
+- [ ] `ca65 --version` works
 
-### ビルド
+### Build
 
-- [ ] `examples/hello.php` に `<?php echo "HELLO, NES!";` が書かれている
-- [ ] `make` が成功し `build/hello.nes` が生成される
-- [ ] `make` の実行中にエラーなし
+- [ ] `examples/hello.php` contains `<?php echo "HELLO, NES!";`
+- [ ] `make` succeeds and produces `build/hello.nes`
+- [ ] No errors during `make`
 
-### 中間生成物の検証
+### Intermediate-artifact verification
 
-- [ ] `build/ops.txt` (opcache 出力) に以下の行が含まれる:
+- [ ] `build/ops.txt` (opcache output) contains:
   ```
   0000 ECHO string("HELLO, NES!")
   0001 RETURN int(1)
   ```
-- [ ] `build/host.ops.bin` (host-compile path、`make build/hello.host.ops.bin`) の hex dump が [01-rom-format](./01-rom-format.md) の「具体 hex dump 例」と同じ構造になっている:
-  - op_array header (先頭 16B): `num_ops=2`, `num_literals=2`, `php_version=8.4`
+- [ ] The hex dump of `build/host.ops.bin` (host-compile path, `make build/hello.host.ops.bin`) matches the example in [01-rom-format](./01-rom-format.md):
+  - op_array header (first 16B): `num_ops=2`, `num_literals=2`, `php_version=8.4`
   - op[0] (12B): `opcode=0x88 (ZEND_ECHO=136)`, `op1_type=0x01 (CONST)` (offset 8-11)
   - op[1] (12B): `opcode=0x3e (ZEND_RETURN=62)`, `op1_type=0x01`
   - literals[0]: `type=0x06 (IS_STRING)`
   - literals[1]: `type=0x04 (IS_LONG)`, `value=1`
-  - L3 では zend_string 24B ヘッダ + content、L3S では zval に (offset, length) 直書き
-- 注: **L3S の `.nes` には compiled bytecode は含まれない** (PHP ソースのみ。compiled は起動後 PRG-RAM 上に生成)。検証 1, 5 は `.nes` で確認可能、検証 2-4 は host-compile path を使う必要がある
+  - In L3, a 24B zend_string header + content; in L3S, the zval directly carries (offset, length)
+- Note: **The L3S `.nes` does not contain compiled bytecode** (only PHP source; bytecode is generated in PRG-RAM at boot). Verifications 1 and 5 work on the `.nes`; 2-4 require the host-compile path
 
-### エミュレータでの動作
+### Emulator behavior
 
-- [ ] Mesen で `build/hello.nes` を開くとクラッシュしない
-- [ ] 画面中央付近に `HELLO, NES!` が表示される
-- [ ] 文字列を `"NESPHP WORKS"` に変えて `make` を再実行し、表示も `NESPHP WORKS` に変わる (= シリアライザが実際にコンパイルしている証左)
-- [ ] Mesen のデバッガで PPU nametable を見ると、該当位置に ASCII コードのタイル番号が書き込まれている
+- [ ] Mesen opens `build/hello.nes` without crashing
+- [ ] `HELLO, NES!` appears near the center
+- [ ] Replace the string with `"NESPHP WORKS"`, rerun `make`, the display changes to `NESPHP WORKS` (= proves the serializer actually compiles)
+- [ ] In Mesen's debugger, the PPU nametable shows ASCII tile numbers at the relevant positions
 
 ---
 
-## L3 ロマン検証 (必須)
+## L3 romance verification (mandatory)
 
-これが成功して初めて「Zend が吐いた opcode が NES で動いている」と胸を張れる。
+Only when all of these pass can you claim "Zend's emitted opcodes are running on the NES".
 
-### 検証 1: PHP ソースの文字列が NES ROM に生で存在する
+### Verification 1: PHP source string lives raw inside the NES ROM
 
 ```bash
 strings build/hello.nes | grep -i hello
 ```
 
-期待出力:
+Expected:
 ```
 HELLO, NES!
 ```
 
-**意味**: PHP ソースの文字列リテラルが、Zend の `zend_string` 経由で NES ROM の中にそのままバイトとして焼かれている。
+**Meaning**: The PHP source string literal is baked into the NES ROM as raw bytes (via Zend's `zend_string`).
 
-### 検証 2: ZEND_ECHO opcode バイト列が見える (host-compile path のみ)
+### Verification 2: ZEND_ECHO opcode bytes appear (host-compile path only)
 
 ```bash
 make build/hello.host.ops.bin
 xxd -g 1 build/hello.host.ops.bin | grep '88 01 00 00'
 ```
 
-期待: 1 件以上ヒット。
+Expected: at least one match.
 
-**意味**: Zend の `ZEND_ECHO` (番号 0x88) と、operand タイプバイト (`op1_type=IS_CONST=0x01`) が ROM 内 op_array に焼かれている (新 12B レイアウトでは offset 8-11 が opcode + 3 byte の type 群)。**L3S の `.nes` 自体には compiled bytecode は含まれない** ので、検証は host-compile path で行う。
+**Meaning**: Zend's `ZEND_ECHO` (number 0x88) and operand type bytes (`op1_type=IS_CONST=0x01`) are baked into the op_array (in the new 12B layout, offset 8-11 is the opcode + 3 type bytes). **The L3S `.nes` itself has no compiled bytecode**, so verify via the host-compile path.
 
-### 検証 3: ZEND_RETURN opcode バイト列が見える (host-compile path のみ)
+### Verification 3: ZEND_RETURN opcode bytes appear (host-compile path only)
 
 ```bash
 xxd -g 1 build/hello.host.ops.bin | grep '3e 01 00 00'
 ```
 
-期待: 1 件以上ヒット。
+Expected: at least one match.
 
-### 検証 4: literals の 16B zval レイアウトが Zend 互換
+### Verification 4: literals' 16B zval layout is Zend-compatible
 
 ```bash
 xxd build/hello.nes | awk '/3f40:/{ print; getline; print }'
 ```
 
-期待出力の近似:
+Expected (approximate):
 ```
 00003f40: 50 3f 00 00 00 00 00 00 06 00 00 00 00 00 00 00  P?..............
 00003f50: 01 00 00 00 00 00 00 00 04 00 00 00 00 00 00 00  ................
 ```
 
-- `3f40` 行の `06 00 00 00` = `u1.type_info` の下位バイトが `IS_STRING(6)`
-- `3f50` 行の `01 00 00 00 00 00 00 00` = `value.lval = 1`
-- `3f50` 行の `04 00 00 00` = `IS_LONG(4)`
+- `06 00 00 00` on the `3f40` line = the low byte of `u1.type_info` is `IS_STRING(6)`
+- `01 00 00 00 00 00 00 00` on the `3f50` line = `value.lval = 1`
+- `04 00 00 00` on the `3f50` line = `IS_LONG(4)`
 
-これらは **Zend 互換の 16B zval レイアウト**そのもの。
+These are **Zend-compatible 16B zval layouts** verbatim.
 
-### 検証 5: 文字列を変えると ROM も変わる
+### Verification 5: changing the string changes the ROM
 
 ```bash
-# 元
+# Original
 strings build/hello.nes | grep HELLO
 
-# 文字列を変えて再ビルド
+# Change the string and rebuild
 sed -i '' 's/HELLO, NES!/NESPHP WORKS/' examples/hello.php
 make
 
@@ -109,26 +109,26 @@ strings build/hello.nes | grep -E 'HELLO|NESPHP'
 # → NESPHP WORKS
 ```
 
-シリアライザが literal を実際に差し替えている証左。
+Proves the serializer is actually replacing the literal.
 
 ---
 
-## 第 2 段階 (自作 Zend 拡張) 受け入れ基準
+## Phase 2 (custom Zend extension) acceptance criteria
 
-- [ ] `nesphp_dump/` 以下で `phpize && ./configure && make` が成功
-- [ ] `nesphp_dump.so` が生成される
-- [ ] `php -dzend_extension=./nesphp_dump/modules/nesphp_dump.so examples/hello.php > build/ops_direct.bin` が成功
-- [ ] `diff build/ops.bin build/ops_direct.bin` がバイト一致 (または意図的な差分のみ)
-- [ ] serializer.php からテキストパース層を削除しても `build/hello.nes` が同じ内容でビルドできる
-- [ ] `spec/05-toolchain.md` が自作拡張ベースの手順に更新されている
+- [ ] `phpize && ./configure && make` succeeds in `nesphp_dump/`
+- [ ] `nesphp_dump.so` is produced
+- [ ] `php -dzend_extension=./nesphp_dump/modules/nesphp_dump.so examples/hello.php > build/ops_direct.bin` succeeds
+- [ ] `diff build/ops.bin build/ops_direct.bin` is byte-equal (or only intentional diffs)
+- [ ] Even after deleting the text-parser layer in serializer.php, `build/hello.nes` builds with the same content
+- [ ] `spec/05-toolchain.md` is updated to the extension-based flow
 
 ---
 
-## 実装済み demo の受け入れ基準
+## Acceptance criteria for shipped demos
 
-全て `make build/NAME.nes` でビルド → Mesen で起動。
+All build with `make build/NAME.nes` and run in Mesen.
 
-### 延長第 1 段階: 整数 + ローカル変数 (`arith.nes`) ✅
+### Stage 1: integers + locals (`arith.nes`) ✅
 
 `examples/arith.php`:
 ```php
@@ -138,11 +138,11 @@ $a = $a + 2;
 echo $a;
 ```
 
-- [x] Mesen で `3` が表示される
-- [x] `xxd -g 1 build/arith.nes | grep '01 08 01 02'` で ZEND_ADD (0x01) + op1_type=IS_CV + op2_type=IS_CONST + result_type=IS_TMP_VAR がヒット
-- [x] `xxd -g 1 build/arith.nes | grep '16 08 01 00'` で ZEND_ASSIGN (0x16) がヒット
+- [x] Mesen displays `3`
+- [x] `xxd -g 1 build/arith.nes | grep '01 08 01 02'` finds ZEND_ADD (0x01) + op1_type=IS_CV + op2_type=IS_CONST + result_type=IS_TMP_VAR
+- [x] `xxd -g 1 build/arith.nes | grep '16 08 01 00'` finds ZEND_ASSIGN (0x16)
 
-### 延長第 2 段階: 制御フロー (`loop.nes`) ✅
+### Stage 2: control flow (`loop.nes`) ✅
 
 `examples/loop.php`:
 ```php
@@ -154,12 +154,12 @@ while ($i < 5) {
 }
 ```
 
-- [x] Mesen で `01234` が表示される
-- [x] `xxd -g 1 build/loop.nes | grep '2a 00 00 00'` で ZEND_JMP (0x2A) がヒット
-- [x] `xxd -g 1 build/loop.nes | grep '2c 02 00 00'` で ZEND_JMPNZ (0x2C) + op2_type=IS_UNUSED がヒット
-- [x] `xxd -g 1 build/loop.nes | grep '14 08 01 02'` で ZEND_IS_SMALLER (0x14) がヒット
+- [x] Mesen displays `01234`
+- [x] `xxd -g 1 build/loop.nes | grep '2a 00 00 00'` finds ZEND_JMP (0x2A)
+- [x] `xxd -g 1 build/loop.nes | grep '2c 02 00 00'` finds ZEND_JMPNZ (0x2C) + op2_type=IS_UNUSED
+- [x] `xxd -g 1 build/loop.nes | grep '14 08 01 02'` finds ZEND_IS_SMALLER (0x14)
 
-### 延長第 4 段階: コントローラ入力 (`button.nes`) ✅
+### Stage 4: controller input (`button.nes`) ✅
 
 `examples/button.php`:
 ```php
@@ -169,12 +169,12 @@ $k = fgets(STDIN);
 echo $k;
 ```
 
-- [x] Mesen で `Press: ` が表示される
-- [x] A/B/Start/Select/U/D/L/R の各ボタンを押すと対応する文字が続けて表示される
-- [x] `xxd -g 1 build/button.nes | grep 'f0 00 00 04'` で NESPHP_FGETS (0xF0) + result_type=IS_VAR がヒット
-- [x] fgets の `INIT_FCALL / FETCH_CONSTANT / SEND_VAL` が NOP (0x00) に畳み込まれている
+- [x] Mesen shows `Press: `
+- [x] Pressing A/B/Start/Select/U/D/L/R appends the corresponding character
+- [x] `xxd -g 1 build/button.nes | grep 'f0 00 00 04'` finds NESPHP_FGETS (0xF0) + result_type=IS_VAR
+- [x] fgets's `INIT_FCALL / FETCH_CONSTANT / SEND_VAL` are folded to NOP (0x00)
 
-### 延長第 5A 段階: タイル文字移動 (`move.nes`) ✅
+### Stage 5A: tile-character motion (`move.nes`) ✅
 
 `examples/move.php`:
 ```php
@@ -193,12 +193,12 @@ while (true) {
 }
 ```
 
-- [x] 画面中央に `X` が表示される
-- [x] 十字キーで `X` が 1 タイルずつ動く (erase old + redraw new)
-- [x] `xxd -g 1 build/move.nes | grep 'f1 08 08 00'` で NESPHP_NES_PUT (0xF1) がヒット
-- [x] `xxd -g 1 build/move.nes | grep '10 08 01 02'` で ZEND_IS_IDENTICAL (0x10) がヒット
+- [x] `X` displays at the screen center
+- [x] D-pad moves `X` one tile at a time (erase old + redraw new)
+- [x] `xxd -g 1 build/move.nes | grep 'f1 08 08 00'` finds NESPHP_NES_PUT (0xF1)
+- [x] `xxd -g 1 build/move.nes | grep '10 08 01 02'` finds ZEND_IS_IDENTICAL (0x10)
 
-### 延長第 5B 段階: ハードウェアスプライト (`sprite.nes`) ✅
+### Stage 5B: hardware sprite (`sprite.nes`) ✅
 
 `examples/sprite.php`:
 ```php
@@ -216,12 +216,12 @@ while (true) {
 }
 ```
 
-- [x] 画面中央に `A` (tile 65) がスプライトで表示される
-- [x] 十字キーで 2 ピクセルずつ滑らかにスプライトが動く
-- [x] `xxd -g 1 build/sprite.nes | grep 'f2 08 08 00'` で NESPHP_NES_SPRITE (0xF2) がヒット
-- [x] NMI ハンドラが毎 VBlank で OAM DMA ($4014) を実行
+- [x] `A` (tile 65) shows as a sprite at the screen center
+- [x] D-pad moves the sprite smoothly by 2 pixels
+- [x] `xxd -g 1 build/sprite.nes | grep 'f2 08 08 00'` finds NESPHP_NES_SPRITE (0xF2)
+- [x] The NMI handler runs OAM DMA ($4014) every VBlank
 
-### 延長第 5C 段階: プレゼン表示 (`slides.nes`) ✅
+### Stage 5C: presentation (`slides.nes`) ✅
 
 `examples/slides.php`:
 ```php
@@ -240,76 +240,71 @@ while (true) {
 }
 ```
 
-- [x] 任意のボタン押下でスライドが 1 行ずつ追加表示される
-- [x] 6 回目の押下で画面がクリアされ、タイトルから再描画される
-- [x] `strings build/slides.nes` で全スライド文字列がヒット (`NESPHP PRESENTATION` 他)
-- [x] `xxd -g 1 build/slides.nes | grep 'f3 01 01 00'` で NESPHP_NES_PUTS (0xF3, op1/op2=IS_CONST) がヒット
-- [x] `xxd -g 1 build/slides.nes | grep 'f4 00 00 00'` で NESPHP_NES_CLS (0xF4, 引数なし) がヒット
+- [x] Each press appends one slide line
+- [x] On the sixth press the screen clears and redraws from the title
+- [x] `strings build/slides.nes` finds every slide string (`NESPHP PRESENTATION` etc.)
+- [x] `xxd -g 1 build/slides.nes | grep 'f3 01 01 00'` finds NESPHP_NES_PUTS (0xF3, op1/op2=IS_CONST)
+- [x] `xxd -g 1 build/slides.nes | grep 'f4 00 00 00'` finds NESPHP_NES_CLS (0xF4, no args)
 
-### 延長第 3 段階: NMI 同期書き込み (`livetext.nes`) ✅
+### Stage 3: NMI synchronous writes (`livetext.nes`) ✅
 
-`examples/livetext.php`: sprite_mode 中に nes_puts / nes_put を呼ぶデモ。
-スプライトが十字キーで動く中、A ボタン押下で "HIT!" が行を 1 つずつずらして
-表示される。
+`examples/livetext.php`: a demo that calls nes_puts / nes_put while in sprite_mode. The sprite moves with the D-pad, and pressing A appends "HIT!" one row at a time.
 
-- [x] ビルド成功、ROM サイズ 65552 バイト
-- [x] sprite_mode 中に呼ばれた `nes_puts(3, $row, "HIT!")` が A 押下で画面に反映される
-- [x] スプライト 'X' が十字キーで動き続ける (NMI が毎フレーム OAM DMA を実行している)
-- [x] sprite 移動と HIT! 追加を並行操作しても画面崩れが発生しない
-- [x] `xxd -g 1 build/livetext.nes | grep 'f3 01 08 00'` で NESPHP_NES_PUTS (op1=IS_CONST x=3, op2=IS_CV $row) がヒット
-- [x] Mesen の PPU viewer で `$0300-$03FF` に NMI キューエントリが確認できる (A 押下直後の短時間)
+- [x] Build succeeds, ROM size 65552 bytes
+- [x] `nes_puts(3, $row, "HIT!")` invoked while in sprite_mode reflects on screen with each A press
+- [x] The `X` sprite keeps moving with the D-pad (NMI is doing OAM DMA every frame)
+- [x] Mixing sprite motion and HIT! writes never garbles the screen
+- [x] `xxd -g 1 build/livetext.nes | grep 'f3 01 08 00'` finds NESPHP_NES_PUTS (op1=IS_CONST x=3, op2=IS_CV $row)
+- [x] Mesen's PPU viewer shows NMI queue entries at `$0300-$03FF` briefly after pressing A
 
-### 延長第 3.1 段階: sprite_mode での nes_cls (`livereset.nes`) ✅
+### Stage 3.1: nes_cls inside sprite_mode (`livereset.nes`) ✅
 
-`examples/livereset.php`: sprite_mode 中に `nes_cls()` でスライド遷移するデモ。
-A 押下で画面クリア + 次スライドの `nes_puts` が走り、3 スライドを循環する。
+`examples/livereset.php`: cycles slides via `nes_cls()` while sprite_mode is active. A press clears the screen and runs the next slide's `nes_puts`, looping over 3 slides.
 
-- [x] ビルド成功、ROM サイズ 65552 バイト
-- [x] 初期表示 "PHASE 3.1: CLS DEMO" + sprite 'X' が出る
-- [x] 十字キーで sprite が動く (sprite_mode のまま)
-- [x] A 押下で 1-2 フレームの黒フラッシュ → 新しいスライドが表示される
-- [x] A 連打で sprite 位置を保ったままスライドが循環する
-- [x] 画面崩壊しない (brief force-blanking 経由)
-- [x] `xxd -g 1 build/livereset.nes | grep 'f4 00 00 00'` で NESPHP_NES_CLS がヒット
+- [x] Build succeeds, ROM size 65552 bytes
+- [x] Initial display "PHASE 3.1: CLS DEMO" + sprite `X` appears
+- [x] D-pad moves the sprite (still in sprite_mode)
+- [x] A press triggers a 1-2 frame black flash → the next slide displays
+- [x] Mashing A loops slides while preserving sprite position
+- [x] No screen corruption (via brief force-blanking)
+- [x] `xxd -g 1 build/livereset.nes | grep 'f4 00 00 00'` finds NESPHP_NES_CLS
 
-### 延長第 5D 段階: CHR バンク + pattern table 切替 (`chrdemo.nes`) ✅
+### Stage 5D: CHR bank + pattern-table switch (`chrdemo.nes`) ✅
 
-`examples/chrdemo.php`: ボタン押下で `nes_chr_bg(0/1)` と `nes_chr_bank(0/1)` を
-順に呼び、同じテキストが通常 → インバース → バンク切替と変化するデモ。
+`examples/chrdemo.php`: button presses call `nes_chr_bg(0/1)` and `nes_chr_bank(0/1)` in sequence; the same text shows as normal → inverse → bank-switched.
 
-- [x] ビルド成功、ROM サイズ 65552 バイト (16 + 32KB PRG + 32KB CHR)
-- [x] `xxd -g 1 -l 16 build/chrdemo.nes` で `02 04 30 00` (PRG=2, CHR=4, Flags6=0x30=mapper 3) が確認できる
-- [x] `xxd -g 1 build/chrdemo.nes | grep 'f5 01 00 00'` で NESPHP_NES_CHR_BANK (0xF5) がヒット
-- [x] `xxd -g 1 build/chrdemo.nes | grep 'f6 01 00 00'` で NESPHP_NES_CHR_BG (0xF6) がヒット
-- [x] Mesen の PPU viewer で pattern table 0/1 の両方にフォントタイルが存在する
-- [x] Mesen の mapper viewer で bank 0-3 が参照できる (初期状態は全て bank 0 のコピー)
-- [x] 既存 example (hello/arith/loop/button/move/sprite/slides) が CNROM 昇格後も全てビルド成功・動作
+- [x] Build succeeds, ROM size 65552 bytes (16 + 32KB PRG + 32KB CHR)
+- [x] `xxd -g 1 -l 16 build/chrdemo.nes` shows `02 04 30 00` (PRG=2, CHR=4, Flags6=0x30=mapper 3)
+- [x] `xxd -g 1 build/chrdemo.nes | grep 'f5 01 00 00'` finds NESPHP_NES_CHR_BANK (0xF5)
+- [x] `xxd -g 1 build/chrdemo.nes | grep 'f6 01 00 00'` finds NESPHP_NES_CHR_BG (0xF6)
+- [x] Mesen's PPU viewer shows font tiles in both pattern table 0 and 1
+- [x] Mesen's mapper viewer shows banks 0-3 (initially all copies of bank 0)
+- [x] Existing examples (hello/arith/loop/button/move/sprite/slides) still build and run after the CNROM bump
 
-### 延長第 5E 段階: パレット + attribute + カスタムタイル (`color.nes`) ✅
+### Stage 5E: palette + attribute + custom tiles (`color.nes`) ✅
 
-`examples/color.php`: 3 つのパレット intrinsic (nes_bg_color / nes_palette / nes_attr) と
-カスタムタイル (日本国旗) を使ったカラフルプレゼンデモ。
+`examples/color.php`: a colorful presentation demo using all three palette intrinsics (nes_bg_color / nes_palette / nes_attr) and a custom tile (the Japanese flag).
 
-- [x] ビルド成功、ROM サイズ 65552 バイト
-- [x] `xxd -g 1 build/color.nes | grep 'f7 01 00 00'` で NESPHP_NES_BG_COLOR (0xF7, op1=IS_CONST) がヒット
-- [x] `xxd -g 1 build/color.nes | grep 'f8 01 01 01'` で NESPHP_NES_PALETTE (0xF8, op1/op2/result=IS_CONST) がヒット
-- [x] `xxd -g 1 build/color.nes | grep 'f9 01 01 00'` で NESPHP_NES_ATTR (0xF9, op1/op2=IS_CONST) がヒット
-- [x] Mesen で黒背景にカラフルなテキスト (赤タイトル、白本文、緑強調、水色フッタ) が表示される
-- [x] 日本国旗 (2×2 = 16×16 px カスタムタイル) が白地に赤丸で正しく表示される
-- [x] Mesen の PPU palette viewer で BG palette 0-3 が異なる色セットになっている
+- [x] Build succeeds, ROM size 65552 bytes
+- [x] `xxd -g 1 build/color.nes | grep 'f7 01 00 00'` finds NESPHP_NES_BG_COLOR (0xF7, op1=IS_CONST)
+- [x] `xxd -g 1 build/color.nes | grep 'f8 01 01 01'` finds NESPHP_NES_PALETTE (0xF8, op1/op2/result=IS_CONST)
+- [x] `xxd -g 1 build/color.nes | grep 'f9 01 01 00'` finds NESPHP_NES_ATTR (0xF9, op1/op2=IS_CONST)
+- [x] Mesen displays colorful text on a black background (red title, white body, green emphasis, cyan footer)
+- [x] The Japanese flag (2×2 = 16×16 px custom tile) renders correctly (red disc on white)
+- [x] Mesen's PPU palette viewer shows BG palettes 0-3 with distinct color sets
 
 ---
 
-## 実機検証 (任意)
+## Real-hardware verification (optional)
 
-- [ ] Everdrive N8 Pro または互換 flash cart で `build/hello.nes` を実機にロード
-- [ ] Mesen と同じ表示が出ることを確認
-- [ ] 実機限定のバグ (PPU タイミング、DPCM 等) が出ないこと
+- [ ] Load `build/hello.nes` into an Everdrive N8 Pro or compatible flash cart
+- [ ] The same display as Mesen
+- [ ] No real-hardware-only bugs (PPU timing, DPCM, etc.)
 
 ---
 
-## 関連ドキュメント
+## Related documents
 
-- [07-roadmap](./07-roadmap.md) — 実装ステップの順序
-- [01-rom-format](./01-rom-format.md) — hex dump の期待レイアウト
-- [08-risks](./08-risks.md) — 検証で検出したいリスク
+- [07-roadmap](./07-roadmap.md) — Implementation step ordering
+- [01-rom-format](./01-rom-format.md) — Expected hex dump layout
+- [08-risks](./08-risks.md) — Risks the verification aims to detect

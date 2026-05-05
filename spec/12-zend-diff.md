@@ -1,46 +1,46 @@
-# 12. Zend 原本との対比: nesphp の改変点
+# 12. Comparison with the original Zend: nesphp's modifications
 
 [← README](./README.md) | [← 01-rom-format](./01-rom-format.md) | [← 10-devlog](./10-devlog.md)
 
-この文書は「**原本 Zend の opcode / zval / zend_string / op_array の構造** と、
-**nesphp がそれらをどう変更して 6502 ROM に載せたか**」の対比資料です。
-byte レベルの厳密なレイアウト仕様は [01-rom-format](./01-rom-format.md) が単一
-の真実で、こちらはその**背景と設計判断**を説明するアーキテクチャドキュメントと
-して読んでください。
+This document is a side-by-side comparison of "**the original Zend opcode /
+zval / zend_string / op_array structures** vs. **how nesphp modified them to
+fit a 6502 ROM**". The byte-level layout spec is owned by
+[01-rom-format](./01-rom-format.md) as the single source of truth; this
+document is the architectural rationale and design decisions behind it.
 
-参考 (上流の定義):
-- [php-src Zend/zend_compile.h](https://github.com/php/php-src/blob/master/Zend/zend_compile.h) — `struct _zend_op` `union znode_op` `IS_CONST` 等
-- [php-src Zend/zend_types.h](https://github.com/php/php-src/blob/master/Zend/zend_types.h) — `struct _zval_struct` `struct _zend_string`
-- [php-src Zend/zend_vm_opcodes.h](https://github.com/php/php-src/blob/master/Zend/zend_vm_opcodes.h) — opcode 定数
+References (upstream definitions):
+- [php-src Zend/zend_compile.h](https://github.com/php/php-src/blob/master/Zend/zend_compile.h) — `struct _zend_op`, `union znode_op`, `IS_CONST`, etc.
+- [php-src Zend/zend_types.h](https://github.com/php/php-src/blob/master/Zend/zend_types.h) — `struct _zval_struct`, `struct _zend_string`
+- [php-src Zend/zend_vm_opcodes.h](https://github.com/php/php-src/blob/master/Zend/zend_vm_opcodes.h) — opcode constants
 
 ---
 
-# オリジナルの Zend opcode フォーマット (PHP 8.4)
+# The original Zend opcode format (PHP 8.4)
 
-## `struct _zend_op` (32 バイト on 64bit)
+## `struct _zend_op` (32 bytes on 64-bit)
 
-`Zend/zend_compile.h` の実体:
+The actual definition in `Zend/zend_compile.h`:
 
 ```c
 struct _zend_op {
-    const void    *handler;       // 8B  ハンドラ関数への C ポインタ
-    znode_op       op1;           // 4B  第 1 operand (union)
-    znode_op       op2;           // 4B  第 2 operand (union)
-    znode_op       result;        // 4B  結果格納先 (union)
-    uint32_t       extended_value;// 4B  追加情報 (3 引数目 / flags / etc.)
-    uint32_t       lineno;        // 4B  PHP ソース行番号 (デバッグ用)
-    zend_uchar     opcode;        // 1B  命令番号
-    zend_uchar     op1_type;      // 1B  operand 種別 (IS_CONST 等)
+    const void    *handler;       // 8B  C function pointer to handler
+    znode_op       op1;           // 4B  first operand (union)
+    znode_op       op2;           // 4B  second operand (union)
+    znode_op       result;        // 4B  result destination (union)
+    uint32_t       extended_value;// 4B  extra info (third arg / flags / etc.)
+    uint32_t       lineno;        // 4B  PHP source line number (debug)
+    zend_uchar     opcode;        // 1B  instruction number
+    zend_uchar     op1_type;      // 1B  operand kind (IS_CONST etc.)
     zend_uchar     op2_type;      // 1B
     zend_uchar     result_type;   // 1B
 };
 ```
 
-### `handler` フィールドが最初にある理由
+### Why the `handler` field is first
 
-Zend は **direct-threaded / call-threaded dispatch** を使うために、opcache
-コンパイル時に各 opcode の C ハンドラ関数ポインタを `handler` に焼き込みます。
-実行時は
+Zend uses **direct-threaded / call-threaded dispatch**, so during opcache
+compilation it bakes a C handler function pointer into `handler` for each
+opcode. At runtime:
 
 ```c
 for (;;) {
@@ -49,30 +49,30 @@ for (;;) {
 }
 ```
 
-のように、opcode バイトを見ずに `handler()` 呼び出しだけで dispatch します
-(一部ビルド構成では GOTO / SWITCH 版も選べる)。この「ハンドラを直接呼ぶ」
-モデルが PHP VM の高速化のキモなので、`handler` は構造体の **先頭** に置かれて
-キャッシュヒット率が最適化されています。
+That is, dispatch is just a `handler()` call, not a switch on the opcode byte
+(some build configurations choose GOTO / SWITCH variants instead). Because the
+"call the handler directly" model is the heart of PHP VM speed, `handler` is
+placed at the **beginning** of the struct for cache hit optimization.
 
-### `znode_op` (4 バイトの union)
+### `znode_op` (4-byte union)
 
 ```c
 typedef union _znode_op {
-    uint32_t constant;   // literals 配列へのバイトオフセット
-    uint32_t var;        // execute_data 内のスロット byte offset
-    uint32_t num;        // 汎用数値 (arg count 等)
-    uint32_t opline_num; // op_array->opcodes[] のインデックス
-    uint32_t jmp_offset; // JMP の runtime byte offset
+    uint32_t constant;   // byte offset into the literals array
+    uint32_t var;        // byte offset of a slot in execute_data
+    uint32_t num;        // generic number (arg count etc.)
+    uint32_t opline_num; // index into op_array->opcodes[]
+    uint32_t jmp_offset; // runtime byte offset for JMP
 } znode_op;
 ```
 
-4 バイトが文脈で意味を変える union で、どの解釈を使うかは隣の `*_type` フィー
-ルドが決めます (`IS_CONST` → constant, `IS_CV` → var, `IS_UNUSED` → num /
-jmp_offset)。
+The 4 bytes change meaning by context. The neighboring `*_type` field decides
+which interpretation is used (`IS_CONST` → constant, `IS_CV` → var, `IS_UNUSED`
+→ num / jmp_offset).
 
-### operand type (`Zend/zend_compile.h`)
+### Operand types (`Zend/zend_compile.h`)
 
-| 値 | 名前 |
+| Value | Name |
 |---|---|
 | 0x00 | `IS_UNUSED` |
 | 0x01 | `IS_CONST` |
@@ -80,13 +80,13 @@ jmp_offset)。
 | 0x04 | `IS_VAR` |
 | 0x08 | `IS_CV` |
 
-## `struct _zval_struct` (16 バイト)
+## `struct _zval_struct` (16 bytes)
 
-> **なぜここで zval が出てくるか**: `zend_op.op1` の `*_type` が `IS_CONST` の
-> とき、その 4 バイトは「literals 配列 (= `zval` の配列) へのバイトオフセット」
-> です。つまり **オペランドの意味を解釈するには literals の要素 = `zval` の
-> レイアウトを知っている必要がある**。`zend_op` は単独で完結せず、次の階層
-> `zval`、さらに文字列なら `zend_string` までチェーンで参照先が続きます。
+> **Why zval shows up here**: when `*_type` of `zend_op.op1` is `IS_CONST`,
+> those 4 bytes are "a byte offset into the literals array (= an array of
+> `zval`)". So **understanding the operand requires knowing the layout of an
+> element of literals = `zval`**. `zend_op` doesn't stand alone; references
+> chain into `zval`, and from there into `zend_string` for strings.
 
 `Zend/zend_types.h`:
 
@@ -96,7 +96,7 @@ struct _zval_struct {
     union {
         uint32_t  type_info;
         struct {
-            zend_uchar type;       // ← 下位 1B に type ID
+            zend_uchar type;       // ← type ID in the low byte
             zend_uchar type_flags;
             union { uint16_t extra; } u;
         } v;
@@ -104,27 +104,27 @@ struct _zval_struct {
     union {
         uint32_t  next;
         uint32_t  cache_slot;
-        // ... 10 種類以上の用途違い
+        // ... 10+ different uses
     } u2;                  // 4B
 };
 ```
 
-`value` union の中身:
+Inside the `value` union:
 
 ```c
 typedef union _zend_value {
-    zend_long        lval;   // 8B 符号付き整数 (64bit build なら int64)
+    zend_long        lval;   // 8B signed integer (int64 on 64-bit builds)
     double           dval;   // 8B IEEE 754
-    zend_string     *str;    // 8B ポインタ
-    zend_array      *arr;    // 8B ポインタ
-    zend_object     *obj;    // 8B ポインタ
+    zend_string     *str;    // 8B pointer
+    zend_array      *arr;    // 8B pointer
+    zend_object     *obj;    // 8B pointer
     /* ... */
 } zend_value;
 ```
 
-type ID (`Zend/zend_types.h`):
+Type IDs (`Zend/zend_types.h`):
 
-| 値 | 名前 |
+| Value | Name |
 |---|---|
 | 0 | `IS_UNDEF` |
 | 1 | `IS_NULL` |
@@ -137,26 +137,26 @@ type ID (`Zend/zend_types.h`):
 | 8 | `IS_OBJECT` |
 | ... | ... |
 
-## `struct _zend_string` (24 バイトヘッダ + 可変長)
+## `struct _zend_string` (24-byte header + variable-length body)
 
-zval が文字列型 (`IS_STRING`) のとき、`value.str` が指す先:
+When zval has type `IS_STRING`, `value.str` points at:
 
 ```c
 struct _zend_string {
     zend_refcounted_h gc;    // 8B  refcount:4 + type_info:4
     zend_ulong        h;     // 8B  DJBX33A hash
-    size_t            len;   // 8B  バイト長
-    char              val[1];// 可変 (flex array)、NUL 終端 + alignment
+    size_t            len;   // 8B  byte length
+    char              val[1];// flex, NUL-terminated + alignment
 };
 ```
 
-`gc.type_info` の下位ビットに `IS_STR_INTERNED` / `IS_STR_PERMANENT` 等のフラグ
-が立ちます。特に **IMMUTABLE 扱いの 0x40** は「GC 対象外、refcount いじらない」
-の意味。
+The low bits of `gc.type_info` carry flags like `IS_STR_INTERNED` /
+`IS_STR_PERMANENT`. In particular the **IMMUTABLE flag (0x40)** means "exempt
+from GC, don't touch refcount".
 
-## `struct _zend_op_array` (オリジナル: 数百バイト)
+## `struct _zend_op_array` (original: hundreds of bytes)
 
-opcode 本体を包む上位コンテナ。実体は非常に大きく、抜粋するとこんな構造:
+The upper container that wraps the opcode body. It's huge; an excerpt:
 
 ```c
 struct _zend_op_array {
@@ -175,13 +175,13 @@ struct _zend_op_array {
     /* op_array specific */
     uint32_t *refcount;
     uint32_t last;
-    zend_op *opcodes;       // ← opcodes 配列へのポインタ
+    zend_op *opcodes;       // ← pointer to opcode array
     int last_var;
     uint32_t T_liveranges;
-    zend_string **vars;     // CV 変数名
+    zend_string **vars;     // CV variable names
     int last_literal;
     uint32_t num_dynamic_func_defs;
-    zval *literals;         // ← literals 配列へのポインタ
+    zval *literals;         // ← pointer to literals array
     int cache_size;
     void **run_time_cache;
     zend_string *filename;
@@ -192,127 +192,128 @@ struct _zend_op_array {
 };
 ```
 
-数十個のフィールド、多数のヒープポインタ、runtime cache、attributes、ライブ
-ラリバージョンによって微妙にメンバーが増減。
+Dozens of fields, many heap pointers, runtime cache, attributes. Members vary
+slightly across library versions.
 
 ---
 
-# nesphp の改変点
+# nesphp's modifications
 
-上記を **6502 の 2KB RAM + 32KB PRG-ROM** で動かすために、以下を変更しています。
-方針は **「ROM 側は可能な限り Zend 互換レイアウトを保つ、RAM 側は独自形式で
-いい」** (L3 忠実度)。
+To run on a 6502 with **2KB RAM + 32KB PRG-ROM**, we change the following.
+Policy: **"keep the ROM side as Zend-compatible as possible; the RAM side can
+go its own way"** (L3 fidelity).
 
-## 改変 1: `handler` / `lineno` 削除 + 各 znode_op を 4B→2B 圧縮 (32B → 12B)
+## Modification 1: drop `handler` / `lineno` + compress each znode_op 4B → 2B (32B → 12B)
 
 ```
-Zend 原本           nesphp (現行 12B 圧縮形)
-offset  field       offset  field
-  0     handler (8B)  ---   (削除)
-  8     op1 (4B)     0      op1 (2B、下位 2B のみ)
+Zend original     nesphp (current 12B compressed)
+offset  field     offset  field
+  0     handler (8B)  ---   (dropped)
+  8     op1 (4B)     0      op1 (2B, low 2B only)
  12     op2 (4B)     2      op2 (2B)
  16     result (4B)  4      result (2B)
  20     ext_v (4B)   6      extended_value (2B)
- 24     lineno (4B)  ---    (削除)
+ 24     lineno (4B)  ---    (dropped)
  28     opcode (1B)  8      opcode
  29     op1_type     9      op1_type
  30     op2_type    10      op2_type
  31     result_type 11      result_type
 ```
 
-**理由 (handler 削除)**: `handler` は **ホスト側 (x86/ARM) C 関数へのポインタ**
-なので、6502 には 1 ビットも意味がない。opcache が handler をリゾルブするの
-はロード時だけで、構造上は「次の fetch で opcode バイトを見て dispatch」と
-等価なので、**情報ロスなしで削れる**。
+**Reason (handler dropped)**: `handler` is **a pointer to a host (x86/ARM) C
+function** — it has zero meaning on a 6502. opcache resolves `handler` only
+at load time, and structurally "fetch the next opcode byte and dispatch" is
+equivalent — so it can be dropped **without information loss**.
 
-**理由 (lineno 削除)**: NES VM はランタイムでライン番号を表示する仕組みを
-持たない (compile error 表示で `CMP_LINE` を使うのは別管理)。デバッグ用途のみ
-の lineno は **ROM 容量制約** のため削除。
+**Reason (lineno dropped)**: the NES VM has no mechanism to display line
+numbers at runtime (the compile-error path uses `CMP_LINE` separately).
+A debug-only lineno is dropped under **ROM size constraints**.
 
-**理由 (znode_op 圧縮 4B→2B)**: VM が実際に読むのは下位 2B のみ:
-- `constant`: literals は最大 ~48 zval × 16B = 768B → 12-bit で十分
-- `var`: スロット番号 × 16、最大 64 スロット → 1024 = 11-bit
-- `jmp_offset`: op_index、最大 ~617 ops → 10-bit
+**Reason (znode_op 4B → 2B compression)**: the VM only reads the low 2B in practice:
+- `constant`: literals are at most ~48 zvals × 16B = 768B → 12 bits suffice
+- `var`: slot number × 16, max 64 slots → 1024 = 11 bits
+- `jmp_offset`: op_index, max ~617 ops → 10 bits
 
-PRG-RAM bank 0 の 8KB 制約により tetris.php の op_array が 97.8% 占有してた
-状況を打開するため、24B → 12B に圧縮。VM ハンドラ側は `vm/nesphp.s` 冒頭の
-`ZOP_*` シンボル (ZOP_OP1=0, ZOP_OP2=2, ZOP_RESULT=4, ZOP_EXT=6,
-ZOP_OPCODE=8, ZOP_*_TYPE=9..11, ZOP_SIZE=12) で参照しており、再度の
-拡張 / 圧縮も定数 1 箇所の更新で済む。tetris で 97.8% → 53% 程度まで縮減。
+To overcome the situation where tetris.php's op_array filled 97.8% of PRG-RAM
+bank 0 (8KB), we compressed 24B → 12B. The VM handlers reference the
+`ZOP_*` symbols (ZOP_OP1=0, ZOP_OP2=2, ZOP_RESULT=4, ZOP_EXT=6, ZOP_OPCODE=8,
+ZOP_*_TYPE=9..11, ZOP_SIZE=12) at the top of `vm/nesphp.s`, so future
+expansion / compression only changes one constant. Tetris went from 97.8% to
+roughly 53%.
 
-6502 VM は opcode バイト (offset 8) を読んで 16bit `JMP` 先を切り替えるだけ
-の dispatch loop を持つので、「handler 呼び出しが事前に計算された NES 版」と
-解釈できます。
+The 6502 VM's dispatch loop reads the opcode byte (offset 8) and switches a
+16-bit `JMP` target — interpretable as "the NES version where the handler
+call has been precomputed".
 
-## 改変 2: `IS_LONG` を 16 bit に narrow
+## Modification 2: narrow `IS_LONG` to 16 bits
 
-| | Zend 原本 | nesphp |
+| | Zend original | nesphp |
 |---|---|---|
-| `value.lval` | int64 (64bit build) | 下位 16 bit のみ使用、符号拡張 |
-| 範囲 | `-9.2×10^18 .. +9.2×10^18` | `-32768 .. +32767` |
-| 範囲外時 | そのまま動く | **serializer が compile error** |
+| `value.lval` | int64 (64-bit build) | low 16 bits only, sign-extended |
+| Range | `-9.2×10^18 .. +9.2×10^18` | `-32768 .. +32767` |
+| Out of range | runs as-is | **serializer compile error** |
 
-**理由**: 6502 で 64bit 演算は 1 操作で 8 バイト × 多数命令 → ROM 数百バイト
-の乗算・除算ルーチン。16bit に絞れば ADD/SUB は 6-8 命令で済む。
+**Reason**: 64-bit arithmetic on the 6502 is 8 bytes × many instructions per
+op → multiplier/divider routines of hundreds of ROM bytes. With 16-bit,
+ADD/SUB runs in 6-8 instructions.
 
-zval の物理レイアウトは **16B のまま変えていない**ので、`value` union の
-下位 2 バイトだけを nesphp は見る。上位 6 バイトは ROM に残りますが VM は
-無視します (Zend 互換を維持するための「空白」)。
+The physical zval layout is **kept at 16B**; nesphp only reads the low 2 bytes
+of the `value` union. The remaining 6 bytes stay in ROM but the VM ignores
+them (they're "padding for Zend compatibility").
 
-## 改変 3: `IS_DOUBLE` / `IS_ARRAY` / `IS_OBJECT` を未対応化
+## Modification 3: `IS_DOUBLE` / `IS_ARRAY` / `IS_OBJECT` are unsupported
 
-serializer がこれらの literal を検出したら即 compile error。
+The serializer raises a compile error the moment it sees any of these literals.
 
-| type | ROM 側に出たら | 理由 |
+| type | If present in ROM | Reason |
 |---|---|---|
-| `IS_DOUBLE` | compile error | softfloat ルーチン 1-2KB は重すぎ |
-| `IS_ARRAY` | compile error | `HashTable` 56B + bucket 36B が 2KB RAM に入らない |
-| `IS_OBJECT` | compile error | 同上、`HashTable` を内包 |
+| `IS_DOUBLE` | compile error | softfloat routines (1-2KB) are too heavy |
+| `IS_ARRAY` | compile error | `HashTable` 56B + bucket 36B doesn't fit in 2KB RAM |
+| `IS_OBJECT` | compile error | same, internally has a `HashTable` |
 
-`zval` の type ID 番号は Zend と同じ値を使うので、「将来やりたくなったら番号の
-衝突なく足せる」穴は残しています。
+The zval type-ID numbers match Zend, leaving the door open to add them later
+without ID collisions.
 
-## 改変 4: `value.str` の意味を「ポインタ」→「ROM オフセット」に
+## Modification 4: redefine `value.str` from "pointer" to "ROM offset"
 
-Zend 原本:
+Zend original:
 ```
-zval.value.str = zend_string * (ホストアドレス空間内の 64bit ポインタ)
+zval.value.str = zend_string * (64-bit pointer in host address space)
 ```
 
 nesphp:
 ```
-zval.value.str = uint16 のバイトオフセット (ops.bin 先頭起点)
+zval.value.str = uint16 byte offset (relative to the start of ops.bin)
 ```
 
-8 バイトの `value` 欄のうち **下位 2 バイト**だけを使い、残り 6 バイトは 0。
-VM 側は `LDA value.str; ADC #<OPS_BASE` で絶対アドレスに復元します。
+Of the 8 bytes in `value`, only the **low 2 bytes** are used; the remaining 6
+bytes are 0. The VM restores the absolute address with `LDA value.str; ADC #<OPS_BASE`.
 
-**理由**: 6502 には 64bit ポインタはおろか 32bit アドレス空間もない。uint16
-で ROM 先頭からのオフセット持てば十分。`zval` の 16B レイアウトは変えずに、
-値の**意味**だけ差し替えています。
+**Reason**: The 6502 doesn't have 64-bit pointers, let alone a 32-bit address
+space. uint16 offsets relative to ROM start are sufficient. The 16B zval
+layout stays; only the **meaning** of the value changes.
 
-## 改変 5: `zend_string.hash` を 0 固定
+## Modification 5: `zend_string.hash` is hardcoded to 0
 
-Zend 原本: `DJBX33A` で計算した 64bit ハッシュを `h` フィールドに埋める。
-nesphp: 常に 0。
+Zend original: a 64-bit hash computed by `DJBX33A` is stored in `h`.
+nesphp: always 0.
 
-**理由**: nesphp は HashTable を持たないので、hash が読まれる文脈がない
-(配列キーでも、string interning でも使わない)。計算コストゼロ、ROM 領域
-そのままで 8 バイトのゴミが残るだけ。Zend 互換を優先してフィールドは残して
-います。
+**Reason**: nesphp has no HashTable, so there's no context where the hash is
+read (not for array keys, not for string interning). Computation cost zero,
+and 8 bytes of garbage stay in ROM. We keep the field for Zend compatibility.
 
-## 改変 6: `gc.refcount` を 0 固定、`type_info` を `IMMUTABLE` (0x40)
+## Modification 6: `gc.refcount` hardcoded to 0, `type_info` set to `IMMUTABLE` (0x40)
 
-全ての `zend_string` は **ROM 上のイミュータブル**なので、refcount 操作は
-意味がない。Zend 原本でも `IS_STR_PERMANENT` や `IMMUTABLE` の文字列は
-refcount を触らないので、この扱いは「Zend における CONST 文字列」と同じ動作
-です。
+Every `zend_string` is **immutable in ROM**, so refcount manipulation is
+meaningless. Even Zend itself doesn't touch the refcount on `IS_STR_PERMANENT`
+or `IMMUTABLE` strings, so this matches the "CONST string in Zend" handling.
 
-## 改変 7: `op_array` ヘッダの完全置換
+## Modification 7: complete replacement of the `op_array` header
 
-Zend 原本の `zend_op_array` は数百バイトの巨大構造体 (filename, function_name,
-scope, arg_info, run_time_cache, attributes, ...)。これを 6502 にそのまま持ち
-込むのは非現実的なので、**16 バイトの独自ヘッダに置き換え**ました:
+Zend's `zend_op_array` is a giant struct of hundreds of bytes (filename,
+function_name, scope, arg_info, run_time_cache, attributes, ...). Bringing
+that to a 6502 is impractical, so we replaced it with a **custom 16-byte
+header**:
 
 ```
 offset  size  field
@@ -326,145 +327,149 @@ offset  size  field
  12     4     reserved
 ```
 
-Zend 互換性は **zend_op 本体と zval / zend_string まで**で切り、コンテナ
-(op_array) は独自。この線引きが nesphp が自称する「L3」の本当の境界線です
-(L4 だと op_array も Zend 互換にしたくなるが、不可能)。
+Zend compatibility ends at **the `zend_op` body and the zval / zend_string
+chain**; the container (op_array) is bespoke. This boundary is the actual
+limit of what nesphp calls "L3" (going to L4 would mean making op_array
+Zend-compatible, which is impossible).
 
-**`php_version_major/minor` だけは独自追加**: PHP マイナー版で opcode 番号が
-動くので、VM 起動時に 8.4 でなければ halt する version-lock 用のガード値。
-Zend 原本には**対応物がない** (実行時の PHP は自分のバージョンを知っているので
-不要) けれど、nesphp では ROM と VM がビルド時点でロックされるので必須。
+**Only `php_version_major/minor` is original**: PHP minor versions shift
+opcode numbers, so it's the version-lock guard that halts the VM at boot if
+not 8.4. Zend has **no equivalent** (PHP at runtime knows its own version, so
+it's unneeded), but on nesphp the ROM and VM are locked at build time, making
+this essential.
 
-## 改変 8: RAM 上の zval 表現を 16B → 4B tagged value に
+## Modification 8: in-RAM zval representation 16B → 4B tagged value
 
-これは ROM レイアウトの話ではなく **runtime 側の改変**ですが、重要なので
-書きます。
+This isn't a ROM-layout change but a **runtime modification** — important
+enough to mention.
 
-Zend 原本は execute_data の CV / TMP / VAR スロットを 16B zval のまま持ちます。
-nesphp は 2KB RAM 制約のため、**4 バイトの tagged value** に圧縮:
+Zend original keeps execute_data CV / TMP / VAR slots as 16B zvals. nesphp
+compresses them to a **4-byte tagged value** under the 2KB RAM constraint:
 
 ```
 byte 0: type ID (TYPE_LONG / TYPE_STRING / TYPE_TRUE / ...)
-byte 1-2: payload 下位 16 bit (IS_LONG 値 or zend_string ROM offset)
-byte 3: extra (未使用)
+byte 1-2: low 16 bits of payload (IS_LONG value or zend_string ROM offset)
+byte 3: extra (unused)
 ```
 
-VM の `resolve_op1` / `resolve_op2` ルーチンが、Zend レイアウトの ROM から
-読んで 4B 版に正規化する変換層になっています。結果として:
+The VM's `resolve_op1` / `resolve_op2` routines act as a translation layer
+that reads from the Zend-laid-out ROM and normalizes to the 4B form. As a
+result:
 
-- **ROM (ops.bin)**: Zend の 16B zval レイアウトのまま
-- **RAM (`$0400`-`$05FF`)**: 4B tagged value の独自形式
+- **ROM (ops.bin)**: stays in Zend's 16B zval layout
+- **RAM (`$0400`-`$05FF`)**: nesphp's own 4B tagged value
 
-「ROM を見れば Zend、RAM を見れば nesphp」の二面性。[02-ram-layout](./02-ram-layout.md)
-で RAM 側の詳細、[10-devlog](./10-devlog.md)「各フェーズ横断の学び」に経緯が
-あります。
+The duality of "look at ROM and you see Zend; look at RAM and you see nesphp".
+Details of the RAM side are in [02-ram-layout](./02-ram-layout.md), and the
+history is in [10-devlog](./10-devlog.md) "Cross-phase lessons".
 
-## 改変 9: カスタム opcode 帯の追加 (0xF0-0xF6)
+## Modification 9: custom opcode band added (0xF0-0xF6)
 
-これは「改変」というより「拡張」。Zend が使っていない 0xE0-0xFF 帯に nesphp
-独自命令 7 個を詰めて、serializer が `fgets()` / `nes_*()` の関数呼び出し
-パターンを畳み込む先としています (`NESPHP_FGETS=0xF0` 等)。
+Less of a "modification" than an extension. The 0xE0-0xFF band that Zend
+doesn't use is filled with seven nesphp-specific instructions, and the
+serializer folds `fgets()` / `nes_*()` function-call patterns into them
+(`NESPHP_FGETS=0xF0`, etc.).
 
-構造体レイアウトには触らず、`opcode` バイトの番号を増やしているだけ。VM 側
-の dispatch は「標準 Zend opcode もカスタムも同じ main_loop の `CMP` 連鎖で
-分岐」という統一扱いです。番号の一覧は [04-opcode-mapping](./04-opcode-mapping.md)
-参照。
+The struct layout is untouched; only the `opcode` byte numbers grow. The VM
+dispatch treats "standard Zend opcodes and custom ones the same way: the
+single main_loop `CMP` chain branches both". See [04-opcode-mapping](./04-opcode-mapping.md)
+for the full list.
 
-## 改変 10: `zend_string` 構造体の省略 (L3S 限定)
+## Modification 10: omit the `zend_string` struct (L3S only)
 
-**この改変は on-NES コンパイラ経路 (L3S) のみ**に適用される。ホスト
-`serializer.php` 経路 (L3) は従来通り `zend_string` 24B ヘッダを ROM に焼く。
+**This modification applies only to the on-NES compiler path (L3S)**. The
+host `serializer.php` path (L3) still bakes the 24B `zend_string` header into
+ROM as before.
 
-L3S では文字列リテラルを表現する `zend_string` 構造体を持たず、zval の
-`value` フィールドに (ROM offset, length) を直接埋め込みます:
+In L3S, no `zend_string` struct represents a string literal — the zval's
+`value` field directly carries (ROM offset, length):
 
 ```
 L3 (host):
-  zval.value.str (8B) → ROM 内 zend_string (24B header + val[] + null)
-                        └─ offset 16 に len
-                        └─ offset 24 から val[]
+  zval.value.str (8B) → zend_string in ROM (24B header + val[] + null)
+                        └─ len at offset 16
+                        └─ val[] from offset 24
 
 L3S (on-NES):
-  zval.value bytes 0-1 → ROM 内 val[] 先頭 (OPS_BASE 相対 16bit offset)
-  zval.value bytes 2-3 → length (16bit)
-  zend_string ヘッダは存在しない
+  zval.value bytes 0-1 → val[] start in ROM (16-bit offset relative to OPS_BASE)
+  zval.value bytes 2-3 → length (16-bit)
+  No zend_string header
 ```
 
-**理由**: L3S は PHP ソースを生の ASCII で ROM に焼くので、文字列リテラルの
-val[] は**既にソース中の `"..."` の内側として ROM 上に存在する**。追加で 24B
-ヘッダを焼いても、そのヘッダ内の `len` と `val[]` 本体は PHP ソース文字列
-バイトの複製になるだけ。`strings hello.nes` で "HELLO, NES!" が 2 回見える
-状態になり、「ROM = PHP ソースそのもの」というロマン軸を損ねていた。
+**Reason**: L3S bakes the PHP source as raw ASCII into ROM, so the val[] of
+each string literal **already exists in the ROM** as the body inside the
+source's `"..."`. Burning an extra 24B header would make the header's `len`
+and the val[] body just duplicate the PHP source string bytes. `strings
+hello.nes` would show "HELLO, NES!" twice, undermining the "ROM = the PHP
+source itself" romance axis.
 
-省略による具体的効果:
+Concrete effects of the omission:
 
-| 観点 | L3 | L3S |
+| Aspect | L3 | L3S |
 |------|-----|-----|
-| `strings` 出現回数 | ソース 1 回 + プール 1 回 = 2 回 | ソース 1 回 |
-| ROM 使用 | PHP ソース + 24B header × 文字列数 + 本体複製 | PHP ソース のみ |
-| VM `echo_string` | zend_string ヘッダ navigate (LDY #16 / ADC #24) | 4B tagged 直読み (simpler) |
-| L3 忠実度 | 完全 | 部分逸脱 (zend_string 非使用) |
-| zval 16B レイアウト | 維持 | 維持 (value 共用体の**意味**だけ変更) |
+| `strings` occurrences | source 1 + pool 1 = 2 | source 1 |
+| ROM use | PHP source + 24B header × num strings + duplicated body | PHP source only |
+| VM `echo_string` | Navigates zend_string header (LDY #16 / ADC #24) | Reads 4B tagged directly (simpler) |
+| L3 fidelity | Full | Partial deviation (no zend_string) |
+| zval 16B layout | Preserved | Preserved (only the **meaning** of the value union changes) |
 
-4B tagged value (RAM) も変わります: byte 3 が L3 では未使用、L3S では
-**IS_STRING 時の length** に意味が付く ([02-ram-layout](./02-ram-layout.md))。
+The 4B tagged value (RAM) also changes: byte 3 is unused under L3 but in L3S
+**carries the length when type is IS_STRING** (see [02-ram-layout](./02-ram-layout.md)).
 
-`vm/nesphp.s` の文字列関連ハンドラ (`echo_string` / `vec_string` /
-`handle_nesphp_nes_put` / `handle_nesphp_nes_puts`) は L3S に合わせて
-書き換えられました。L3 (host 経路) も同じバイナリを読めるかは、serializer 側で
-16B zval の bytes 2-3 に length を書く変更が必要 (host 経路の今後の保守方針
-は未決、[13-compiler](./13-compiler.md) と `serializer.php` の同期は M-E 完了時
-に判断)。
+The string-related handlers in `vm/nesphp.s` (`echo_string` / `vec_string` /
+`handle_nesphp_nes_put` / `handle_nesphp_nes_puts`) have been rewritten for
+L3S. Whether L3 (host path) can read the same binary requires a
+serializer-side change to write length into bytes 2-3 of the 16B zval (the
+host path's maintenance policy is undecided; we'll align
+[13-compiler](./13-compiler.md) and `serializer.php` upon completing M-E).
 
-spec の単一の真実は [13-compiler](./13-compiler.md)、byte-level の厳密仕様は
-そちらを参照。
+The single source of truth for this spec is [13-compiler](./13-compiler.md);
+see there for byte-level detail.
 
 ---
 
-# まとめ: 何が残って何が変わったか
+# Summary: what stayed, what changed
 
-| 対象 | 原本 Zend | nesphp | 互換度 |
+| Item | Zend original | nesphp | Compatibility |
 |---|---|---|---|
-| `zend_op` のサイズ | 32B | 12B | handler / lineno 削除 + 各 znode_op 4B→2B 圧縮。**Zend オフセット互換は捨てた** (改変 1 参照) |
-| `zend_op` の各フィールド意味 | そのまま | そのまま | ✅ byte-for-byte |
-| `zval` サイズ | 16B | 16B | ✅ |
-| `zval.value` の解釈 | 8 バイト分の union | 下位 2 バイトのみ使用 | 下位使用、上位は 0 埋め |
-| `IS_LONG` 精度 | 64bit | 16bit narrow | 意味縮小 |
-| `IS_DOUBLE` / `IS_ARRAY` / `IS_OBJECT` | サポート | compile error | 削除 |
-| `zend_string` ヘッダ | 24B | L3: 24B / **L3S: 省略** | L3 レイアウト互換 / L3S は zval に直接 (offset, length) |
-| `zend_string.hash` | 計算 | L3: 0 固定 / L3S: — | L3 レイアウト互換、値は無意味 |
-| `zend_string.val[]` | UTF-8 等 | ASCII のみ | 文字コード制限 |
-| `zend_op_array` ヘッダ | 数百バイト | 16B 独自 | ❌ **完全置換** |
-| CV / TMP slot (RAM) | 16B zval | 4B tagged value | ❌ 別形式 |
-| 4B tagged value byte 3 | — | L3: 未使用 / **L3S: IS_STRING 時 length** | L3S 専用の意味付け |
-| 独自 opcode | — | 0xF0-0xF9 追加 | Zend 未使用帯を借用 |
+| `zend_op` size | 32B | 12B | handler / lineno dropped + each znode_op compressed 4B → 2B. **Zend offset compatibility was abandoned** (see Mod 1) |
+| Each `zend_op` field meaning | as is | as is | ✅ byte-for-byte |
+| `zval` size | 16B | 16B | ✅ |
+| `zval.value` interpretation | 8-byte union | low 2 bytes only | low used, upper zero-padded |
+| `IS_LONG` precision | 64-bit | 16-bit narrow | meaning shrunk |
+| `IS_DOUBLE` / `IS_ARRAY` / `IS_OBJECT` | supported | compile error | dropped |
+| `zend_string` header | 24B | L3: 24B / **L3S: omitted** | L3 layout-compatible / L3S puts (offset, length) directly in zval |
+| `zend_string.hash` | computed | L3: hardcoded 0 / L3S: — | L3 layout-compatible, value meaningless |
+| `zend_string.val[]` | UTF-8 etc. | ASCII only | character-set restricted |
+| `zend_op_array` header | hundreds of bytes | 16B custom | ❌ **complete replacement** |
+| CV / TMP slot (RAM) | 16B zval | 4B tagged value | ❌ different format |
+| 4B tagged value byte 3 | — | L3: unused / **L3S: length on IS_STRING** | L3S-specific meaning |
+| Custom opcodes | — | 0xF0-0xF9 added | borrows the unused Zend band |
 
-結局、nesphp が Zend 互換を主張できる**核心**は:
+In the end, the **core** of nesphp's claim to Zend compatibility is:
 
-1. `zend_op` の **12B 構造** (handler/lineno 削除 + 各 znode_op 4B→2B 圧縮) が Zend と同じフィールド順
-   オフセットで ROM に並んでいる
-2. `zval` 16B レイアウトが保たれている (中身の使い方は縮退)
-3. `zend_string` ヘッダの 24B レイアウトが保たれている
-4. opcode 番号 (`0x88 = ZEND_ECHO` 等) が PHP 8.4 と一致
+1. The **12B `zend_op` structure** (handler/lineno dropped + each znode_op compressed
+   4B→2B) sits in ROM with the same field order/offsets as Zend
+2. The 16B `zval` layout is preserved (with degraded usage of the contents)
+3. The 24B `zend_string` header layout is preserved
+4. Opcode numbers (`0x88 = ZEND_ECHO`, etc.) match PHP 8.4
 
-この 4 点のおかげで:
+Thanks to those four points:
 
-- `xxd -g 1 build/hello.nes | grep '88 01 00 00'` で ZEND_ECHO の byte 列が
-  見える
-- `strings build/hello.nes | grep HELLO` で文字列本体がそのままヒット
-- PHP 8.4 の `zend_vm_opcodes.h` を直接見れば nesphp の命令番号が分かる
+- `xxd -g 1 build/hello.nes | grep '88 01 00 00'` reveals the byte sequence of ZEND_ECHO
+- `strings build/hello.nes | grep HELLO` finds the string body as-is
+- Looking at PHP 8.4's `zend_vm_opcodes.h` directly tells you nesphp's opcode numbers
 
-というロマンが成立している、という構図です。逆に、op_array 上位コンテナや
-RAM 上の zval は実装都合で割り切って置き換えている、というのが nesphp の
-リアルな設計線引きです。
+That's where the romance lives. Conversely, the op_array container and the
+in-RAM zval are pragmatically replaced — that's the actual design line.
 
 ---
 
-## 関連ドキュメント
+## Related documents
 
-- [01-rom-format](./01-rom-format.md) — この対比表の「nesphp 側」の厳密な byte レベル仕様
-- [02-ram-layout](./02-ram-layout.md) — 改変 8 の 4B tagged value 詳細 (L3S の byte 3 も記載)
-- [04-opcode-mapping](./04-opcode-mapping.md) — Zend opcode 番号 + nesphp カスタム opcode の一覧
-- [10-devlog](./10-devlog.md) — L1 / L3 / L4 の忠実度選択や各フェーズの設計判断の経緯
-- [11-chr-banks](./11-chr-banks.md) — CNROM マッパー昇格 (ROM レイアウトとは別軸の改変)
-- [13-compiler](./13-compiler.md) — L3S (on-NES コンパイラ) の単一の真実、改変 10 の詳細
+- [01-rom-format](./01-rom-format.md) — strict byte-level spec for the "nesphp side" of this comparison
+- [02-ram-layout](./02-ram-layout.md) — Mod 8's 4B tagged value detail (incl. L3S byte 3)
+- [04-opcode-mapping](./04-opcode-mapping.md) — Zend opcode numbers + nesphp custom opcode list
+- [10-devlog](./10-devlog.md) — L1 / L3 / L4 fidelity choices and per-phase design history
+- [11-chr-banks](./11-chr-banks.md) — CNROM mapper promotion (a separate axis from ROM layout)
+- [13-compiler](./13-compiler.md) — Single source of truth for L3S (on-NES compiler), Mod 10 detail

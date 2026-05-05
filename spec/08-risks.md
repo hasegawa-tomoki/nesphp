@@ -1,77 +1,77 @@
-# 08. 主要リスクと緩和策
+# 08. Major risks and mitigations
 
 [← README](./README.md) | [← 07-roadmap](./07-roadmap.md) | [→ 09-verification](./09-verification.md)
 
-## リスク一覧
+## Risk catalog
 
-| # | リスク | 影響 | 緩和策 |
+| # | Risk | Impact | Mitigation |
 |---|--------|------|--------|
-| 1 | Zend opcode 番号の PHP バージョン間変動 | シリアライザが出すバイナリが動かない | PHP 8.4 に version lock。opcache ダンプ先頭の `(PHP X.Y.Z)` 行をパースして一致確認、不一致なら serializer が abort。VM 側は op_array header の `php_version_major/minor` を起動時に確認 |
-| 2 | `zend_op` レイアウトが PHP ビルド設定 (ZTS/NTS, 32/64bit, debug/release) で変動 | 24B 構造体レイアウトが崩れる | 対応するのは **NTS x64 PHP 8.4 リリースビルド** (macOS `brew install php`) のみ。`spec/README.md` に明記 |
-| 3 | 2KB RAM が狭すぎる | VM が早期に RAM 枯渇 | ゼロページに VM レジスタを集約、動的アロケーションゼロ、RAM マップを [02-ram-layout](./02-ram-layout.md) で決め打ち。16B zval は ROM 内のみ、RAM は 4B tagged に縮退 |
-| 4 | PHP の 64bit 整数・double・配列・オブジェクト | セマンティクスを守れない | **切る**。IS_LONG は 16bit に narrow、double/配列/オブジェクトは serializer で compile error。[00-overview](./00-overview.md) の「やらないこと」で明示 |
-| 5 | 可変長文字列と GC | ヒープ管理が必要になる | MVP は ROM 内 `zend_string` のみ (immutable)。`ZEND_CONCAT` 導入時は固定 256B バッファ 1 本方式で GC 不要 ([06-display-io](./06-display-io.md)) |
-| 6 | Zend opcode 200+ を全て揃えたくなる誘惑 | 実装量爆発 | MVP は 2 opcode、延長で合計 20 opcode と決め打ち。未対応は handle_unimpl でフォールバック ([04-opcode-mapping](./04-opcode-mapping.md)) |
-| 7 | opcache テキストダンプの書式が PHP リリース間で微変動 | シリアライザのパースが壊れる | MVP が動いたら早期に自作拡張 `nesphp_dump.so` に昇格し、テキストパース層を殺す。その間は regex を粗結合に保つ |
-| 8 | PPU タイミング (実行中の nametable 書き込みは壊れる) | 画面がグリッチる | MVP は強制 blanking 中 (`$2001=0`) にのみ書き込む。延長段階で VBlank 転送方式に昇格 ([06-display-io](./06-display-io.md)) |
-| 9 | コントローラの DPCM グリッチ | 入力がたまに壊れる | NESdev Wiki のリトライ付き読み取りルーチンをそのまま使う |
-| 10 | Zend はレジスタマシン、6502 は素朴 | 変換ロジックが複雑になる | ハンドラは op1_type/op2_type で `resolve_op1/op2` resolver を呼び、どの種別でも統一的にフェッチできる作り。速度より実装量を優先 |
-| 11 | 自作拡張が PHP ABI 更新で壊れる | 第 2 段階の再ビルド必要 | `PHP_API_VERSION` でコンパイル時ガード。動作確認 PHP バージョンを `nesphp_dump/README.md` に明記 |
-| 12 | バンクスイッチの要否 | 32KB を超えたら動かない | MVP は NROM 32KB で十分。延長ゴールで溢れたら UxROM に昇格 (VM を固定バンク、op_array を切替バンク) |
-| 13 | 実機とエミュレータの挙動差 | 実機で動かない | 主に Mesen でデバッグ (精度が高い)、最後に FCEUX と Everdrive で確認 |
-| 14 | PHP ソースの非 ASCII 文字 | NES フォントに入らず文字化け | serializer で非 ASCII literal を検出したら compile error |
-| 15 | Zend の TMP_VAR / VAR / CV のオフセット解釈が PHP バージョンで変動 | operand resolver が壊れる | `spec/03-vm-dispatch.md` の resolver を PHP 8.4 に合わせて実装、version lock で他バージョン拒否 |
-| 16 | 文字列プールが PRG-ROM 容量を超える | ビルド失敗 | serializer がサイズチェックし、超えたら compile error。将来的に UxROM 昇格で解決 |
-| 17 | 6502 の 16bit 演算が遅い (`ZEND_MUL` 等) | 実時間で破綻 | 乗除は最後に実装、除算は必要に応じて省略 |
+| 1 | Zend opcode numbers shifting between PHP versions | Serializer-emitted binaries don't run | Version-lock to PHP 8.4. Parse the `(PHP X.Y.Z)` line at the top of opcache dumps and abort the serializer on mismatch. The VM verifies `php_version_major/minor` from the op_array header at boot |
+| 2 | `zend_op` layout shifts with PHP build settings (ZTS/NTS, 32/64-bit, debug/release) | The 12B compressed layout breaks | Support **only NTS x64 PHP 8.4 release builds** (macOS `brew install php`). Documented in `spec/README.md` |
+| 3 | 2KB RAM is too small | VM exhausts RAM early | Concentrate VM registers on the zero page, zero dynamic allocation, fixed RAM map per [02-ram-layout](./02-ram-layout.md). 16B zvals only in ROM; RAM keeps a narrowed 4B tagged form |
+| 4 | PHP 64-bit ints, doubles, arrays, objects | Can't honor semantics | **Drop them**. IS_LONG narrows to 16-bit; doubles/arrays/objects abort the serializer. Listed in [00-overview](./00-overview.md) "What we don't do" |
+| 5 | Variable-length strings and GC | Need heap management | MVP keeps `zend_string` immutable, ROM-only. When `ZEND_CONCAT` lands, use a single fixed 256B buffer (no GC) ([06-display-io](./06-display-io.md)) |
+| 6 | Tempted to implement all 200+ Zend opcodes | Implementation explodes | MVP locks itself to 2 opcodes; extensions cap at ~20. Anything else falls back to handle_unimpl ([04-opcode-mapping](./04-opcode-mapping.md)) |
+| 7 | opcache text-dump format drifts between PHP releases | Serializer parser breaks | After MVP, promote to the custom `nesphp_dump.so` extension and kill the text parser. Until then, keep the regex loose-coupled |
+| 8 | PPU timing (writes mid-render glitch the screen) | Screen glitches | MVP writes only during forced blanking (`$2001=0`). Extensions promote to VBlank transfer ([06-display-io](./06-display-io.md)) |
+| 9 | DPCM controller glitch | Sporadic input corruption | Use NESdev Wiki's retry-equipped read routine as-is |
+| 10 | Zend is a register machine, 6502 is bare-metal | Translation logic gets tangled | Handlers call `resolve_op1/op2` resolvers based on op1_type/op2_type — fetch any operand kind through one path. Code volume over speed |
+| 11 | Custom extension breaks on PHP ABI updates | Phase 2 needs rebuilding | Compile-time guard via `PHP_API_VERSION`. Document the verified PHP version in `nesphp_dump/README.md` |
+| 12 | Bank switching needed? | Anything > 32KB doesn't run | NROM 32KB suffices for MVP. If extensions overflow, promote to UxROM (VM in fixed bank, op_array in switched bank) |
+| 13 | Real hardware vs. emulator drift | Won't run on hardware | Mainly debug in Mesen (high accuracy), final-check on FCEUX and Everdrive |
+| 14 | Non-ASCII characters in PHP source | Don't fit in NES font, garbled | Serializer detects non-ASCII literals and aborts |
+| 15 | Zend TMP_VAR / VAR / CV offset interpretation drifts between PHP versions | Operand resolver breaks | Implement the resolver in `spec/03-vm-dispatch.md` against PHP 8.4; version lock rejects others |
+| 16 | String pool exceeds PRG-ROM capacity | Build fails | Serializer checks size and aborts on overflow. Promote to UxROM in the future |
+| 17 | 6502 16-bit math is slow (`ZEND_MUL` etc.) | Real-time breaks down | Implement multiply/divide last; skip divide if necessary |
 
 ---
 
-## 最重要リスクの深掘り
+## Drilling into the highest-priority risks
 
-### PHP バージョンロックの徹底
+### Strict PHP version-locking
 
-このプロジェクト最大のリスクは **「PHP 8.3 で書いたコードが 8.4 で動かない」ような相互運用性問題**ではなく、**「動いていた 8.4 が 8.5 では opcode 番号が変わって壊れる」こと**。
+The biggest risk in this project isn't **"code written for PHP 8.3 doesn't run on 8.4"** kinds of interop problems — it's **"the 8.4 build was working until 8.5 renumbered opcodes"**.
 
-#### 対策の多層化
+#### Defense in depth
 
-1. **serializer 側**: `php -v` を内部から実行し、8.4 でなければ abort
-2. **opcache ダンプパーサ**: ダンプ先頭の `(PHP X.Y.Z)` コメント行 (opcache が出す) を確認
-3. **VM 側 (ROM)**: op_array header の `php_version_major/minor` を起動時に確認、不一致なら halt 画面
-4. **ドキュメント**: `spec/README.md` の動作確認欄に明記。CI を組む場合は 8.4.x を pin
+1. **Serializer-side**: invoke `php -v` from within and abort if not 8.4
+2. **opcache dump parser**: check the `(PHP X.Y.Z)` comment line at the top of the dump
+3. **VM-side (ROM)**: check `php_version_major/minor` in the op_array header at boot, halt screen on mismatch
+4. **Documentation**: stated in the verification line of `spec/README.md`. CI should pin 8.4.x
 
-### RAM 2KB の綱渡り
+### Walking the 2KB RAM tightrope
 
-[02-ram-layout](./02-ram-layout.md) の RAM マップは MVP + 延長第 1 段階までは余裕があるが、延長第 5 段階 (スプライト) で OAM シャドウ 256B が必須になる。さらにその先 (配列等) を実装しようとすると確実に破綻する。
+The RAM map in [02-ram-layout](./02-ram-layout.md) has slack through MVP + extension stage 1, but extension stage 5 (sprites) makes the 256B OAM shadow mandatory. Going further (arrays etc.) is guaranteed to break.
 
-**方針**: 配列は **絶対に実装しない**。代わりに「複数変数を使う PHP」と「関数呼び出しベースのハードウェア制御」で表現する。
+**Policy**: **never** implement arrays. Express patterns instead with "PHP using multiple variables" and "function-call-based hardware control".
 
-### 未実装 opcode に対するユーザ体験
+### Unsupported-opcode UX
 
-ユーザが `echo [1, 2, 3];` のような配列コードを書いた時、どこでエラーになるかを明確にする:
+When a user writes `echo [1, 2, 3];` with arrays, we make sure the failure point is unambiguous:
 
-1. serializer が `ZEND_INIT_ARRAY` を検出
-2. 未対応 opcode として compile error、`hello.php:1: unsupported opcode ZEND_INIT_ARRAY (arrays are not supported in nesphp)` のようなメッセージ
-3. ビルド abort
+1. The serializer detects `ZEND_INIT_ARRAY`
+2. Compile error as an unsupported opcode: `hello.php:1: unsupported opcode ZEND_INIT_ARRAY (arrays are not supported in nesphp)`
+3. Build aborts
 
-「ビルドは通ったが NES で動かない」状況を作らない。
-
----
-
-## リスクを受け入れる決断
-
-以下は **修正しないリスク** (ロマンを守るため):
-
-- **実用には使えない**: PHP の大半の機能が使えないので Web 開発等には無意味
-- **速度は出ない**: 6502 で解釈実行なので 1 秒あたり 1000 opcode 程度。本気の PHP より 1000 万倍遅い
-- **PHP の深いセマンティクス (type juggling 等) は再現しない**: 必要最小限の挙動のみ
-
-これらは「ネタプロジェクト」という前提を受け入れる。
+We never let "build passes but doesn't run on NES" happen.
 
 ---
 
-## 関連ドキュメント
+## Risks we accept
 
-- [00-overview](./00-overview.md) — 「やらないこと」の詳細
-- [02-ram-layout](./02-ram-layout.md) — RAM 2KB の具体的な配分
-- [05-toolchain](./05-toolchain.md) — PHP バージョンロックの実装手段
-- [09-verification](./09-verification.md) — リスクを検出するテスト項目
+These are **risks we don't fix** (to preserve the romance):
+
+- **Useless for production**: most PHP features are missing, so it's pointless for web work
+- **No speed**: interpreted on a 6502 — about 1000 opcodes per second. ~10 million× slower than serious PHP
+- **PHP's deeper semantics (type juggling etc.) aren't reproduced**: only the minimum needed
+
+They're accepted under the "this is a joke project" premise.
+
+---
+
+## Related documents
+
+- [00-overview](./00-overview.md) — Detailed list of "What we don't do"
+- [02-ram-layout](./02-ram-layout.md) — Concrete budget for the 2KB RAM
+- [05-toolchain](./05-toolchain.md) — How PHP version-locking is implemented
+- [09-verification](./09-verification.md) — Tests that detect each risk

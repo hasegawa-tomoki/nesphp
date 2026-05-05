@@ -1,30 +1,30 @@
-# 05. ツールチェーンとビルドパイプライン
+# 05. Toolchain and build pipeline
 
 [← README](./README.md) | [← 04-opcode-mapping](./04-opcode-mapping.md) | [→ 06-display-io](./06-display-io.md)
 
-## 全体フロー
+## End-to-end flow
 
 ```
 input.php
    │
-   ▼ (1) 抽出: opcache.opt_debug_level (MVP) / nesphp_dump.so (第 2 段階)
+   ▼ (1) Extract: opcache.opt_debug_level (MVP) / nesphp_dump.so (Phase 2)
 ops.txt (or ops.bin)
    │
-   ▼ (2) シリアライズ: serializer.php
-ops.bin (L3 ROM イメージ、[01-rom-format](./01-rom-format.md) 準拠)
+   ▼ (2) Serialize: serializer.php
+ops.bin (L3 ROM image, follows [01-rom-format](./01-rom-format.md))
    │
-   ▼ (3) アセンブル: ca65 vm/nesphp.s
+   ▼ (3) Assemble: ca65 vm/nesphp.s
 nesphp.o
    │
-   ▼ (4) リンク: ld65 -C vm/nesphp.cfg (ops.bin を .incbin)
+   ▼ (4) Link: ld65 -C vm/nesphp.cfg (.incbin "ops.bin")
 nesphp.nes
 ```
 
-1 コマンド化は `Makefile` の pattern rule で行う (`make build/NAME.nes` が examples/NAME.php から .nes までを一気通貫)。
+A `Makefile` pattern rule does it in one shot (`make build/NAME.nes` runs all of (1)-(4) from examples/NAME.php to .nes).
 
 ---
 
-## (1) 抽出層
+## (1) Extraction layer
 
 ### MVP: opcache.opt_debug_level
 
@@ -34,9 +34,9 @@ php -dopcache.enable_cli=1 \
     examples/hello.php 2> build/ops.txt > /dev/null
 ```
 
-- stock PHP 8.4 同梱、追加インストール不要
-- stderr にテキスト形式のダンプが出る
-- 書式例:
+- Bundled with stock PHP 8.4, no extra install required
+- Dumps a textual representation to stderr
+- Format example:
   ```
   $_main:
        ; (lines=2, args=0, vars=0, tmps=0)
@@ -45,72 +45,72 @@ php -dopcache.enable_cli=1 \
   0000 ECHO string("HELLO, NES!")
   0001 RETURN int(1)
   ```
-- オペランドは `string("...")` / `int(N)` / `CV($var)` / `TMP#N` / `V#N` の型プレフィックス付き
+- Operands carry type prefixes: `string("...")` / `int(N)` / `CV($var)` / `TMP#N` / `V#N`
 
-### 第 2 段階: 自作 Zend 拡張 `nesphp_dump.so`
+### Phase 2: a custom Zend extension `nesphp_dump.so`
 
-C で ~300 行。`zend_compile_file()` を呼んで `zend_op_array*` を受け取り、`opcodes[]` と `literals[]` を直接歩いてバイナリ出力。
+About 300 lines of C. Calls `zend_compile_file()`, gets the `zend_op_array*`, and walks `opcodes[]` and `literals[]` directly to emit a binary.
 
-- `spec/01-rom-format.md` 準拠のバイトをそのまま吐く
-- serializer.php のテキストパース層を完全に殺せる
-- **ロマン最大化**: 「Zend エンジンが吐いた `zend_op` を我々の拡張が吸い出してバイナリ化し、それを 6502 が解釈」
+- Emits bytes that match `spec/01-rom-format.md` directly
+- Lets us delete the text-parser layer in serializer.php entirely
+- **Maximum romance**: "Our extension snatches the `zend_op` that the Zend engine emitted, binary-encodes it, and the 6502 interprets it"
 
-PHP 拡張ビルドは `phpize && ./configure && make`、`PHP_API_VERSION` でコンパイル時にバージョンチェック。
+PHP extension build is `phpize && ./configure && make`; we version-check at compile time via `PHP_API_VERSION`.
 
 ---
 
-## (2) シリアライザ層: `serializer.php`
+## (2) Serializer layer: `serializer.php`
 
-責務:
+Responsibilities:
 
-1. `ops.txt` (opcache テキスト) をパース
-2. `spec/04-opcode-mapping.md` の番号表を参照して、ニーモニックを Zend opcode 番号に変換
-3. literal を型ごとに 16B zval に詰める
-4. 文字列 literal は `zend_string` (24B ヘッダ + content) として文字列プールに追加
-5. CONST オペランドのオフセットを literals_off 起点で解決
-6. 制御フロー命令 (`JMP 0003` 等) の index を uint16 で埋め込み
-7. 組み込み関数パターン (`INIT_FCALL "fgets"` + `DO_FCALL`) を検出して特殊 ID に畳み込み
-8. op_array header + opcodes + literals + string pool を 1 本の `ops.bin` にパック
-9. 未対応 opcode / 未対応 literal 型に当たったら compile error で abort
+1. Parse `ops.txt` (the opcache text)
+2. Reference the number table in `spec/04-opcode-mapping.md` to convert mnemonics into Zend opcode numbers
+3. Pack literals into 16B zvals by type
+4. Add string literals to the string pool as `zend_string` (24B header + content)
+5. Resolve CONST operand offsets relative to literals_off
+6. Embed jump targets (`JMP 0003` etc.) as uint16 indices
+7. Detect built-in patterns (`INIT_FCALL "fgets"` + `DO_FCALL`) and fold into special IDs
+8. Pack op_array header + opcodes + literals + string pool into a single `ops.bin`
+9. Abort with a compile error on unsupported opcodes / literal types
 
-### 単一ファイル構成
+### Single-file structure
 
 ```
 serializer/
-  serializer.php     ~600 行想定
-  composer.json      (依存ゼロ、~10 行)
+  serializer.php     ~600 lines (target)
+  composer.json      (zero deps, ~10 lines)
 ```
 
-nikic/php-parser 等の外部ライブラリは**使わない** (ロマン評価を損ねないため)。
+We **don't use** external libraries like nikic/php-parser (preserves the romance).
 
-### 内部モジュール (1 ファイル内)
+### Internal modules (within one file)
 
-- `Parser` — opcache テキストダンプのパース
-- `ZendOp` — `zend_op` 相当のデータクラス
-- `ZendZval` — `zval` 相当のデータクラス
-- `ZendString` — 文字列プール管理
-- `OpcodeTable` — `spec/04-opcode-mapping.md` 準拠のニーモニック→番号表
-- `RomEmitter` — バイナリバイト列を生成
-- `BuiltinFolder` — `INIT_FCALL` パターンの畳み込み
+- `Parser` — opcache text-dump parsing
+- `ZendOp` — `zend_op` data class
+- `ZendZval` — `zval` data class
+- `ZendString` — string pool management
+- `OpcodeTable` — mnemonic → number per `spec/04-opcode-mapping.md`
+- `RomEmitter` — emits the binary byte stream
+- `BuiltinFolder` — folds `INIT_FCALL` patterns
 
 ---
 
-## (3) アセンブラ層: ca65
+## (3) Assembler layer: ca65
 
-- `vm/nesphp.s` — VM 本体 (リセット/NMI/dispatch/ハンドラ)
-- `vm/nesphp.cfg` — ld65 メモリレイアウト設定 (NROM 32KB + 8KB CHR)
-- `chr/font.chr` — ASCII 96 タイル CHR バイナリ (`.incbin`)
+- `vm/nesphp.s` — VM core (reset/NMI/dispatch/handlers)
+- `vm/nesphp.cfg` — ld65 memory layout (NROM 32KB + 8KB CHR)
+- `chr/font.chr` — 96-tile ASCII CHR binary (`.incbin`)
 
-### ビルド
+### Build
 
 ```bash
 ca65 --target none vm/nesphp.s -o build/nesphp.o
 ld65 -C vm/nesphp.cfg build/nesphp.o -o build/nesphp.nes
 ```
 
-`.incbin "build/ops.bin"` でシリアライザ出力を ROM に埋め込む。
+`.incbin "build/ops.bin"` embeds the serializer output into the ROM.
 
-### ld65 メモリレイアウト (nesphp.cfg)
+### ld65 memory layout (nesphp.cfg)
 
 ```
 MEMORY {
@@ -131,13 +131,13 @@ SEGMENTS {
 }
 ```
 
-(実際の値は実装時に調整)
+(Actual values are tuned during implementation.)
 
 ---
 
-## (4) 統合ビルド: `Makefile`
+## (4) Integrated build: `Makefile`
 
-pattern rule で (1)〜(4) を繋ぐ:
+A pattern rule chains (1)-(4):
 
 ```makefile
 $(BUILD_DIR)/%.ops.txt: examples/%.php | $(BUILD_DIR)
@@ -157,61 +157,61 @@ $(BUILD_DIR)/%.nes: $(BUILD_DIR)/%.o $(VM_CFG)
 	$(LD65) -C $(VM_CFG) $< -o $@
 ```
 
-### `opcache.file_update_protection=0` の根拠
+### Why `opcache.file_update_protection=0`
 
-opcache のデフォルト (`=2`) は、「mtime が現在から 2 秒以内の新しいファイルは optimizer にかけず cache もしない」という race condition 対策。これが **`touch example.php && make`** の典型的な編集フローで dump を空にしてしまうので、nesphp では一律に無効化する。
+opcache's default (`=2`) is the "files newer than 2 seconds are skipped — neither optimizer nor cache" race-condition guard. That kicks in for the typical **`touch example.php && make`** edit flow and silently empties the dump. nesphp disables it across the board.
 
-開発フローで opcache race は問題にならない (stock CLI の 1 プロセス 1 コンパイル)。
+It doesn't matter for our flow (one stock CLI process per compile).
 
-### 使い方
+### Usage
 
 ```bash
-make                     # デフォルトで build/hello.nes
-make build/foo.nes       # examples/foo.php から build/foo.nes
-make verify              # L3 ロマン検証
-make clean               # build/ を消す
+make                     # Default: build/hello.nes
+make build/foo.nes       # examples/foo.php → build/foo.nes
+make verify              # L3 romance verification
+make clean               # Remove build/
 ```
 
 ---
 
-## PHP バージョンロックの根拠
+## Why version-lock PHP
 
-### Zend opcode 番号が変動する
+### Zend opcode numbers shift
 
-`php-src/Zend/zend_vm_opcodes.h` の定数定義は PHP リリース間で番号がシフトすることがある。serializer と VM が参照する番号表 ([04-opcode-mapping](./04-opcode-mapping.md)) は**特定バージョンに固定**する必要がある。
+The constants in `php-src/Zend/zend_vm_opcodes.h` may renumber across PHP releases. The opcode table in [04-opcode-mapping](./04-opcode-mapping.md) (referenced by serializer and VM) **must be pinned to a specific version**.
 
-### `zend_op` のレイアウト変動
+### `zend_op` layout shifts
 
-PHP ビルド設定 (ZTS/NTS、32/64 bit、debug/release) によって構造体のパディングや union サイズが変わる。`spec/01-rom-format.md` の 12B 圧縮レイアウトはホスト側 `serializer.php` が **NTS x64 PHP 8.4 リリースビルド** の 32B `zend_op` を読んで各 znode_op の lo 2B のみ抽出する前提。
+PHP build settings (ZTS/NTS, 32/64-bit, debug/release) change struct padding and union sizes. The 12B compressed layout in `spec/01-rom-format.md` assumes the host-side `serializer.php` reads the 32B `zend_op` from a **NTS x64 PHP 8.4 release build** and extracts the lo 2B of each znode_op.
 
-### 採用: PHP 8.4
+### Choice: PHP 8.4
 
-- 記述時点 (2026-04) で最新安定版に近い
-- `brew install php` で取得できる
-- 8.3/8.5 との互換性は保証しない
+- Close to the latest stable at the time of writing (2026-04)
+- `brew install php` gives it
+- 8.3 / 8.5 compatibility is not guaranteed
 
-### 実行時チェック
+### Runtime check
 
-- op_array header の `php_version_major=0x08, php_version_minor=0x04` を VM 側で起動時に確認、不一致なら画面エラー表示 & halt
-- serializer は `php -v` の出力を見て 8.4.x でなければ早期 abort
+- The VM checks `php_version_major=0x08, php_version_minor=0x04` in the op_array header at boot. Mismatch → on-screen error & halt
+- The serializer reads `php -v` and aborts early if it isn't 8.4.x
 
 ---
 
-## 必須インストール
+## Required installs
 
 ```bash
 brew install php       # 8.4.x
 brew install cc65      # ca65 + ld65
-brew install mesen     # (任意) デバッグ用エミュレータ
+brew install mesen     # (optional) debugging emulator
 ```
 
-`php -v` と `ca65 --version` で確認。
+Verify with `php -v` and `ca65 --version`.
 
 ---
 
-## 関連ドキュメント
+## Related documents
 
-- [00-overview](./00-overview.md) — 3 層アーキテクチャの全体像
-- [01-rom-format](./01-rom-format.md) — シリアライザが出力するバイナリ仕様
-- [04-opcode-mapping](./04-opcode-mapping.md) — opcode 番号表
-- [07-roadmap](./07-roadmap.md) — 実装ステップの順序
+- [00-overview](./00-overview.md) — Big picture of the 3-layer architecture
+- [01-rom-format](./01-rom-format.md) — Binary spec the serializer outputs
+- [04-opcode-mapping](./04-opcode-mapping.md) — Opcode number table
+- [07-roadmap](./07-roadmap.md) — Implementation step order
