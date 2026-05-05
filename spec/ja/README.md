@@ -1,0 +1,34 @@
+# nesphp 仕様書
+
+6502 (ファミコン) 上で、実際の `php` コマンドが吐いた Zend opcode を実行する PHP VM。実用ではなくロマン重視。
+
+## 動作確認バージョン
+
+- **PHP: 8.4.x** (version lock 必須、根拠は [05-toolchain](./05-toolchain.md))
+- **マッパー: MMC1 (mapper 1, SXROM 相当)**、PRG-ROM 64KB (4 × 16KB) + CHR-RAM 8KB + PRG-RAM 32KB (4 × 8KB)、NES 2.0 ヘッダ、詳細は [11-chr-banks](./11-chr-banks.md)
+- cc65: `brew install cc65`
+- 開発ホスト: macOS (NTS x64 PHP ビルド前提)
+- エミュレータ: fceux (`make run:NAME` で起動、`EMULATOR=` で変更可)
+
+## 目次
+
+| # | ファイル | 内容 |
+|---|---|---|
+| 0 | [00-overview](./00-overview.md) | プロジェクト方針、3 層アーキテクチャ、L3 採用理由、やらないこと |
+| 1 | [01-rom-format](./01-rom-format.md) | L3 ROM バイナリフォーマット (Zend 互換)、hex dump 例 |
+| 2 | [02-ram-layout](./02-ram-layout.md) | WRAM マップ、ゼロページ、4B tagged value |
+| 3 | [03-vm-dispatch](./03-vm-dispatch.md) | 6502 VM fetch-dispatch 設計、jump table |
+| 4 | [04-opcode-mapping](./04-opcode-mapping.md) | Zend opcode → ハンドラ対応表 (MVP + 延長) |
+| 5 | [05-toolchain](./05-toolchain.md) | 抽出、シリアライザ、ビルドパイプライン |
+| 6 | [06-display-io](./06-display-io.md) | PPU 表示、コントローラ入力、スプライト |
+| 7 | [07-roadmap](./07-roadmap.md) | MVP / 延長ゴール実装ステップ |
+| 8 | [08-risks](./08-risks.md) | 主要リスクと緩和策 |
+| 9 | [09-verification](./09-verification.md) | 受け入れ基準とロマン検証 |
+| 10 | [10-devlog](./10-devlog.md) | 各フェーズの設計判断の経緯と躓き (時系列) |
+| 11 | [11-chr-banks](./11-chr-banks.md) | MMC1 SXROM + CHR-RAM 構成、CHR タイル割当 (フォント / テトリスピース / レンガ壁) |
+| 12 | [12-zend-diff](./12-zend-diff.md) | Zend 原本の構造体 (`zend_op` / `zval` / `zend_string` / `zend_op_array`) と nesphp の改変点 10 項目 |
+| 13 | [13-compiler](./13-compiler.md) | on-NES コンパイラ (L3S: PHP ソースを NES 起動時に 6502 がコンパイル) の単一の真実 |
+
+## 最短読み方
+
+初めて読む場合は `00-overview` → `01-rom-format` → `09-verification` の順で、設計思想 → 実体 → 成功条件が掴めます。実装を始める場合は追加で `02-ram-layout` `03-vm-dispatch` `07-roadmap` を読んでください。
