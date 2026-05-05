@@ -11,7 +11,7 @@
 - `<?php echo "HELLO, NES!";` を含む `.php` を入力すると `.nes` が出来上がる
 - Mesen で起動すると画面に `HELLO, NES!` が表示される
 - `strings hello.nes` で `HELLO, NES!` がヒットする (PHP ソースの文字列が NES ROM 内にそのまま存在する)
-- `xxd hello.nes` で ZEND_ECHO の opcode バイト列 (`28 01 08 08`) がヒットする (Zend 互換番号)
+- L3S では PHP ソース自体が ROM に焼かれ、起動時に on-NES コンパイラが PRG-RAM 上で `zend_op` を生成する。compiled bytecode は ROM に存在しない (L3 host-compile path のオラクル `make build/X.host.ops.bin` には焼かれる)
 
 詳細な受け入れ基準は [09-verification](./09-verification.md) を参照。
 
@@ -29,8 +29,8 @@
  Zend opcode ダンプ (テキスト or バイナリ)
    │
    ▼  serializer.php : Zend op_array → L3 ROM バイナリ
-   │    - zend_op を 24B にパック (handler 除去)
-   │    - literals を 16B zval 配列に配置
+   │    - zend_op を 12B にパック (handler / lineno 除去 + 各 znode_op を 4B→2B 圧縮)
+   │    - literals を 16B zval 配列に配置 (Zend 互換)
    │    - zend_string を 24B ヘッダ + content に配置
    │    - CONST offset を NES ROM 内相対オフセットに解決
  ops.bin (L3 ROM イメージ)
@@ -72,7 +72,7 @@
                                               │
                                               ▼ compile_and_emit (6502)
                                               │  - lex <?php echo "..." ;
-                                              │  - emit 24B zend_op / 16B zval
+                                              │  - emit 12B zend_op / 16B zval
                                               │    (zend_string は使わず zval に
                                               │     ROM offset + length を直接埋め込む)
                                               │
@@ -86,7 +86,7 @@
 | 段階 | 内容 | 採用 |
 |------|------|------|
 | L1 | 独自 nesphp-bc に翻訳。opcode 番号・operand 符号化・zval 全て独自 | × (ロマン不足) |
-| **L3** | **Zend の `zend_op` 構造体を handler 抜きで ROM にそのまま焼く。literals は 16B zval のまま。6502 VM が Zend のフィールドオフセットを直読み**。PHP ソースはホスト側 `serializer.php` が opcode にコンパイルして ROM に焼く | **○** (host-compile 経路) |
+| **L3** | **Zend の `zend_op` を NESPHP 圧縮形 (12B、handler/lineno 削除 + 各 znode_op を 4B→2B 圧縮) で ROM に焼く。literals は Zend 互換 16B zval のまま、6502 VM が Zend のフィールドオフセットを直読み**。PHP ソースはホスト側 `serializer.php` が opcode にコンパイルして ROM に焼く | **○** (host-compile 経路) |
 | **L3S** | **L3 の発展。PHP ソースを ROM に生で焼き、NES 起動時に 6502 自身が lex/parse/codegen。zend_string 構造体は省略し、zval に (ROM offset, length) を直接埋め込む**。詳細は [13-compiler](./13-compiler.md) | **○** (self-hosted 経路、`make build/X.nes` がデフォルト) |
 | L4 | L3 + zval 16B もそのまま RAM、IS_LONG 64bit 完全再現 | × (2KB RAM 不足) |
 

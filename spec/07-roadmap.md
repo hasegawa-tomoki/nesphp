@@ -119,7 +119,7 @@ PHP バージョン (`php -v` で 8.4.x) を `spec/README.md` の動作確認欄
 
 - `ops.txt` をパースして ZEND_ECHO と ZEND_RETURN の 2 命令、`string("...")` と `int(N)` の 2 literal 型のみ対応
 - `spec/01-rom-format.md` と `spec/04-opcode-mapping.md` を元に `ops.bin` を出力
-- ZEND_ECHO=0x28, ZEND_RETURN=0x3e 等の番号は PHP 8.4 の `zend_vm_opcodes.h` を見てハードコード
+- ZEND_ECHO=0x88 (=136)、ZEND_RETURN=0x3e (=62) 等の番号は PHP 8.4 の `zend_vm_opcodes.h` を見てハードコード
 - PHP バージョンが 8.4 でなければ abort
 
 テスト: `hexdump -C build/ops.bin` の出力が `spec/01-rom-format.md` の hex dump 例と一致すること。

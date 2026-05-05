@@ -10,8 +10,8 @@
 
 | 段階 | 内容 |
 |------|------|
-| L3  | ホスト側 `serializer.php` が Zend 互換の `zend_op 24B` / `zval 16B` / `zend_string 24B` を ROM に焼く。NES VM は Zend のフィールドオフセットを直読み |
-| **L3S** | **PHP ソースを ROM に焼き、起動時に 6502 コンパイラが PRG-RAM に `zend_op 24B` / `zval 16B` を emit する。zend_string 構造体は持たず、`value` フィールドに (ROM offset, length) を直接埋め込む** |
+| L3  | ホスト側 `serializer.php` が NESPHP 圧縮形 `zend_op 12B` (handler/lineno 削除 + 各 znode_op 4B→2B) / Zend 互換 `zval 16B` / `zend_string 24B` を ROM に焼く。NES VM は `ZOP_*` シンボル経由でフィールドオフセットを参照 |
+| **L3S** | **PHP ソースを ROM に焼き、起動時に 6502 コンパイラが PRG-RAM に `zend_op 12B` / `zval 16B` を emit する。zend_string 構造体は持たず、`value` フィールドに (ROM offset, length) を直接埋め込む** |
 
 L3S は L3 から「`zend_string` を使わない」という 1 点だけ意図的に逸脱する。[12-zend-diff](./12-zend-diff.md) 改変 10 参照。
 
@@ -344,7 +344,7 @@ END:   (backpatch pop)
 
 ```
 $6000-$600F  header (16B)
-$6010-...    op_array (24B × num_ops、最大 ~308 op)
+$6010-...    op_array (12B × num_ops、最大 ~617 op)
 $????-$7CFF  literals (16B × num_lits、最大 ~48 zval、op_array 直後に memcpy)
 $7D00-$7FFF  CMP_LIT_STAGE (768B、compile 中のみ、zval 一時バッファ)
 ```

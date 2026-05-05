@@ -23,13 +23,14 @@
   0000 ECHO string("HELLO, NES!")
   0001 RETURN int(1)
   ```
-- [ ] `build/ops.bin` の hex dump が [01-rom-format](./01-rom-format.md) の「具体 hex dump 例」と同じ構造になっている:
+- [ ] `build/host.ops.bin` (host-compile path、`make build/hello.host.ops.bin`) の hex dump が [01-rom-format](./01-rom-format.md) の「具体 hex dump 例」と同じ構造になっている:
   - op_array header (先頭 16B): `num_ops=2`, `num_literals=2`, `php_version=8.4`
-  - op[0] (24B): `opcode=0x88 (ZEND_ECHO=136)`, `op1_type=0x01 (CONST)`
-  - op[1] (24B): `opcode=0x3e (ZEND_RETURN=62)`, `op1_type=0x01`
+  - op[0] (12B): `opcode=0x88 (ZEND_ECHO=136)`, `op1_type=0x01 (CONST)` (offset 8-11)
+  - op[1] (12B): `opcode=0x3e (ZEND_RETURN=62)`, `op1_type=0x01`
   - literals[0]: `type=0x06 (IS_STRING)`
   - literals[1]: `type=0x04 (IS_LONG)`, `value=1`
-  - zend_string: `len=11`, `val="HELLO, NES!"`
+  - L3 では zend_string 24B ヘッダ + content、L3S では zval に (offset, length) 直書き
+- 注: **L3S の `.nes` には compiled bytecode は含まれない** (PHP ソースのみ。compiled は起動後 PRG-RAM 上に生成)。検証 1, 5 は `.nes` で確認可能、検証 2-4 は host-compile path を使う必要がある
 
 ### エミュレータでの動作
 
@@ -57,20 +58,21 @@ HELLO, NES!
 
 **意味**: PHP ソースの文字列リテラルが、Zend の `zend_string` 経由で NES ROM の中にそのままバイトとして焼かれている。
 
-### 検証 2: ZEND_ECHO opcode バイト列が見える
+### 検証 2: ZEND_ECHO opcode バイト列が見える (host-compile path のみ)
 
 ```bash
-xxd -g 1 build/hello.nes | grep '88 01 00 00'
+make build/hello.host.ops.bin
+xxd -g 1 build/hello.host.ops.bin | grep '88 01 00 00'
 ```
 
 期待: 1 件以上ヒット。
 
-**意味**: Zend の `ZEND_ECHO` (番号 0x28) と、operand タイプバイト (`op1_type=IS_CONST=0x01`, `op2_type=op1_type+result_type=0x08 0x08`) が連続して ROM に焼かれている。これは Zend の `zend_op` 構造体の末尾 4 バイトと完全一致。
+**意味**: Zend の `ZEND_ECHO` (番号 0x88) と、operand タイプバイト (`op1_type=IS_CONST=0x01`) が ROM 内 op_array に焼かれている (新 12B レイアウトでは offset 8-11 が opcode + 3 byte の type 群)。**L3S の `.nes` 自体には compiled bytecode は含まれない** ので、検証は host-compile path で行う。
 
-### 検証 3: ZEND_RETURN opcode バイト列が見える
+### 検証 3: ZEND_RETURN opcode バイト列が見える (host-compile path のみ)
 
 ```bash
-xxd -g 1 build/hello.nes | grep '3e 01 00 00'
+xxd -g 1 build/hello.host.ops.bin | grep '3e 01 00 00'
 ```
 
 期待: 1 件以上ヒット。

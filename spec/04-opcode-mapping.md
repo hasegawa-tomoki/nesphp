@@ -36,12 +36,12 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 | `ZEND_PRE_DEC` | **35 (0x23)** | ✓ | ✓ (Q3) | `--$x`。op1 を −1 し result に新値 |
 | `ZEND_POST_INC` | **36 (0x24)** | ✓ | ✓ (Q3) | `$x++`。op1 を +1、result に旧値 |
 | `ZEND_POST_DEC` | **37 (0x25)** | ✓ | ✓ (Q3) | `$x--`。op1 を −1、result に旧値 |
-| `ZEND_INIT_ARRAY` | **71 (0x47)** | ✓ | ✓ (U1) | op1 = capacity (raw u16)、result に新 array の TYPE_ARRAY zval。2KB pool ($7000-$77FF) から alloc |
+| `ZEND_INIT_ARRAY` | **71 (0x47)** | ✓ | ✓ (U1) | op1 = capacity (raw u16)、result に新 array の TYPE_ARRAY zval。**ARR_POOL (PRG-RAM bank 1、8KB)** から alloc |
 | `ZEND_ADD_ARRAY_ELEMENT` | **72 (0x48)** | ✓ | ✓ (U1) | op1 = array TMP、op2 = 要素。array の count 位置に 16B zval として append、count++ |
 | `ZEND_FETCH_DIM_R` | **81 (0x51)** | ✓ | ✓ (U1) | op1 = array、op2 = index (IS_LONG)、result = 読取要素を 4B tagged に展開 |
 | `ZEND_COUNT` | **90 (0x5A)** | ✓ | ✓ (U1) | op1 = array、result = IS_LONG(count) |
 | `ZEND_OP_DATA` | **138 (0x8A)** | ✓ | ✓ (V1) | 単独実行は no-op。ASSIGN_DIM 等が value を次 op の op1 から読むための payload |
-| `ZEND_ASSIGN_DIM` | **147 (0x93)** | ✓ | ✓ (V1) | op1 = array、op2 = key (IS_UNUSED で append)。value は次の ZEND_OP_DATA の op1 から取得。VM_PC +48 で 2-op sequence を消費。count = max(count, slot+1) 更新 |
+| `ZEND_ASSIGN_DIM` | **147 (0x93)** | ✓ | ✓ (V1) | op1 = array、op2 = key (IS_UNUSED で append)。value は次の ZEND_OP_DATA の op1 から取得。VM_PC +24 で 2-op sequence を消費 (ZOP_SIZE=12 × 2)。count = max(count, slot+1) 更新 |
 | `ZEND_JMP` | **42 (0x2A)** | ✓ | ✓ (P3) | op1.num (op_index) に無条件分岐 |
 | `ZEND_JMPZ` | **43 (0x2B)** | ✓ | ✓ (P3) | op1 が falsy のとき op2.num に分岐 |
 | `ZEND_JMPNZ` | **44 (0x2C)** | ✓ | — | op1 が truthy のとき op2.num に分岐 |
@@ -143,17 +143,17 @@ SEND_VAL T? ...                 →  ZEND_NOP
 DO_ICALL                        →  NESPHP_FGETS (result スロット継承)
 ```
 
-**`nes_put($x, $y, "X")` / `nes_puts($x, $y, "str")` → `NESPHP_NES_PUT` / `NESPHP_NES_PUTS`**
+**`nes_put($x, $y, "X" | $tile)` / `nes_puts($x, $y, "str")` → `NESPHP_NES_PUT` / `NESPHP_NES_PUTS`**
 ```
 INIT_FCALL_BY_NAME ... "nes_put" →  ZEND_NOP
 SEND_VAR_EX CV0 ... 1            →  ZEND_NOP  (引数を pendingArgs に記録)
 SEND_VAR_EX CV1 ... 2            →  ZEND_NOP
-SEND_VAL_EX string("X") ... 3    →  ZEND_NOP
+SEND_VAL_EX string("X") ... 3    →  ZEND_NOP  (literal でも runtime int でも可)
 DO_FCALL_BY_NAME                 →  NESPHP_NES_PUT
-                                    op1 = $x, op2 = $y, extended_value = char literal
+                                    op1 = $x, op2 = $y, result = char/tile (3 引数 runtime 慣習)
 ```
 
-第 3 引数 (char / string) は **コンパイル時リテラル必須**。非リテラルで呼び出すと serializer がエラー。`nes_puts` は第 3 引数が `TYPE_STRING` リテラルで、VM が `zend_string.len + val[]` を PPUDATA へ流し込む。
+`nes_put` の第 3 引数は **string literal (1 文字) または runtime int (タイル番号) のいずれも可**。handler は `resolve_result` で TYPE_STRING / TYPE_LONG を分岐処理。`nes_puts` は第 3 引数が `TYPE_STRING` literal 必須で、VM が STR_POOL bank 2 から len バイトを PPUDATA に流し込む。
 
 **`nes_sprite_at($idx, $x, $y, $tile)` → `NESPHP_NES_SPRITE`**
 ```
@@ -225,17 +225,17 @@ DO_FCALL_BY_NAME                     →  NESPHP_NES_PALETTE
 INIT_FCALL_BY_NAME 3 "nes_attr"     →  ZEND_NOP
 SEND_VAL_EX int($x) 1              →  ZEND_NOP
 SEND_VAL_EX int($y) 2              →  ZEND_NOP
-SEND_VAL_EX int($pal) 3            →  ZEND_NOP
+SEND_VAL_EX int($pal) 3            →  ZEND_NOP  (literal / runtime いずれも可)
 DO_FCALL_BY_NAME                    →  NESPHP_NES_ATTR
                                        op1 = $x, op2 = $y,
-                                       extended_value = $pal (パレット番号 0-3)
+                                       result = $pal (パレット番号 0-3、3 引数 runtime 慣習)
 ```
 
-引数は全てコンパイル時の整数リテラル必須。x, y は 2×2 タイル (16×16 ピクセル) ブロック単位の座標 (x: 0-15, y: 0-14)。VM は 64B の RAM shadow (ATTR_SHADOW = $0608) を read-modify-write して attribute table に反映する。
+x, y は 2×2 タイル (16×16 ピクセル) ブロック単位の座標 (x: 0-15, y: 0-14)。`$pal` は **runtime int 可** (commit 0670d6a 以降、`nes_putint` / `nes_sprite_at` と同じ "result スロットを 3 番目の入力として再利用" パターン)。tetris.php がピース別パレット動的設定で活用。VM は 64B の RAM shadow (ATTR_SHADOW) を read-modify-write して attribute table に反映する。
 
 ### ジャンプ先のエンコード
 
-opcache dump では jump target は `JMP 0005` / `JMPNZ T4 0002` のように **4 桁の raw op_index** で表示される。serializer はこれを対応する operand フィールド (`op1` for JMP, `op2` for JMPZ/JMPNZ) の下位 2 バイトに uint16 として埋め込み、operand type は `IS_UNUSED` (0x00) にする。VM は `op_index * 24 + OPS_FIRST_OP` で絶対 ROM アドレスに変換して `VM_PC` にセットする。
+opcache dump では jump target は `JMP 0005` / `JMPNZ T4 0002` のように **4 桁の raw op_index** で表示される。serializer はこれを対応する operand フィールド (`op1` for JMP, `op2` for JMPZ/JMPNZ) の 2 バイトに uint16 として埋め込み、operand type は `IS_UNUSED` (0x00) にする。VM は `op_index * ZOP_SIZE + OPS_FIRST_OP` (= idx*12 + $6010) で絶対 ROM アドレスに変換して `VM_PC` にセットする。`jmp_compute_pc` ヘルパーが idx*12 計算を集約。
 
 ### truthy / falsy の判定 (JMPZ/JMPNZ 用)
 
@@ -291,7 +291,7 @@ serializer は opcache ダンプの `CV0($a)` / `T2` / `V1` をそれぞれ `IS_
 | `ZEND_JMPNZ` | OP1 が真なら分岐 |
 | `ZEND_JMPZNZ` | 多分岐 (未対応候補) |
 
-**jmp_offset の解決**: Zend 実行時は `op1.jmp_offset` に `zend_op*` 差分が入っているが、serializer で **NES ROM 内の op index (0-based uint16)** に書き換える。VM はこの index に 24 を掛けて `VM_PC` を `VM_ROMBASE + 16 + index*24` に設定する。
+**jmp_offset の解決**: Zend 実行時は `op1.jmp_offset` に `zend_op*` 差分が入っているが、serializer で **NES ROM 内の op index (0-based uint16)** に書き換える。VM はこの index に `ZOP_SIZE` (=12) を掛けて `VM_PC` を `OPS_BASE + 16 + index*12` に設定する。
 
 ### 変数操作
 

@@ -172,7 +172,7 @@ Offset     Bytes                                             ASCII
                                                              ↓ op_array セクション (PRG-RAM bank 0)
 00006000   02 00 28 00 02 00 00 00 00 00 08 04 00 00 00 00   ..(.............    op_array header
                                                                                   num_ops=2
-                                                                                  literals_off=$0028 (= header 16B + ops 24B)
+                                                                                  literals_off=$0028 (= header 16B + 2 ops × 12B = 40 = $28)
                                                                                   num_literals=2
                                                                                   num_cvs=0, num_tmps=0
                                                                                   php_version=8.4
@@ -234,7 +234,7 @@ bank 2 = STR_POOL、bank 3 = USER_RAM_EXT。詳細は [11-chr-banks](./11-chr-ba
 ## 6. エンディアン / アラインメント
 
 - 全フィールド **little-endian** (6502 に合わせる)
-- パディング: Zend の自然アライメントに従う (24B の `zend_op` は 4B 境界で揃う)
+- パディング: 12B `zend_op` は 4B 境界で揃う
 - zval の 8B union 値は 8B 境界に置くのが望ましいが、6502 はアライメント非対応なので必須ではない
 
 ---

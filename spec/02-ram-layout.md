@@ -210,13 +210,14 @@ iNES 1.0 ヘッダだと 8KB 固定扱いで bank 1-3 が bank 0 にエイリア
 
 ```
 $6000-$600F  header (16 B)
-$6010-...    op_array (24B × 命令数、最大 ~308 op)
+$6010-...    op_array (12B × 命令数、最大 ~617 op)
 ...-$7CFF    literals (op_array の直後に memcpy、~48 zval × 16B)
 $7D00-$7FFF  CMP_LIT_STAGE (768 B、コンパイル中のみ。post-compile は free)
 ```
 
-STR_POOL が bank 2 に移った分、CMP_LIT_STAGE が $7F80 → $8000 に拡張され
-zval 上限が 40 → 48 に増えた。
+zend_op を 24B → 12B に圧縮 (lineno 削除 + 各 znode_op を 4B→2B、spec/01) した
+ことで op 上限が ~308 → ~617 に倍増。tetris.php (op_array 6.1KB) で bank 0
+使用率が 97.8% → 83% まで下がり余裕ができた。
 
 ### bank 1 (ARR_POOL 専用)
 

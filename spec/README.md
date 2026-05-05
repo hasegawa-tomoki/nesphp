@@ -5,7 +5,7 @@
 ## 動作確認バージョン
 
 - **PHP: 8.4.x** (version lock 必須、根拠は [05-toolchain](./05-toolchain.md))
-- **マッパー: MMC1 (mapper 1, SNROM 構成)**、PRG 32KB + CHR 32KB (4KB × 8 bank) + WRAM 8KB、詳細は [11-chr-banks](./11-chr-banks.md)
+- **マッパー: MMC1 (mapper 1, SXROM 相当)**、PRG-ROM 64KB (4 × 16KB) + CHR-RAM 8KB + PRG-RAM 32KB (4 × 8KB)、NES 2.0 ヘッダ、詳細は [11-chr-banks](./11-chr-banks.md)
 - cc65: `brew install cc65`
 - 開発ホスト: macOS (NTS x64 PHP ビルド前提)
 - エミュレータ: fceux (`make run:NAME` で起動、`EMULATOR=` で変更可)
@@ -25,7 +25,7 @@
 | 8 | [08-risks](./08-risks.md) | 主要リスクと緩和策 |
 | 9 | [09-verification](./09-verification.md) | 受け入れ基準とロマン検証 |
 | 10 | [10-devlog](./10-devlog.md) | 各フェーズの設計判断の経緯と躓き (時系列) |
-| 11 | [11-chr-banks](./11-chr-banks.md) | CNROM CHR バンク + PPUCTRL bit 4 による pattern table 切替 |
+| 11 | [11-chr-banks](./11-chr-banks.md) | MMC1 SXROM + CHR-RAM 構成、CHR タイル割当 (フォント / テトリスピース / レンガ壁) |
 | 12 | [12-zend-diff](./12-zend-diff.md) | Zend 原本の構造体 (`zend_op` / `zval` / `zend_string` / `zend_op_array`) と nesphp の改変点 10 項目 |
 | 13 | [13-compiler](./13-compiler.md) | on-NES コンパイラ (L3S: PHP ソースを NES 起動時に 6502 がコンパイル) の単一の真実 |
 

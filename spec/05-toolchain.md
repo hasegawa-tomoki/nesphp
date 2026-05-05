@@ -182,7 +182,7 @@ make clean               # build/ を消す
 
 ### `zend_op` のレイアウト変動
 
-PHP ビルド設定 (ZTS/NTS、32/64 bit、debug/release) によって構造体のパディングや union サイズが変わる。`spec/01-rom-format.md` の 24B 仕様は **NTS x64 PHP 8.4 リリースビルド** を前提にしている。
+PHP ビルド設定 (ZTS/NTS、32/64 bit、debug/release) によって構造体のパディングや union サイズが変わる。`spec/01-rom-format.md` の 12B 圧縮レイアウトはホスト側 `serializer.php` が **NTS x64 PHP 8.4 リリースビルド** の 32B `zend_op` を読んで各 znode_op の lo 2B のみ抽出する前提。
 
 ### 採用: PHP 8.4
 
