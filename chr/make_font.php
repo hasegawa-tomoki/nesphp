@@ -300,6 +300,144 @@ foreach ([
     $customTiles[$tile_idx] = array_merge($bp0, $bp1);
 }
 
+
+// 0x10-0x13: elePHPant スプライト (16x16 = 2x2 タイル、左向き)
+//   sprite palette (nes_palette id 4 で設定) 前提:
+//     色 1 (P) = 紫のボディ, 色 2 (D) = 濃紫の輪郭/瞳, 色 3 (W) = 白 (目/牙)
+//   examples/elephpant.php が使用。
+$elephpant = [
+        "....DDDDD.......",
+        "..DDPPPPPDD.....",
+        ".DPPPPPDDDPPDD..",
+        ".DPPPPDPPPDPPPD.",
+        "DPWWDPDPPPDPPPD.",
+        "DPWDWPDPPPDPPPPD",
+        "DPWWWPDPPPDPPPPD",
+        "DPPPPPPDPPDPPPPD",
+        "DDPPPPPPDDPPPPPD",
+        "DPDWPPPPPPPPPPD.",
+        "DPD.DPPPPPPPPPD.",
+        "DPD.DPPPPPPPPD..",
+        "DPPD.DPPDDPPD...",
+        ".DPD.DPPDDPPD...",
+        ".DD..DPPDDPPD...",
+        ".....DDD..DDD...",
+];
+$eleColor = ['.' => 0, 'P' => 1, 'D' => 2, 'W' => 3];
+foreach ([0x10 => [0, 0], 0x11 => [0, 8], 0x12 => [8, 0], 0x13 => [8, 8]] as $tile_idx => [$r0, $c0]) {
+    $bp0 = [];
+    $bp1 = [];
+    for ($y = 0; $y < 8; $y++) {
+        $b0 = $b1 = 0;
+        for ($x = 0; $x < 8; $x++) {
+            $c = $eleColor[$elephpant[$r0 + $y][$c0 + $x]];
+            $b0 = ($b0 << 1) | ($c & 1);
+            $b1 = ($b1 << 1) | (($c >> 1) & 1);
+        }
+        $bp0[] = $b0;
+        $bp1[] = $b1;
+    }
+    $customTiles[$tile_idx] = array_merge($bp0, $bp1);
+}
+
+// 0x14-0x15: elePHPant 歩行フレームの下半身 (脚を開いたストライド)
+//   上半身は 0x10-0x11 を共用し、移動中に 0x12/0x13 ⇔ 0x14/0x15 を
+//   交互に切り替えて歩行アニメにする。
+$elephpantWalk = $elephpant;
+$elephpantWalk[13] = ".DPDDPPD..DPPD..";
+$elephpantWalk[14] = ".DD.DPPD..DPPD..";
+$elephpantWalk[15] = "....DDD....DDD..";
+foreach ([0x14 => [8, 0], 0x15 => [8, 8]] as $tile_idx => [$r0, $c0]) {
+    $bp0 = [];
+    $bp1 = [];
+    for ($y = 0; $y < 8; $y++) {
+        $b0 = $b1 = 0;
+        for ($x = 0; $x < 8; $x++) {
+            $c = $eleColor[$elephpantWalk[$r0 + $y][$c0 + $x]];
+            $b0 = ($b0 << 1) | ($c & 1);
+            $b1 = ($b1 << 1) | (($c >> 1) & 1);
+        }
+        $bp0[] = $b0;
+        $bp1[] = $b1;
+    }
+    $customTiles[$tile_idx] = array_merge($bp0, $bp1);
+}
+
+// 0x16-0x19: 雲 (16x16 = 2x2 タイル、SMB 風)。palette 0 (色1=白, 色2=グレー陰) 前提。
+// 色 0 = 透過 (universal bg = 空の色が抜ける)
+$cloud = [
+    "......WWWW......",
+    "....WWWWWWWW....",
+    "...WWWWWWWWWW...",
+    "..WWWWWWWWWWWW..",
+    ".WWWWWWWWWWWWWW.",
+    ".WWWWWWWWWWWWWW.",
+    "WWWWWWWWWWWWWWWW",
+    "WWWWWWWWWWWWWWWW",
+    "WWWWWWWWWWWWWWWW",
+    ".SWWWWWWWWWWWWS.",
+    "..SSSS.SSSS.SS..",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+];
+$cloudColor = ['.' => 0, 'W' => 1, 'S' => 2];
+foreach ([0x16 => [0, 0], 0x17 => [0, 8], 0x18 => [8, 0], 0x19 => [8, 8]] as $tile_idx => [$r0, $c0]) {
+    $bp0 = [];
+    $bp1 = [];
+    for ($y = 0; $y < 8; $y++) {
+        $b0 = $b1 = 0;
+        for ($x = 0; $x < 8; $x++) {
+            $c = $cloudColor[$cloud[$r0 + $y][$c0 + $x]];
+            $b0 = ($b0 << 1) | ($c & 1);
+            $b1 = ($b1 << 1) | (($c >> 1) & 1);
+        }
+        $bp0[] = $b0;
+        $bp1[] = $b1;
+    }
+    $customTiles[$tile_idx] = array_merge($bp0, $bp1);
+}
+
+// 0x1A-0x1D: ? ブロック (SMB 風、16x16 = 2x2 タイル)。palette 1 前提:
+//   色 1 (O) = 明橙ボディ, 色 2 (S) = レンガ色の内側シェード, 色 3 (D) = 濃茶
+//   コーナーリベット + 右/下端シェーディング + 中央に ? マーク
+$qblock = [
+    "DDDDDDDDDDDDDDDD",
+    "DOOOOOOOOOOOOOSD",
+    "DODOOOOOOOOOODSD",
+    "DOOOODDDDDDOOOSD",
+    "DOOODDOOODDOOOSD",
+    "DOOOOOOOODDOOOSD",
+    "DOOOOOOODDOOOOSD",
+    "DOOOOOODDOOOOOSD",
+    "DOOOOODDOOOOOOSD",
+    "DOOOOODDOOOOOOSD",
+    "DOOOOOOOOOOOOOSD",
+    "DOOOOODDOOOOOOSD",
+    "DOOOOODDOOOOOOSD",
+    "DODOOOOOOOOOODSD",
+    "DSSSSSSSSSSSSSSD",
+    "DDDDDDDDDDDDDDDD",
+];
+$qColor = ['O' => 1, 'S' => 2, 'D' => 3];
+foreach ([0x1A => [0, 0], 0x1B => [0, 8], 0x1C => [8, 0], 0x1D => [8, 8]] as $tile_idx => [$r0, $c0]) {
+    $bp0 = [];
+    $bp1 = [];
+    for ($y = 0; $y < 8; $y++) {
+        $b0 = $b1 = 0;
+        for ($x = 0; $x < 8; $x++) {
+            $c = $qColor[$qblock[$r0 + $y][$c0 + $x]];
+            $b0 = ($b0 << 1) | ($c & 1);
+            $b1 = ($b1 << 1) | (($c >> 1) & 1);
+        }
+        $bp0[] = $b0;
+        $bp1[] = $b1;
+    }
+    $customTiles[$tile_idx] = array_merge($bp0, $bp1);
+}
+
 // 0x0C: レンガ壁用タイル (palette 0 default colors を使用)
 //   color 2 ($10 medium gray) = ブロック本体
 //   color 3 ($00 dark gray)   = モルタル (継ぎ目)

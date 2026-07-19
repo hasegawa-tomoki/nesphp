@@ -129,7 +129,7 @@ Slot-to-slot copies (`ZEND_ASSIGN` / `ZEND_QM_ASSIGN`) copy all 4 bytes, so the 
 
 ---
 
-## Supported grammar (as of 2026-04-19, M-A' + P1 + P2 + P3 + P4 + Q1-Q4 + R1-R3 implemented)
+## Supported grammar (as of 2026-07-19; M-A' + P1-P4 + Q1-Q4 + R1-R3 + arrays/elseif/cmp-ops/mul-ops implemented)
 
 ```ebnf
 program      ::= "<?php" stmt* EOF
@@ -144,19 +144,26 @@ assign_stmt  ::= CV "=" expr ";"
 inc_stmt     ::= ("++" | "--") CV ";"      (pre-inc/dec as stmt)
 while_stmt   ::= "while" "(" expr ")" body
 if_stmt      ::= "if" "(" expr ")" body
+                 ("elseif" "(" expr ")" body)*
+                 ("else" body)?
 for_stmt     ::= "for" "(" init? ";" cond? ";" update? ")" body
 init         ::= assign_stmt body (without trailing ';' consumption) | inc_stmt | …
 update       ::= expr                       (side-effect: $i++, --$j, etc.)
 body         ::= "{" stmt* "}" | stmt      (single stmt allowed)
 expr         ::= cmp_expr (("&&" | "||") cmp_expr)*
 cmp_expr     ::= add_expr (cmp_op add_expr)?
-cmp_op       ::= "===" | "!==" | "==" | "!=" | "<"
-add_expr     ::= primary (("+" | "-" | "&" | "|" | "<<" | ">>") primary)*
+cmp_op       ::= "===" | "!==" | "==" | "!=" | "<" | "<=" | ">" | ">="
+add_expr     ::= mul_expr (("+" | "-" | "&" | "|" | "<<" | ">>") mul_expr)*
+mul_expr     ::= primary (("*" | "/" | "%") primary)*
+                                            (* / % binds tighter, C/PHP-style;
+                                             / is integer division)
 primary      ::= INT | STRING | CV | "true" | call_expr
+             |   "(" expr ")"               (parenthesized sub-expression)
              |   ("++" | "--") CV           (prefix inc/dec in expr)
              |   CV ("++" | "--")           (postfix inc/dec in expr)
              |   CV ("[" expr "]")+         (chained read, nestable: $a[i][j][k])
-             |   "[" (expr ("," expr)*)? "]"  (array literal, nestable, max 15 elems)
+             |   "[" (expr ("," expr)*)? "]"  (array literal, nestable, max 255 elems
+                                              — INIT_ARRAY capacity is 8-bit)
 call_expr    ::= IDENT "(" args? ")"        (fgets(STDIN) / nes_btn() / count($a) etc.)
 args         ::= arg ("," arg)*
 arg          ::= expr | "STDIN"
@@ -289,7 +296,7 @@ $i = 0; while ($i < 10) { $i = $i + 1; }
 
 ### Code generation for while / if
 
-Backpatch stack (16B in ZP = up to 8 levels of nesting) keeps "PRG-RAM absolute addresses where the op2 field needs filling later". At block end `cmp_bp_pop_patch` writes the current `CMP_OP_COUNT` at that location as a 16-bit value.
+Backpatch stack (16B in ZP = 8 slots; **effective nesting limit is 7** — opening the 8th nested block raises a compile error, verified 2026-07-19) keeps "PRG-RAM absolute addresses where the op2 field needs filling later". At block end `cmp_bp_pop_patch` writes the current `CMP_OP_COUNT` at that location as a 16-bit value.
 
 ```
 while (cond) { body }                if (cond) { body }
@@ -391,11 +398,11 @@ When **slot ≥ 16**, `slot * 16 ≥ 256` and a single byte isn't enough. `vm/ne
 5. **Comments supported** (P4): `//`, `#`, `/* */`. Unclosed block comment → compile error
 6. **Source length cap 16382 bytes** (PRG bank 0 is 16KB minus the 2B header)
 7. **PRG-RAM 32KB (4 × 8KB banks)** is the cap for compile output. Bank 0 (op_array + literal zvals, ~617 op + ~48 zval = 8KB), bank 1 (ARR_POOL 8KB), bank 2 (STR_POOL 8KB; string literals also live in PRG-RAM here), bank 3 (USER_RAM_EXT 8KB)
-8. **CV up to 64 slots**, **TMP up to 64 slots** (reset between statements, reusable), **function args ≤ 4**, **no nested calls** (call expr only `fgets` / `nes_btn` / `nes_rand` / `nes_peek` / `nes_peek16`)
+8. **CV up to 64 slots**, **TMP up to 64 slots** (reset between statements, reusable), **function args ≤ 4**, **no nested calls** (call expr only `fgets` / `nes_btn` / `nes_rand` / `nes_peek` / `nes_peek16` / `nes_peek_ext` / `nes_peek16_ext` / `count`)
 9. **Comparison expressions don't chain** (`$a < $b < $c` is a compile error)
 10. **`!` / unary `-` not supported**, **`^` (BW_XOR) not supported**, **string concat `.` not supported**
 11. **if / while / for body**: either `{ ... }` or a single statement
-12. **Nesting depth**: backpatch stack 8 levels, 6502 HW stack 256B (a `for` consumes 4B per nest), CV table 64 entries
+12. **Nesting depth**: backpatch stack 8 slots but **effective limit 7 nested blocks** (the 8th `{` is a compile error, shown as `ERR L<line> C<col>`), 6502 HW stack 256B (a `for` consumes 4B per nest), CV table 64 entries
 13. **Supported intrinsics** (20 total): `nes_cls` / `nes_put` / `nes_puts` / `nes_putint` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn` / `nes_rand` / `nes_srand` / `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`
 14. **Integer literals**: decimal (`42`), hex (`0xFF` / `0X0A`), binary (`0b1010` / `0B11`). 16-bit signed narrow, no overflow detection
 15. **Bitwise**: `&` (BW_AND) / `|` (BW_OR) / `<<` (SL) / `>>` (SR, arithmetic right = sign-preserving). `^` (BW_XOR) / `~` (BW_NOT) unsupported

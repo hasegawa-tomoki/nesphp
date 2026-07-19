@@ -1,4 +1,6 @@
 <?php
+/** @noinspection SpellCheckingInspection */
+/** @noinspection PhpUndefinedFunctionInspection */
 // Tetris v3: 「テトリスを作る」からのゼロベース実装
 // (tetris.php / tetris2.php とは独立。CHR キャラクタのみ共用)
 //
