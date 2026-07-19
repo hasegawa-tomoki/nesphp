@@ -20,13 +20,13 @@ local num_tmps     = rd16(0x6008)
 
 local first_op   = 0x6010
 local ops_size   = num_ops * 12
-local lits_size  = num_literals * 16
+local lits_size  = num_literals * 4
 local lits_start = 0x6000 + literals_off
 local lits_end   = lits_start + lits_size
 local used_total = lits_end - 0x6000
 
 f:write(string.format("num_ops      = %d (×12 = %d bytes)\n", num_ops, ops_size))
-f:write(string.format("num_literals = %d (×16 = %d bytes)\n", num_literals, lits_size))
+f:write(string.format("num_literals = %d (×4 = %d bytes)\n", num_literals, lits_size))
 f:write(string.format("num_cvs      = %d\n", num_cvs))
 f:write(string.format("num_tmps     = %d\n", num_tmps))
 f:write(string.format("\n"))

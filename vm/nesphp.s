@@ -186,7 +186,7 @@ OPS_FIRST_OP = $6010
 ;   $8002+ ASCII src body (生 PHP ソース、<?php タグ含む)
 ;
 ; 文字列リテラルは PHP ソース内の `"..."` バイト列をそのまま val[] として使う
-; (zend_string 構造体は持たない)。コンパイラは 16B zval の value bytes 0-1 に
+; (zend_string 構造体は持たない)。コンパイラは 4B tagged zval の value bytes 0-1 に
 ; OPS_BASE 相対 16bit offset、bytes 2-3 に length を書く。VM は
 ; `ADC #<OPS_BASE` で復元した ROM アドレスから len バイト読む。
 PHP_SRC_LEN  = $8000
@@ -957,9 +957,10 @@ resolve_op2:
 
 ; ---- resolver 実装: OP1_VAL 行き ----
 
-; cv_addr_y / tmp_addr_y: (VM_PC),Y / (VM_PC),Y+1 の 16bit op.var (slot*16) を
-; /4 して CV/TMP base に加算、TMP0 に絶対スロットアドレスを返す。
-; CV/TMP slot ≥ 16 (= var lo が wrap する) でも正しく動くよう 16bit で計算。
+; cv_addr_y / tmp_addr_y: (VM_PC),Y / (VM_PC),Y+1 の 16bit op.var (slot*4) を
+; そのまま CV/TMP base に加算、TMP0 に絶対スロットアドレスを返す。
+; (operand offset の単位は 4B tagged zval。literal 4B 化に合わせて全 operand
+;  共通で idx*4 になった)
 ; Y は呼び出し時に lo オフセット (0 / 4 / 8)、戻り時に +1 (hi 側)。
 ; A 破壊。callers は Y を必要に応じて再設定すること。
 cv_addr_y:
@@ -968,10 +969,6 @@ cv_addr_y:
     INY
     LDA (VM_PC), Y
     STA TMP0+1
-    LSR TMP0+1
-    ROR TMP0
-    LSR TMP0+1
-    ROR TMP0
     CLC
     LDA TMP0
     ADC VM_CVBASE
@@ -987,10 +984,6 @@ tmp_addr_y:
     INY
     LDA (VM_PC), Y
     STA TMP0+1
-    LSR TMP0+1
-    ROR TMP0
-    LSR TMP0+1
-    ROR TMP0
     CLC
     LDA TMP0
     ADC VM_TMPBASE
@@ -1015,8 +1008,8 @@ res_const:
     LDA VM_LITBASE+1
     ADC TMP0+1
     STA TMP0+1
-    ; TMP0 = 16B zval の ROM アドレス
-    LDY #8                 ; zval.u1.type_info (下位 1B = type)
+    ; TMP0 = 4B tagged zval のアドレス
+    LDY #3                 ; 4B tagged zval の type byte
     LDA (TMP0), Y
     STA OP1_VAL
     LDY #0
@@ -1077,7 +1070,7 @@ res_const_to_op2:
     LDA VM_LITBASE+1
     ADC TMP0+1
     STA TMP0+1
-    LDY #8
+    LDY #3
     LDA (TMP0), Y
     STA OP2_VAL
     LDY #0
@@ -1172,7 +1165,7 @@ res_const_to_result:
     LDA VM_LITBASE+1
     ADC TMP0+1
     STA TMP0+1
-    LDY #8
+    LDY #3
     LDA (TMP0), Y
     STA RESULT_VAL
     LDY #0
@@ -2658,7 +2651,7 @@ handle_nesphp_nes_puts:
     JSR resolve_op1        ; OP1_VAL = x
     JSR resolve_op2        ; OP2_VAL = y
 
-    ; extended_value (offset 12) = zval (16B) のバイトオフセット
+    ; extended_value (offset 12) = zval (4B tagged) のバイトオフセット
     LDY #ZOP_EXT
     LDA (VM_PC), Y
     STA TMP0
@@ -2673,7 +2666,7 @@ handle_nesphp_nes_puts:
     ADC TMP0+1
     STA TMP0+1
     ; TMP0 = zval アドレス
-    LDY #8                 ; u1.type_info
+    LDY #3                 ; type byte
     LDA (TMP0), Y
     CMP #TYPE_STRING
     BNE nps_type_err
@@ -3076,7 +3069,7 @@ handle_nesphp_nes_palette:
     ADC TMP0+1
     STA TMP0+1
     ; zval type check
-    LDY #8
+    LDY #3
     LDA (TMP0), Y
     CMP #TYPE_LONG
     BNE palette_err
@@ -3100,7 +3093,7 @@ handle_nesphp_nes_palette:
     LDA VM_LITBASE+1
     ADC TMP0+1
     STA TMP0+1
-    LDY #8
+    LDY #3
     LDA (TMP0), Y
     CMP #TYPE_LONG
     BNE palette_err
@@ -3368,7 +3361,7 @@ nss_mode_ready:
     ADC TMP0+1
     STA TMP0+1
     ; TMP0 = zval 絶対アドレス
-    LDY #8
+    LDY #3
     LDA (TMP0), Y          ; type
     CMP #TYPE_LONG
     BNE nss_type_err       ; tile は IS_LONG (整数リテラル) 前提

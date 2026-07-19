@@ -201,7 +201,7 @@ The cartridge's 32KB of PRG-RAM is multiplexed into an 8KB window ($6000-$7FFF) 
 ```
 $6000-$600F  header (16 B)
 $6010-...    op_array (12B × num_ops, max ~617 op)
-...-$7CFF    literals (memcpy'd right after op_array, ~48 zval × 16B)
+...-$7CFF    literals (memcpy'd right after op_array, 4B tagged zval each)
 $7D00-$7FFF  CMP_LIT_STAGE (768 B, compile-only — free post-compile)
 ```
 

@@ -128,7 +128,7 @@ LDA VM_LITBASE+1
 ADC TMP0+1
 STA TMP1+1
 
-; Narrow the 16B zval at TMP1 to a 4B tagged value
+; Load the 4B tagged zval at TMP1 (literals are stored as 4B tagged)
 ; (type is the low byte of u1.type_info at offset 8)
 LDY #8
 LDA (TMP1),Y

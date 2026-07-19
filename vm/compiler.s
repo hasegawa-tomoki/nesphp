@@ -4024,14 +4024,12 @@ cmp_op_finish:
     RTS
 
 cmp_lit_idx_to_offset:
+    ; idx (X) → operand byte offset (= idx * 4)。literal / CV / TMP 共通。
+    ; (literal zval 4B 化に伴い *16 → *4)
     TXA
     STA TMP0
     LDA #0
     STA TMP0+1
-    ASL TMP0
-    ROL TMP0+1
-    ASL TMP0
-    ROL TMP0+1
     ASL TMP0
     ROL TMP0+1
     ASL TMP0
@@ -4375,7 +4373,7 @@ cezvs_search:
     LDA CMP_LIT_COUNT+1
     BEQ cezvs_search_done            ; idx == count、見つからず
 cezvs_check:
-    LDY #8
+    LDY #3
     LDA (TMP1), Y
     CMP #TYPE_STRING
     BNE cezvs_skip
@@ -4400,7 +4398,7 @@ cezvs_check:
 cezvs_skip:
     CLC
     LDA TMP1
-    ADC #16
+    ADC #4
     STA TMP1
     BCC :+
     INC TMP1+1
@@ -4421,7 +4419,7 @@ cezvs_search_done:
     STA TMP1
     LDA CMP_LIT_COUNT+1
     STA TMP1+1
-    LDY #15
+    LDY #3
     LDA #0
 cezvs_zero:
     STA (CMP_LIT_HEAD), Y
@@ -4436,12 +4434,12 @@ cezvs_zero:
     INY
     LDA CMP_TOK_LEN
     STA (CMP_LIT_HEAD), Y
-    LDY #8
+    LDY #3
     LDA #TYPE_STRING
     STA (CMP_LIT_HEAD), Y
     CLC
     LDA CMP_LIT_HEAD
-    ADC #16
+    ADC #4
     STA CMP_LIT_HEAD
     BCC :+
     INC CMP_LIT_HEAD+1
@@ -4480,7 +4478,7 @@ cezlv_search:
     BEQ cezlv_emit_new
 cezlv_search_check:
     ; (TMP0).type == TYPE_LONG ?
-    LDY #8
+    LDY #3
     LDA (TMP0), Y
     CMP #TYPE_LONG
     BNE cezlv_skip
@@ -4500,7 +4498,7 @@ cezlv_skip:
     ; 次 zval (16B 進める)
     CLC
     LDA TMP0
-    ADC #16
+    ADC #4
     STA TMP0
     BCC :+
     INC TMP0+1
@@ -4516,7 +4514,7 @@ cezlv_emit_new:
     STA TMP1
     LDA CMP_LIT_COUNT+1
     STA TMP1+1
-    LDY #15
+    LDY #3
     LDA #0
 cezlv_zero:
     STA (CMP_LIT_HEAD), Y
@@ -4528,12 +4526,12 @@ cezlv_zero:
     INY
     LDA CMP_TOK_VALUE+1
     STA (CMP_LIT_HEAD), Y
-    LDY #8
+    LDY #3
     LDA #TYPE_LONG
     STA (CMP_LIT_HEAD), Y
     CLC
     LDA CMP_LIT_HEAD
-    ADC #16
+    ADC #4
     STA CMP_LIT_HEAD
     BCC :+
     INC CMP_LIT_HEAD+1
@@ -4557,18 +4555,18 @@ cmp_emit_zval_true:
     STA TMP1
     LDA CMP_LIT_COUNT+1
     STA TMP1+1
-    LDY #15
+    LDY #3
     LDA #0
 cezvt_zero:
     STA (CMP_LIT_HEAD), Y
     DEY
     BPL cezvt_zero
-    LDY #8
+    LDY #3
     LDA #TYPE_TRUE
     STA (CMP_LIT_HEAD), Y
     CLC
     LDA CMP_LIT_HEAD
-    ADC #16
+    ADC #4
     STA CMP_LIT_HEAD
     BCC :+
     INC CMP_LIT_HEAD+1
@@ -4595,10 +4593,6 @@ cmp_finalize:
     STA TMP2
     LDA CMP_LIT_COUNT+1
     STA TMP2+1
-    ASL TMP2
-    ROL TMP2+1
-    ASL TMP2
-    ROL TMP2+1
     ASL TMP2
     ROL TMP2+1
     ASL TMP2

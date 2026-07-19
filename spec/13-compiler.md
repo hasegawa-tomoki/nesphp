@@ -11,7 +11,7 @@ Adds another row to the fidelity table in [00-overview](./00-overview.md):
 | Level | Description |
 |------|------|
 | L3 | Host-side `serializer.php` bakes NESPHP-compressed `zend_op 12B` (handler/lineno dropped + each znode_op compressed 4B→2B) / Zend-compatible `zval 16B` / `zend_string 24B` into the ROM. The NES VM references field offsets through the `ZOP_*` symbols |
-| **L3S** | **PHP source is burned into the ROM. At boot the 6502 compiler emits `zend_op 12B` / `zval 16B` into PRG-RAM. No `zend_string` struct — the `value` field directly carries (ROM offset, length)** |
+| **L3S** | **PHP source is burned into the ROM. At boot the 6502 compiler emits `zend_op 12B` / 4B tagged zval literals into PRG-RAM (value 3B + type 1B; strings carry (STR_POOL offset 2B, length 1B)). No `zend_string` struct** |
 
 L3S deliberately deviates from L3 in exactly one point: "no `zend_string`". See [12-zend-diff](./12-zend-diff.md) deviation 10.
 
@@ -79,6 +79,12 @@ N's cap is "PRG bank 0 remaining" = 16384 − 2 = 16382 bytes. Anything more is 
 ---
 
 ## nesphp's interpretation of 16B zval (L3S)
+
+> **Note (literal 4B migration):** the 16B layout below now applies to the host
+> serializer (L3) path only. The on-NES compiler emits **4B tagged literals**
+> into PRG-RAM: `[v0, v1, v2, type]` — for IS_STRING, v0-v1 = STR_POOL offset,
+> v2 = length (8-bit, strings ≤ 255 bytes). Operand offsets are literal/CV/TMP
+> index × 4.
 
 `_zval_struct`'s 16B field offsets exactly match [01-rom-format](./01-rom-format.md). Only the **meaning** changes for L3S:
 
