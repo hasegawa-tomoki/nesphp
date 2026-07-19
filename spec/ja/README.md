@@ -25,7 +25,7 @@
 | 8 | [08-risks](./08-risks.md) | 主要リスクと緩和策 |
 | 9 | [09-verification](./09-verification.md) | 受け入れ基準とロマン検証 |
 | 10 | [10-devlog](./10-devlog.md) | 各フェーズの設計判断の経緯と躓き (時系列) |
-| 11 | [11-chr-banks](./11-chr-banks.md) | MMC1 SXROM + CHR-RAM 構成、CHR タイル割当 (フォント / テトリスピース / レンガ壁) |
+| 11 | [11-chr-banks](./11-chr-banks.md) | MMC1 SXROM + CHR-RAM 構成、CHR タイル割当 (フォント / テトリスピース / レンガ壁 / elePHPant など) |
 | 12 | [12-zend-diff](./12-zend-diff.md) | Zend 原本の構造体 (`zend_op` / `zval` / `zend_string` / `zend_op_array`) と nesphp の改変点 10 項目 |
 | 13 | [13-compiler](./13-compiler.md) | on-NES コンパイラ (L3S: PHP ソースを NES 起動時に 6502 がコンパイル) の単一の真実 |
 

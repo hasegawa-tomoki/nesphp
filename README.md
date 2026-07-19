@@ -4,8 +4,8 @@
 
 A PHP VM that ships PHP source straight onto a Famicom (6502) and **lets the NES itself compile and execute it**. Romance over utility.
 
-- **L3S (self-hosted)**: PHP source is burned raw into the ROM. At power-on the 6502 lex/parse/codegen → emits NESPHP-compressed `zend_op 12B` / Zend-compatible `zval 16B` into PRG-RAM → existing VM executes. **This is the only path that produces a `.nes`**
-- **L3 (host-compile) is oracle-only**: `serializer.php` is still alive. `make build/NAME.host.ops.bin` produces a 12B opcode binary (used to cross-check L3S output). There is no Makefile target that bakes it into a `.nes` today; the VM dispatcher remains, so swapping `.incbin` would resurrect that path
+- **L3S (self-hosted)**: PHP source is burned raw into the ROM. At power-on the 6502 lex/parse/codegen → emits NESPHP-compressed `zend_op 12B` / 4B tagged zval literals into PRG-RAM → existing VM executes. **This is the only path that produces a `.nes`**
+- **L3 (host-compile) is oracle-only**: `serializer.php` is still alive. `make build/NAME.host.ops.bin` produces a 12B opcode binary used to cross-check L3S output (op sequence only — its literals are still 16B zvals, which the VM's resolvers no longer read since the 4B tagged zval migration), and no Makefile target bakes it into a `.nes`
 - **Mapper**: MMC1 (mapper 1, SXROM-equivalent) — **PRG-ROM 64KB (4 × 16KB) + CHR-RAM 8KB + PRG-RAM 32KB (4 × 8KB)**, NES 2.0 header
 - **Verified on**: PHP 8.4 (version-locked) + cc65 + fceux/Mesen + real hardware (EverDrive N8 + red-and-white Famicom)
 
@@ -40,7 +40,7 @@ make clean
       │
       ▼  Power on (NES side)
   reset → compile_and_emit (vm/compiler.s)
-        │  lex → parse → emit 12B zend_op / 16B zval
+        │  lex → parse → emit 12B zend_op / 4B tagged zval
         ▼
   op_array assembled in PRG-RAM bank 0 ($6000-$7FFF) → main_loop runs it
 ```
@@ -58,7 +58,7 @@ When you need an L3 (host-compile) oracle, `make build/foo.host.ops.bin` produce
 | Category | Coverage |
 |---|---|
 | Integer literals | Decimal / hex `0x..` / binary `0b..`, narrowed to 16-bit signed (`-32768..32767`) |
-| Arrays | Integer keys only: `$a = [1,2,3]` literal (nested OK: `[[1,2],[3,4]]`), `$a[i]` read (chainable: `$a[i][j]`), `$a[i] = v` write, `$a[] = v` push, `count($a)`. `foreach` / associative arrays unsupported. 2KB pool, **shared-pointer semantics** (`$b = $a; $b[0]=99;` propagates to `$a[0]`) |
+| Arrays | Integer keys only: `$a = [1,2,3]` literal (nested OK: `[[1,2],[3,4]]`), `$a[i]` read (chainable: `$a[i][j]`), `$a[i] = v` write, `$a[] = v` push, `count($a)`. `foreach` / associative arrays unsupported. 8KB pool (PRG-RAM bank 1, 4B tagged zval per element), **shared-pointer semantics** (`$b = $a; $b[0]=99;` propagates to `$a[0]`) |
 | Strings | Double-quoted literals only, no concatenation (`.`). Non-ASCII bytes pass through, supports `\xHH` / `\\` / `\"` escapes. Decoded bytes live in STR_POOL (PRG-RAM bank 2, 8KB) |
 | Variables | CV / TMP / VAR slots, `$a = ...` / `$a = $b + 1` |
 | Arithmetic | `+` / `-` / `*` / `/` / `%` (16-bit signed, divide-by-zero falls back to 0) |
@@ -95,8 +95,8 @@ The on-NES compiler folds named function calls (`INIT_FCALL + SEND_* + DO_*` seq
 | `nes_cls()` | — | Fill nametable 0 ($2000-$23FF) with spaces and reset cursor | 0xF4 |
 | `nes_sprite_at($idx, $x, $y, $tile)` | int, int, int, int literal | Update OAM[$idx] (0-63) y / tile / x (does not touch attr). First call enables rendering + NMI | 0xF2 |
 | `nes_sprite_attr($idx, $attr)` | int, int | Set the attribute byte for OAM[$idx]. bit 0-1=palette / bit 5=priority / bit 6=hflip / bit 7=vflip | 0xFC |
-| `nes_chr_bg($n)` | int literal 0-7 | Switch the BG 4KB CHR bank (MMC1 CHR bank 0, $0000) | 0xF6 |
-| `nes_chr_spr($n)` | int literal 0-7 | Switch the sprite 4KB CHR bank (MMC1 CHR bank 1, $1000) | 0xF5 |
+| `nes_chr_bg($n)` | int literal 0-3 | Copy 4KB CHR set $n from PRG-ROM (CHRDATA) into the BG pattern table (CHR-RAM $0000) | 0xF6 |
+| `nes_chr_spr($n)` | int literal 0-3 | Copy 4KB CHR set $n from PRG-ROM (CHRDATA) into the sprite pattern table (CHR-RAM $1000) | 0xF5 |
 | `nes_bg_color($c)` | int literal 0x00-0x3F | Set the universal background color (PPU $3F00) | 0xF7 |
 | `nes_palette($id, $c1, $c2, $c3)` | 4 int literals | Set palette colors 1-3. id 0-3 = BG, 4-7 = sprite | 0xF8 |
 | `nes_attr($x, $y, $pal)` | int, int, int (runtime OK, clamped to 0-3) | BG attribute table: assign palette index per 2×2 tile (16×16 px) block | 0xF9 |
@@ -109,12 +109,12 @@ The on-NES compiler folds named function calls (`INIT_FCALL + SEND_* + DO_*` seq
 | `nes_peek16($offset)` | int 0-255 | USER_RAM[$offset \| ($offset+1)<<8] → IS_LONG (16-bit LE) | 0xED |
 | `nes_poke($offset, $byte)` | int, int | USER_RAM[$offset] = $byte (low byte only) | 0xEE |
 | `nes_pokestr($offset, $string)` | int, string | Bulk-copy raw string bytes to USER_RAM[$offset..] | 0xEF |
-| `nes_peek_ext($offset)` | int 0-8190 | Read 1 byte from USER_RAM_EXT (PRG-RAM bank 3, 8KB) | 0xE8 |
-| `nes_peek16_ext($offset)` | int 0-8189 | Read 2 LE bytes from USER_RAM_EXT | 0xE9 |
+| `nes_peek_ext($offset)` | int 0-8191 | Read 1 byte from USER_RAM_EXT (PRG-RAM bank 3, 8KB) | 0xE8 |
+| `nes_peek16_ext($offset)` | int 0-8190 | Read 2 LE bytes from USER_RAM_EXT | 0xE9 |
 | `nes_poke_ext($offset, $byte)` | int, int | USER_RAM_EXT[$offset] = byte | 0xEA |
 | `nes_pokestr_ext($offset, $string)` | int, string | Bulk-copy raw string bytes to USER_RAM_EXT (via internal RAM staging) | 0xEB |
 
-USER_RAM ($0700-$07FF, 256B) is a generic byte region in internal RAM, eight times more compact than array zvals (16B per element). USER_RAM_EXT (PRG-RAM bank 3, 8KB) is for larger tables / grids (e.g. the 21×10 cell tile grid in tetris). Details in [`spec/02-ram-layout.md § USER_RAM`](./spec/02-ram-layout.md).
+USER_RAM ($0700-$07FF, 256B) is a generic byte region in internal RAM, four times more compact than array elements (4B tagged zval each, plus a 4B header per array). USER_RAM_EXT (PRG-RAM bank 3, 8KB) is for larger tables / grids (e.g. the locked-cell tile grids in the tetris examples). Details in [`spec/02-ram-layout.md § USER_RAM`](./spec/02-ram-layout.md).
 
 Opcode rationales and folding patterns: [`spec/04-opcode-mapping.md`](./spec/04-opcode-mapping.md). `nes_chr_*` details: [`spec/11-chr-banks.md`](./spec/11-chr-banks.md). Input API usage: [`spec/06-display-io.md`](./spec/06-display-io.md).
 
@@ -169,7 +169,11 @@ Once you enter sprite_mode you cannot leave. Typical pattern: "intro `echo` → 
 | [`examples/random.php`](./examples/random.php) | 8 sprites doing a random walk (LFSR-driven directions) | `nes_rand`, `nes_srand`, array self-reference |
 | [`examples/elsetest.php`](./examples/elsetest.php) | `else` / `elseif` chains, `<=` / `>` / `>=`, parenthesized expressions | Parser extension W3 |
 | [`examples/score.php`](./examples/score.php) | HUD where the score increments by 7 every second while a sprite moves | `nes_putint`, sprite_mode + NMI sync putint |
-| [`examples/tetris.php`](./examples/tetris.php) | Full Tetris: 7 piece types (each colored) + 4 rotations (A=clockwise / B=counter-clockwise) + line clears + score + GAME OVER → restart + brick walls | shape table (28 entries × 16-bit) bulk-loaded into USER_RAM via `nes_pokestr`. Per-cell locked tile numbers stored in USER_RAM_EXT (bank 3). PUSH START locks in the random seed |
+| [`examples/tetris.php`](./examples/tetris.php) | Full Tetris v1 (kept for reference): 7 piece types (each colored) + 4 rotations (A=clockwise / B=counter-clockwise) + line clears + score + GAME OVER → restart + brick walls | shape table (28 entries × 16-bit) bulk-loaded into USER_RAM via `nes_pokestr`. Per-cell locked tile numbers stored in USER_RAM_EXT (bank 3). PUSH START locks in the random seed |
+| [`examples/tetris2.php`](./examples/tetris2.php) | Tetris v2: rewrite of v1 — real spawn-overlap GAME OVER check, cleaner line-clear compaction, unified collision loop, differential redraw of the falling piece | Same USER_RAM / USER_RAM_EXT layout as v1, tile numbers stored directly in ext RAM |
+| [`examples/tetris3.php`](./examples/tetris3.php) | Tetris v3: from-scratch NES-style implementation — 10×20 field + 2 hidden rows, center-pivot rotations, NEXT preview, LINES / LEVEL with speed-up, 40/100/300/1200 scoring, DAS auto-repeat, soft drop | Independent of v1/v2 (shares only the CHR piece tiles) |
+| [`examples/elephpant.php`](./examples/elephpant.php) | Mario-style platformer demo: a 16×16 elePHPant with inertia, variable-height jumps, dash, walk animation, floating blocks | 2×2 sprite assembly, `nes_sprite_attr` h-flip, custom CHR tiles (elePHPant / clouds / ? block), fixed-point physics |
+| [`examples/fontdemo.php`](./examples/fontdemo.php) | Display all font glyphs (uppercase / lowercase / digits / symbols) | Font sampler for the bold arcade-style digits and uppercase |
 | [`examples/peek_test.php`](./examples/peek_test.php) | Smoke test for peek/poke/pokestr | String copy + 1-byte read/write into USER_RAM |
 | [`examples/peekext_test.php`](./examples/peekext_test.php) | Smoke test for peek_ext / poke_ext / pokestr_ext | Bulk copy + read/write into USER_RAM_EXT (bank 3) |
 | [`examples/putint.php`](./examples/putint.php) | 5-char right-justified score display via `nes_putint` | `nes_putint` smoke test |
@@ -194,12 +198,12 @@ Acceptance criteria and `xxd` patterns per example: [`spec/09-verification.md`](
 
 ## Replacing artwork via custom CHR
 
-`chr/font.chr` is 32KB = 4 × 8KB CNROM banks. `chr/make_font.php` generates it; edit that script and re-run `php chr/make_font.php`, then `make` to rebuild.
+`chr/make_font.php` generates `chr/font.chr` (32KB = 4 × 8KB banks); edit that script and re-run `php chr/make_font.php`, then `make` to rebuild. Since the move to CHR-RAM, the ROM bakes only the **first 16KB** into PRG-ROM bank 1 (the `CHRDATA` segment) as four 4KB CHR sets. At boot the first 8KB (sets 0-1) is copied into CHR-RAM; `nes_chr_bg($n)` / `nes_chr_spr($n)` (n = 0-3) re-copy a 4KB set at runtime.
 
 Default contents:
-- **Bank 0 / pattern table 0**: simple 5×7 ASCII font
-- **Bank 0 / pattern table 1**: an inverse copy (use `nes_chr_bg(1)` for outlined text)
-- **Banks 1-3**: copies of bank 0 (intended for swap-in for presentations)
+- **Set 0** (boot-time BG pattern table): ASCII font — 5×7 glyphs, with digits and uppercase as chunky 7×7 arcade-style bold glyphs — plus custom tiles: Japan flag (0x01-0x04), tetromino piece tiles (0x05-0x0B), brick wall (0x0C), elePHPant sprite (0x10-0x15), cloud (0x16-0x19), ? block (0x1A-0x1D)
+- **Set 1** (boot-time sprite pattern table): an inverse copy (use `nes_chr_bg(1)` for outlined text)
+- **Sets 2-3**: copies of sets 0-1 (intended for swap-in for presentations)
 
 Detailed instructions for editing every bank / pattern table: [`spec/11-chr-banks.md`](./spec/11-chr-banks.md).
 

@@ -27,7 +27,7 @@ A PHP VM that runs on the 6502 (Famicom / NES), executing Zend opcodes that the 
 | 8 | [08-risks](./08-risks.md) | Major risks and mitigations |
 | 9 | [09-verification](./09-verification.md) | Acceptance criteria and romance verification |
 | 10 | [10-devlog](./10-devlog.md) | Per-phase design decisions and stumbles (chronological) |
-| 11 | [11-chr-banks](./11-chr-banks.md) | MMC1 SXROM + CHR-RAM, CHR tile assignments (font / Tetris pieces / brick wall) |
+| 11 | [11-chr-banks](./11-chr-banks.md) | MMC1 SXROM + CHR-RAM, CHR tile assignments (font / Tetris pieces / brick wall / elePHPant etc.) |
 | 12 | [12-zend-diff](./12-zend-diff.md) | Zend originals (`zend_op` / `zval` / `zend_string` / `zend_op_array`) and 10 nesphp deviations |
 | 13 | [13-compiler](./13-compiler.md) | On-NES compiler (L3S: PHP source compiled by 6502 at boot) — single source of truth |
 

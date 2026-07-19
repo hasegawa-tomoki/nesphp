@@ -161,7 +161,7 @@ Just OAM DMA + scroll reset. No nametable transfers / general VBlank chores yet.
 
 Unified white-on-black. Both BG and sprites reference the same pattern table (pattern table 0).
 
-`nes_chr_bg($n)` switches the BG-side 4KB CHR bank (0-7) and `nes_chr_spr($n)` switches the sprite-side 4KB CHR bank (0-7) independently (MMC1 4KB CHR banking). PPUCTRL bit 4 = 0 (BG → $0000) / bit 3 = 1 (sprite → $1000) keeps them fully separated. See [11-chr-banks](./11-chr-banks.md).
+`nes_chr_bg($n)` replaces the BG-side pattern table and `nes_chr_spr($n)` the sprite-side one independently, each by bulk-copying a 4KB CHR set (0-3) from PRG-ROM (CHRDATA) into CHR-RAM. PPUCTRL bit 4 = 0 (BG → $0000) / bit 3 = 1 (sprite → $1000) keeps them fully separated. See [11-chr-banks](./11-chr-banks.md).
 
 ```asm
 palette_data:

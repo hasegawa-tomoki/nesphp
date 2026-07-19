@@ -97,7 +97,7 @@ Zend uses 0-209, so we reserve `0xE0-0xFF` as nesphp's territory. They are all g
 
 ### peek/poke (USER_RAM = $0700-$07FF, 256B)
 
-A way to store / fetch byte-grained data without the 16-byte zval overhead. Reuses the post-compile-unused CV symbol table (`$0700-$07FF`) at runtime.
+A way to store / fetch byte-grained data without the per-element tagged-zval overhead (4B each, plus a 4B header per array) or ARR_POOL bank switching. Reuses the post-compile-unused CV symbol table (`$0700-$07FF`) at runtime.
 
 | opcode | Number | Role |
 |---|---|---|
@@ -106,7 +106,7 @@ A way to store / fetch byte-grained data without the 16-byte zval overhead. Reus
 | `NESPHP_NES_POKE` | **0xEE** | `nes_poke($offset, $byte)` → USER_RAM[$offset] = byte (low 1B only). No return value |
 | `NESPHP_NES_POKESTR` | **0xEF** | `nes_pokestr($offset, $string)` → Bulk-copy raw string bytes to USER_RAM[$offset..]. Stops if $offset+len exceeds 256. Reuses the 3-arg intrinsic frame (op1=offset, result slot = string) |
 
-**Example use**: Tetris keeps its 28-rotation shape table as a 56-byte string literal and bulk-loads it via `nes_pokestr(0, $shape_data)` at boot. Runtime restores the 16-bit shape with `nes_peek16($idx*2)` in one op. As an array it would cost 28 × 16 = 448 bytes; in USER_RAM it's just 56 bytes (8× more efficient).
+**Example use**: Tetris keeps its 28-rotation shape table as a 56-byte string literal and bulk-loads it via `nes_pokestr(0, $shape_data)` at boot. Runtime restores the 16-bit shape with `nes_peek16($idx*2)` in one op. As an array it would cost 4 + 28 × 4 = 116 bytes in bank-switched ARR_POOL; in USER_RAM it's just 56 bytes in always-mapped internal RAM (~2× smaller, no bank switch per access).
 
 ### peek/poke_ext (USER_RAM_EXT = PRG-RAM bank 3, 8KB)
 
@@ -184,7 +184,7 @@ DO_FCALL_BY_NAME                    →  NESPHP_NES_CHR_BG
                                        op1 = int literal (IS_CONST)
 ```
 
-The arg must be an integer literal at compile time (4KB bank number 0-7). BG and sprite are switchable independently (4KB CHR banking on MMC1).
+The arg must be an integer literal at compile time (CHR set number 0-3). BG and sprite are switchable independently (each is a 4KB bulk copy from CHRDATA into its own half of CHR-RAM).
 
 **`nes_bg_color($c)` → `NESPHP_NES_BG_COLOR`**
 ```

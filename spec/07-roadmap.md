@@ -43,7 +43,7 @@ Since 2026-04 we've spun up a separate track that **burns PHP source into ROM an
 | W3 | Parser extension: `else` / `elseif` chains, `<=` / `>` / `>=`, parenthesized expressions `(expr)`. Includes a latent bug fix for `cmp_parse_expr` saving/restoring CMP_LHS / CMP_INTRINSIC_ID | `elsetest.nes` `parentest.nes` | ✅ **Done** |
 | W4 | `nes_putint($x, $y, $value)`: 5-char right-justified unsigned int display (HUD score). Goes through the NMI sync queue in sprite_mode | `putint.nes` `score.nes` | ✅ **Done** |
 | W5 | Arithmetic operator extensions `*` / `/` / `%` (signed 16-bit, divide-by-0 falls back to 0). Introduced `parse_mul_expr` for proper precedence. Also fixed the negative-number X-clobber bug in print_int16 | `multest.nes` | ✅ **Done** |
-| W6 | `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`: byte-level data access in USER_RAM ($0700-$07FF, 256B; reuses the post-compile CV table region). Avoids the 16B/entry zval overhead so a 28-rotation Tetris shape table fits in 56 bytes | `peek_test.nes`, `tetris.nes` (Phase 5b) | ✅ **Done** |
+| W6 | `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`: byte-level data access in USER_RAM ($0700-$07FF, 256B; reuses the post-compile CV table region). Avoids the per-element zval overhead (16B at the time; 4B tagged today) so a 28-rotation Tetris shape table fits in 56 bytes | `peek_test.nes`, `tetris.nes` (Phase 5b) | ✅ **Done** |
 | **Tetris Phase 5b** | 7 piece types + 4 rotations + line clears + score + simple game over. **peek/poke + USER_RAM** holds the shape table at low overhead. Fixed several bugs uncovered during compile (16-bit-ize CV/TMP slot resolution / reset TMP_COUNT between statements / op_array bound check / positive mask `& 0x7FFF` for `nes_rand % N`) | `tetris.nes` | ✅ **Done** |
 | W7 | **SXROM-spec compliance** (PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 32KB). The 8KB CHR-RAM is bulk-transferred from PRG_BANK1 at boot (~50 ms); `nes_chr_bg/spr` switched to bulk transfer. ARR_POOL escapes to bank 1, growing 720B → 8KB (11×). New 4 intrinsics `nes_peek_ext / peek16_ext / poke_ext / pokestr_ext` provide 8KB of USER_RAM_EXT (initially bank 2; relocated to bank 3 by W8) | `peekext_test.nes`, `tetris.nes` (Phase 5c) | ✅ **Done** |
 | **Tetris Phase 5c** | Full repaint after line clear (single-loop: clear with `nes_put(' ')` first → overlay only the cells that need `\x05`) and on-screen GAME OVER. The ARR_POOL expansion finally gave op_array enough room | `tetris.nes` | ✅ **Done** |
@@ -209,7 +209,7 @@ Goal: get this running. The serializer resolves `ZEND_JMP`'s `op1.jmp_offset` to
 
 Implementation: see "NMI-synchronous write queue" in [06-display-io](./06-display-io.md). Design history: Phase 3 in [10-devlog](./10-devlog.md). `examples/livetext.php` demos dynamic text drawing while sprites move.
 
-Open issue: `nes_chr_bank` / `nes_chr_bg` still tear (CHR-switch commands will be added to the NMI queue later).
+Open issue (resolved by the CHR-RAM migration): `nes_chr_bg` / `nes_chr_spr` no longer tear — in sprite_mode they use the brief forced-blanking path (~25 ms black flash). Splitting the copy across VBlanks via the NMI queue remains a possible refinement.
 
 ### Stage 3.1: nes_cls in sprite_mode ✅ Done
 

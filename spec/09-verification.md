@@ -12,7 +12,7 @@
 
 ### Build
 
-- [ ] `examples/hello.php` contains `<?php echo "HELLO, NES!";`
+- [ ] `examples/hello.php` contains `<?php echo "HELLO, WORLD!";`
 - [ ] `make` succeeds and produces `build/hello.nes`
 - [ ] No errors during `make`
 
@@ -77,21 +77,24 @@ xxd -g 1 build/hello.host.ops.bin | grep '3e 01 00 00'
 
 Expected: at least one match.
 
-### Verification 4: literals' 16B zval layout is Zend-compatible
+### Verification 4: literals' 16B zval layout is Zend-compatible (host-compile path only)
+
+The 16B zval layout survives only in the host oracle `.host.ops.bin` — the L3S on-NES compiler emits 4B tagged literals into PRG-RAM instead ([13-compiler](./13-compiler.md)).
 
 ```bash
-xxd build/hello.nes | awk '/3f40:/{ print; getline; print }'
+make build/hello.host.ops.bin
+xxd build/hello.host.ops.bin | sed -n '3,5p'
 ```
 
-Expected (approximate):
+Expected (literals_off = 0x28):
 ```
-00003f40: 50 3f 00 00 00 00 00 00 06 00 00 00 00 00 00 00  P?..............
-00003f50: 01 00 00 00 00 00 00 00 04 00 00 00 00 00 00 00  ................
+00000020: 00 00 00 00 3e 01 00 00 48 00 00 00 00 00 00 00  ....>...H.......
+00000030: 06 00 00 00 00 00 00 00 01 00 00 00 00 00 00 00  ................
+00000040: 04 00 00 00 00 00 00 00 00 00 00 00 40 00 00 00  ............@...
 ```
 
-- `06 00 00 00` on the `3f40` line = the low byte of `u1.type_info` is `IS_STRING(6)`
-- `01 00 00 00 00 00 00 00` on the `3f50` line = `value.lval = 1`
-- `04 00 00 00` on the `3f50` line = `IS_LONG(4)`
+- literal 0 starts at 0x28: `48 00 00 00 ...` = `value` (offset 0x48 of the ROM-resident `zend_string`), and `06 00 00 00` at zval offset 8 = the low byte of `u1.type_info` is `IS_STRING(6)`
+- literal 1 starts at 0x38: `01 00 00 00 00 00 00 00` = `value.lval = 1`, `04 00 00 00` = `IS_LONG(4)`
 
 These are **Zend-compatible 16B zval layouts** verbatim.
 
@@ -271,7 +274,7 @@ while (true) {
 
 ### Stage 5D: CHR bank + pattern-table switch (`chrdemo.nes`) ✅
 
-`examples/chrdemo.php`: button presses call `nes_chr_bg(0/1)` and `nes_chr_bank(0/1)` in sequence; the same text shows as normal → inverse → bank-switched.
+`examples/chrdemo.php`: each button press advances a state machine that calls `nes_chr_bg(0/1)` and `nes_chr_spr(0/2)` in sequence; the same text shows as normal → inverse → normal, then the sprite side switches to CHR set 2 and back.
 
 - [x] Build succeeds, ROM size 65552 bytes (16 + 32KB PRG + 32KB CHR)
 - [x] `xxd -g 1 -l 16 build/chrdemo.nes` shows `02 04 30 00` (PRG=2, CHR=4, Flags6=0x30=mapper 3)

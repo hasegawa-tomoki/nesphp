@@ -285,7 +285,7 @@ $i = 0; while ($i < 10) { $i = $i + 1; }
 | `[expr, expr, ...]` | `ZEND_INIT_ARRAY` (op1 = elem count raw, result = new TMP) + `ZEND_ADD_ARRAY_ELEMENT` per element (op1 = array TMP, op2 = element). Result is an IS_ARRAY TMP holding a pool pointer |
 | `$a[idx]` | `ZEND_FETCH_DIM_R` (op1 = CV array, op2 = index, result = new TMP). Pool elements are stored as 4B tagged zvals, read out as-is (16B zvals are literal-only) |
 | `count($a)` | `ZEND_COUNT` (op1 = array, result = new TMP, IS_LONG = element count) |
-| `$a[i] = v;` | `ZEND_ASSIGN_DIM` (op1=CV array, op2=index) + `ZEND_OP_DATA` (op1=value). Handler writes a 16B zval into array[i] across the 2-op set, count = max(count, i+1) |
+| `$a[i] = v;` | `ZEND_ASSIGN_DIM` (op1=CV array, op2=index) + `ZEND_OP_DATA` (op1=value). Handler writes a 4B tagged zval into array[i] across the 2-op set, count = max(count, i+1) |
 | `$a[] = v;` | Same as above but op2_type = IS_UNUSED (append). slot = current count, count++ after the write |
 | `$a[i][j]...` | Chain of `ZEND_FETCH_DIM_R` as needed. Reuse the intermediate TMP as the next op1 |
 | `[[1,2],[3,4]]` | Outer INIT_ARRAY → inner INIT_ARRAY + ADD × 2 → outer ADD → ... (recursive; CMP_ARR_* are saved on the stack) |
@@ -358,8 +358,8 @@ Unused after compile — the VM doesn't touch them.
 ```
 $6000-$600F  header (16B)
 $6010-...    op_array (12B × num_ops, max ~617 op)
-$????-$7CFF  literals (16B × num_lits, max ~48 zval, memcpy'd right after op_array)
-$7D00-$7FFF  CMP_LIT_STAGE (768B, compile-only, temporary zval buffer)
+$????-$7CFF  literals (4B tagged zval × num_lits, memcpy'd right after op_array)
+$7D00-$7FFF  CMP_LIT_STAGE (768B = 4B × up to 192 literals, compile-only staging buffer)
 ```
 
 **Bank 1** ($6000-$7FFF, atomically swapped at array-handler entry/exit): ARR_POOL 8KB
@@ -371,7 +371,7 @@ $7D00-$7FFF  CMP_LIT_STAGE (768B, compile-only, temporary zval buffer)
 - **op_array**: grows from `$6010`. Cap is CMP_LIT_STAGE = $7D00 (op_finish does a 16-bit compare; overflow → compile error)
 - **literals**: cmp_finalize bulk-memcpys CMP_LIT_STAGE zvals to $6010 + ops × 12
 - **STR_POOL** (bank 2): cln_string writes decoded bytes here; the IS_STRING zval value carries an OPS_BASE-relative STR_POOL offset (0..$1FFF). Runtime references it directly (no memcpy). Pool overflow ($8000 reached) → compile error
-- **ARR_POOL** (bank 1): runtime allocates array headers (4B count, capacity) + capacity × 16B zvals append-style. No GC
+- **ARR_POOL** (bank 1): runtime allocates array headers (4B count, capacity) + capacity × 4B tagged zvals append-style. No GC
 
 ### Sharing TMP0/TMP1/TMP2
 
@@ -379,9 +379,9 @@ $7D00-$7FFF  CMP_LIT_STAGE (768B, compile-only, temporary zval buffer)
 
 ### 16-bit slot resolution for CV/TMP
 
-The `op.var` field stores `slot * 16` as 16-bit (Zend convention). The VM's resolver divides by 4 to get the RAM offset (`slot * 4`).
+The `op.var` field stores `slot * 4` as 16-bit — the RAM offset directly, since slots are 4B tagged values. (Until 2026-07-19 it stored `slot * 16` per Zend convention and the resolver divided by 4; the 4B literal migration dropped that shift.)
 
-When **slot ≥ 16**, `slot * 16 ≥ 256` and a single byte isn't enough. `vm/nesphp.s`'s `cv_addr_y` / `tmp_addr_y` helpers read 16 bits from (VM_PC, Y), (VM_PC, Y+1) and divide by 4 in 16-bit. res_cv / res_tmp / wr_cv / wr_tmp / assign_to_cv / incdec_cv_addr all funnel through them.
+With 64 slots, `slot * 4` always fits in one byte, but `vm/nesphp.s`'s `cv_addr_y` / `tmp_addr_y` helpers still read the field as 16-bit from (VM_PC, Y), (VM_PC, Y+1) and add it to the base (harmless holdover from the `slot * 16` era). res_cv / res_tmp / wr_cv / wr_tmp / assign_to_cv / incdec_cv_addr all funnel through them.
 
 ### TMP_COUNT resets between statements
 
@@ -397,13 +397,13 @@ When **slot ≥ 16**, `slot * 16 ≥ 256` and a single byte isn't enough. `vm/ne
 4. **Strings ≤ 255 bytes** (`CMP_TOK_LEN` is 1 byte today). UTF-8 Japanese (1 char = 3B) means up to ~85 chars
 5. **Comments supported** (P4): `//`, `#`, `/* */`. Unclosed block comment → compile error
 6. **Source length cap 16382 bytes** (PRG bank 0 is 16KB minus the 2B header)
-7. **PRG-RAM 32KB (4 × 8KB banks)** is the cap for compile output. Bank 0 (op_array + literal zvals, ~617 op + ~48 zval = 8KB), bank 1 (ARR_POOL 8KB), bank 2 (STR_POOL 8KB; string literals also live in PRG-RAM here), bank 3 (USER_RAM_EXT 8KB)
+7. **PRG-RAM 32KB (4 × 8KB banks)** is the cap for compile output. Bank 0 (op_array ~617 op + literal 4B tagged zvals = 8KB), bank 1 (ARR_POOL 8KB), bank 2 (STR_POOL 8KB; string literals also live in PRG-RAM here), bank 3 (USER_RAM_EXT 8KB)
 8. **CV up to 64 slots**, **TMP up to 64 slots** (reset between statements, reusable), **function args ≤ 4**, **no nested calls** (call expr only `fgets` / `nes_btn` / `nes_rand` / `nes_peek` / `nes_peek16` / `nes_peek_ext` / `nes_peek16_ext` / `count`)
 9. **Comparison expressions don't chain** (`$a < $b < $c` is a compile error)
 10. **`!` / unary `-` not supported**, **`^` (BW_XOR) not supported**, **string concat `.` not supported**
 11. **if / while / for body**: either `{ ... }` or a single statement
 12. **Nesting depth**: backpatch stack 8 slots but **effective limit 7 nested blocks** (the 8th `{` is a compile error, shown as `ERR L<line> C<col>`), 6502 HW stack 256B (a `for` consumes 4B per nest), CV table 64 entries
-13. **Supported intrinsics** (20 total): `nes_cls` / `nes_put` / `nes_puts` / `nes_putint` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn` / `nes_rand` / `nes_srand` / `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr`
+13. **Supported intrinsics** (24 total): `nes_cls` / `nes_put` / `nes_puts` / `nes_putint` / `nes_sprite_at` / `nes_sprite_attr` / `nes_chr_bg` / `nes_chr_spr` / `nes_bg_color` / `nes_palette` / `nes_attr` / `fgets` / `nes_vsync` / `nes_btn` / `nes_rand` / `nes_srand` / `nes_peek` / `nes_peek16` / `nes_poke` / `nes_pokestr` / `nes_peek_ext` / `nes_peek16_ext` / `nes_poke_ext` / `nes_pokestr_ext`
 14. **Integer literals**: decimal (`42`), hex (`0xFF` / `0X0A`), binary (`0b1010` / `0B11`). 16-bit signed narrow, no overflow detection
 15. **Bitwise**: `&` (BW_AND) / `|` (BW_OR) / `<<` (SL) / `>>` (SR, arithmetic right = sign-preserving). `^` (BW_XOR) / `~` (BW_NOT) unsupported
 16. **Logical**: `&&` / `||` short-circuit, result is IS_LONG 0 or 1. `!` (NOT) unsupported

@@ -37,7 +37,7 @@ Zend opcode 番号は PHP バージョンで変動するので、**PHP 8.4 に v
 | `ZEND_POST_INC` | **36 (0x24)** | ✓ | ✓ (Q3) | `$x++`。op1 を +1、result に旧値 |
 | `ZEND_POST_DEC` | **37 (0x25)** | ✓ | ✓ (Q3) | `$x--`。op1 を −1、result に旧値 |
 | `ZEND_INIT_ARRAY` | **71 (0x47)** | ✓ | ✓ (U1) | op1 = capacity (raw u16)、result に新 array の TYPE_ARRAY zval。**ARR_POOL (PRG-RAM bank 1、8KB)** から alloc |
-| `ZEND_ADD_ARRAY_ELEMENT` | **72 (0x48)** | ✓ | ✓ (U1) | op1 = array TMP、op2 = 要素。array の count 位置に 16B zval として append、count++ |
+| `ZEND_ADD_ARRAY_ELEMENT` | **72 (0x48)** | ✓ | ✓ (U1) | op1 = array TMP、op2 = 要素。array の count 位置に 4B tagged zval として append、count++ (pool 要素は 4B、16B zval は literal 専用) |
 | `ZEND_FETCH_DIM_R` | **81 (0x51)** | ✓ | ✓ (U1) | op1 = array、op2 = index (IS_LONG)、result = 読取要素を 4B tagged に展開 |
 | `ZEND_COUNT` | **90 (0x5A)** | ✓ | ✓ (U1) | op1 = array、result = IS_LONG(count) |
 | `ZEND_OP_DATA` | **138 (0x8A)** | ✓ | ✓ (V1) | 単独実行は no-op。ASSIGN_DIM 等が value を次 op の op1 から読むための payload |
@@ -100,7 +100,7 @@ Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領
 
 ### peek/poke (USER_RAM = $0700-$07FF, 256B)
 
-zval (16 byte / entry) のオーバーヘッドを回避してバイト単位でデータを保存・参照する仕組み。
+要素ごとの tagged zval オーバーヘッド (各 4B + 配列ごとの 4B ヘッダ) や ARR_POOL の bank 切替を回避してバイト単位でデータを保存・参照する仕組み。
 コンパイル後に未使用となる CV シンボル表 (`$0700-$07FF`) を runtime で再利用する。
 
 | opcode | 番号 | 役割 |
@@ -110,7 +110,7 @@ zval (16 byte / entry) のオーバーヘッドを回避してバイト単位で
 | `NESPHP_NES_POKE` | **0xEE** | `nes_poke($offset, $byte)` → USER_RAM[$offset] = byte (下位 1B のみ書込)。戻り値なし |
 | `NESPHP_NES_POKESTR` | **0xEF** | `nes_pokestr($offset, $string)` → 文字列の生バイトを USER_RAM[$offset..] に bulk copy。$offset+len が 256 を越えるとそこで停止。3 引数 intrinsic と同じ枠 (op1=offset、result スロット = string) |
 
-**用途例**: Tetris の 28 回転 shape table を 56 byte の string literal で保持し、起動時に `nes_pokestr(0, $shape_data)` で USER_RAM に bulk load。runtime は `nes_peek16($idx*2)` で 16-bit shape を 1 op で復元。配列で持つと 28 × 16 = 448 byte 食うが、USER_RAM なら 56 byte で済む (8 倍効率)。
+**用途例**: Tetris の 28 回転 shape table を 56 byte の string literal で保持し、起動時に `nes_pokestr(0, $shape_data)` で USER_RAM に bulk load。runtime は `nes_peek16($idx*2)` で 16-bit shape を 1 op で復元。配列で持つと bank 切替が必要な ARR_POOL 上で 4 + 28 × 4 = 116 byte 食うが、USER_RAM なら常時マップされた内蔵 RAM 上で 56 byte で済む (約 2 倍小さく、アクセスごとの bank 切替も不要)。
 
 ### peek/poke_ext (USER_RAM_EXT = PRG-RAM bank 3、8KB)
 
@@ -194,7 +194,7 @@ DO_FCALL_BY_NAME                    →  NESPHP_NES_CHR_BG
                                        op1 = int literal (IS_CONST)
 ```
 
-引数はコンパイル時の整数リテラル (4KB bank 番号 0-7) 必須。BG と sprite を独立に切替可能 (MMC1 の 4KB CHR banking)。
+引数はコンパイル時の整数リテラル (CHR set 番号 0-3) 必須。BG と sprite を独立に切替可能 (それぞれ CHRDATA から CHR-RAM の自分側 4KB half への bulk copy)。
 
 **`nes_bg_color($c)` → `NESPHP_NES_BG_COLOR`**
 ```

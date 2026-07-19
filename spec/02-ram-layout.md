@@ -2,14 +2,14 @@
 
 [← README](./README.md) | [← 01-rom-format](./01-rom-format.md) | [→ 03-vm-dispatch](./03-vm-dispatch.md)
 
-The ROM side preserves the Zend-compatible 16B zval ([01-rom-format](./01-rom-format.md)), but **the RAM side narrows it to 4B**. We need this to honor the "2KB RAM, no heap" constraint.
+The L3 host-serializer ROM format preserves the Zend-compatible 16B zval ([01-rom-format](./01-rom-format.md)), but **everything the live VM touches is 4B**: the on-NES compiler (L3S, the default path) emits literals into PRG-RAM already narrowed to 4B tagged, and all RAM slots (stack / CV / TMP / ARR_POOL) hold 4B tagged values. We need this to honor the "2KB RAM, no heap" constraint.
 
 ## Policy
 
-- ROM: Zend-compatible 16B zval (faithful)
-- RAM: 4B tagged value (narrowed; the type ID is still Zend-compatible)
+- ROM (L3 host oracle, `.host.ops.bin`): Zend-compatible 16B zval (faithful)
+- PRG-RAM literals (L3S): 4B tagged zval, layout `[v0, v1, v2, type]` (narrowed at compile time; the type ID is still Zend-compatible)
+- RAM (stack / CV / TMP): 4B tagged value
 - No dynamic allocation. Every slot lives at a fixed offset
-- The VM fetches the 16B zval from ROM, narrows on the spot to 4B tagged, and pushes it on the stack
 
 ## WRAM map ($0000-$07FF, 2KB)
 
@@ -91,7 +91,7 @@ byte 3: payload ext (meaning depends on type, see table below)
 
 **L3S (on-NES compiler path, [13-compiler](./13-compiler.md))**: For IS_STRING, byte 1-2 is the offset to val[] (raw bytes) in ROM. Length lives in byte 3 (255B cap). No `zend_string` struct.
 
-### Narrowing rules
+### Narrowing rules (L3 host-serializer 16B format)
 
 | ROM-side (16B zval) | RAM-side (4B tagged) |
 |---|---|
@@ -103,7 +103,8 @@ byte 3: payload ext (meaning depends on type, see table below)
 
 ### Who narrows?
 
-**The VM-side handlers** (`resolve_op1` / `resolve_op2`) narrow at fetch. The compiler (host serializer or NES compiler) writes Zend-compatible 16B zvals into ROM and never narrows ahead of time. This follows from the L3 policy of "ROM keeps Zend's layout as-is".
+- **L3 host path**: the host serializer writes Zend-compatible 16B zvals into ROM (`.host.ops.bin`) and never narrows ahead of time, following the L3 policy of "ROM keeps Zend's layout as-is".
+- **L3S (current default)**: the on-NES compiler narrows **at compile time** — literals land in PRG-RAM as 4B tagged `[v0, v1, v2, type]` (for IS_STRING: v0-v1 = STR_POOL offset, v2 = length). The VM's `resolve_op1` / `resolve_op2` read them as-is (type at offset 3, see [03-vm-dispatch](./03-vm-dispatch.md)); no fetch-time narrowing remains.
 
 ---
 
@@ -175,7 +176,7 @@ After L3S compile finishes, the CV symbol table is no longer needed, so we reuse
 | Game-state raw byte storage | `nes_poke(64, $byte)` / `$x = nes_peek(64)` |
 | 16-bit tables | `nes_peek16($ofs)` reconstructs a little-endian 2-byte value |
 
-**Why**: arrays (`$a = [...]`) carry 16-byte zval overhead per element, so byte-grained large data (like a 56-byte 28-entry shape table) costs 7× the memory. USER_RAM lets you do byte-level access with zero overhead.
+**Why**: arrays (`$a = [...]`) carry 4-byte tagged-zval overhead per element (plus a 4B header per array), so byte-grained large data (like a 56-byte 28-entry shape table) still costs ~2× the memory and lives behind ARR_POOL bank switching. USER_RAM lets you do byte-level access with zero overhead in always-mapped internal RAM.
 
 Details: [04-opcode-mapping § peek/poke](./04-opcode-mapping.md), [13-compiler](./13-compiler.md).
 

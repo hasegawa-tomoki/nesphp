@@ -72,9 +72,9 @@ Details: [05-toolchain](./05-toolchain.md).
                                               │
                                               ▼ compile_and_emit (6502)
                                               │  - lex <?php echo "..." ;
-                                              │  - emit 12B zend_op / 16B zval
+                                              │  - emit 12B zend_op / 4B tagged zval
                                               │    (no zend_string struct; the zval
-                                              │     directly carries (ROM offset, length))
+                                              │     directly carries (STR_POOL offset, length))
                                               │
                                               ▼ VM main_loop runs it
 ```
@@ -87,10 +87,10 @@ Layers 0-2 collapse into `vm/compiler.s` on the NES side. Why we drop `zend_stri
 |------|------|------|
 | L1 | Translate to a custom nesphp-bc. Opcode numbers, operand encoding, zval — all custom | × (insufficient romance) |
 | **L3** | **Burn `zend_op` into ROM in NESPHP-compressed form (12B: drop handler/lineno + compress each znode_op 4B→2B). Keep literals as Zend-compatible 16B zval. The 6502 VM reads Zend field offsets directly**. The host-side `serializer.php` compiles PHP source into opcodes and bakes them into ROM | **○** (host-compile path) |
-| **L3S** | **Evolution of L3. PHP source goes into ROM raw; the 6502 lex/parse/codegens at boot. The `zend_string` struct is dropped — (ROM offset, length) is embedded directly in the zval**. Details: [13-compiler](./13-compiler.md) | **○** (self-hosted, default of `make build/X.nes`) |
+| **L3S** | **Evolution of L3. PHP source goes into ROM raw; the 6502 lex/parse/codegens at boot, emitting 4B tagged zval literals into PRG-RAM. The `zend_string` struct is dropped — (STR_POOL offset, length) is embedded directly in the zval**. Details: [13-compiler](./13-compiler.md) | **○** (self-hosted, default of `make build/X.nes`) |
 | L4 | L3 + 16B zval lives in RAM, full 64-bit IS_LONG | × (2KB RAM is not enough) |
 
-L3 and L3S **coexist**. The host-side `serializer.php` stays as a verification oracle; `make build/X.host.nes` would build the L3 path. Details: [01-rom-format](./01-rom-format.md), [02-ram-layout](./02-ram-layout.md), [13-compiler](./13-compiler.md).
+L3 and L3S **coexist**. The host-side `serializer.php` stays as a verification oracle (`make build/X.host.ops.bin`); its 16B-literal output is an op-sequence oracle only — since the 4B literal migration the VM's resolvers no longer read the 16B layout, so no Makefile target bakes it into a `.nes`. Details: [01-rom-format](./01-rom-format.md), [02-ram-layout](./02-ram-layout.md), [13-compiler](./13-compiler.md).
 
 ## What we don't do (consciously dropped)
 

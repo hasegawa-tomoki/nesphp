@@ -161,8 +161,9 @@ nmi:
 
 黒背景に白文字で統一。BG / sprite ともに同じパターンテーブル (pattern table 0) のフォントを参照する。
 
-`nes_chr_bg($n)` で BG 用 4KB CHR bank (0-7) を、`nes_chr_spr($n)` で sprite 用
-4KB CHR bank (0-7) を独立に切り替えられる (MMC1 の 4KB CHR banking)。
+`nes_chr_bg($n)` で BG 用パターンテーブルを、`nes_chr_spr($n)` で sprite 用
+パターンテーブルを独立に差し替えられる (それぞれ PRG-ROM (CHRDATA) から
+CHR-RAM へ 4KB CHR set (0-3) を bulk copy)。
 PPUCTRL bit 4 = 0 (BG → $0000) / bit 3 = 1 (sprite → $1000) により両者が完全
 に分離している。詳細は [11-chr-banks](./11-chr-banks.md)。
 

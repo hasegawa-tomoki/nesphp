@@ -230,8 +230,8 @@ numbers at runtime (the compile-error path uses `CMP_LINE` separately).
 A debug-only lineno is dropped under **ROM size constraints**.
 
 **Reason (znode_op 4B → 2B compression)**: the VM only reads the low 2B in practice:
-- `constant`: literals are at most ~48 zvals × 16B = 768B → 12 bits suffice
-- `var`: slot number × 16, max 64 slots → 1024 = 11 bits
+- `constant`: the literal area tops out well under 4KB (host L3: ~48 zvals × 16B; L3S: up to 192 × 4B tagged) → 12 bits suffice
+- `var`: slot number × 4 (was × 16 before the 4B migration), max 64 slots → 256 = 8 bits
 - `jmp_offset`: op_index, max ~617 ops → 10 bits
 
 To overcome the situation where tetris.php's op_array filled 97.8% of PRG-RAM
@@ -257,9 +257,10 @@ call has been precomputed".
 op → multiplier/divider routines of hundreds of ROM bytes. With 16-bit,
 ADD/SUB runs in 6-8 instructions.
 
-The physical zval layout is **kept at 16B**; nesphp only reads the low 2 bytes
-of the `value` union. The remaining 6 bytes stay in ROM but the VM ignores
-them (they're "padding for Zend compatibility").
+In the host L3 format the physical zval layout is **kept at 16B**; nesphp only
+reads the low 2 bytes of the `value` union, and the remaining bytes are
+"padding for Zend compatibility". (In L3S the compiler drops that padding
+entirely — literals live in PRG-RAM as 4B tagged, see Modification 8.)
 
 ## Modification 3: `IS_DOUBLE` / `IS_ARRAY` / `IS_OBJECT` are unsupported
 
@@ -352,11 +353,14 @@ byte 1-2: low 16 bits of payload (IS_LONG value or zend_string ROM offset)
 byte 3: extra (unused)
 ```
 
-The VM's `resolve_op1` / `resolve_op2` routines act as a translation layer
-that reads from the Zend-laid-out ROM and normalizes to the 4B form. As a
-result:
+Since the 4B literal migration (2026-07-19), the L3S on-NES compiler also
+stores **literals** in PRG-RAM pre-narrowed to 4B tagged (`[v0, v1, v2, type]`
+— type at offset 3), and `resolve_op1` / `resolve_op2` read that layout
+directly. The fetch-time "read 16B, narrow to 4B" translation now exists only
+conceptually for the L3 host format. As a result:
 
-- **ROM (ops.bin)**: stays in Zend's 16B zval layout
+- **Host oracle (`.host.ops.bin`)**: stays in Zend's 16B zval layout
+- **PRG-RAM literals (L3S)**: 4B tagged zval
 - **RAM (`$0400`-`$05FF`)**: nesphp's own 4B tagged value
 
 The duality of "look at ROM and you see Zend; look at RAM and you see nesphp".
@@ -411,7 +415,7 @@ Concrete effects of the omission:
 | ROM use | PHP source + 24B header × num strings + duplicated body | PHP source only |
 | VM `echo_string` | Navigates zend_string header (LDY #16 / ADC #24) | Reads 4B tagged directly (simpler) |
 | L3 fidelity | Full | Partial deviation (no zend_string) |
-| zval 16B layout | Preserved | Preserved (only the **meaning** of the value union changes) |
+| zval 16B layout | Preserved | Replaced by 4B tagged literals (since 2026-07-19; earlier L3S kept 16B with changed **meaning** of the value union) |
 
 The 4B tagged value (RAM) also changes: byte 3 is unused under L3 but in L3S
 **carries the length when type is IS_STRING** (see [02-ram-layout](./02-ram-layout.md)).
@@ -422,6 +426,11 @@ L3S. Whether L3 (host path) can read the same binary requires a
 serializer-side change to write length into bytes 2-3 of the 16B zval (the
 host path's maintenance policy is undecided; we'll align
 [13-compiler](./13-compiler.md) and `serializer.php` upon completing M-E).
+The 4B literal migration (2026-07-19) widened the gap further: the VM's
+resolvers now expect 4B tagged literals (type at offset 3), so executing the
+host path's 16B-literal binary would additionally require the serializer to
+emit 4B literals, or a resolver-side compatibility shim. `.host.ops.bin`
+today is an **op-sequence oracle only**, not a VM-loadable image.
 
 The single source of truth for this spec is [13-compiler](./13-compiler.md);
 see there for byte-level detail.
@@ -434,7 +443,7 @@ see there for byte-level detail.
 |---|---|---|---|
 | `zend_op` size | 32B | 12B | handler / lineno dropped + each znode_op compressed 4B → 2B. **Zend offset compatibility was abandoned** (see Mod 1) |
 | Each `zend_op` field meaning | as is | as is | ✅ byte-for-byte |
-| `zval` size | 16B | 16B | ✅ |
+| `zval` size | 16B | L3 `.host.ops.bin`: 16B / L3S PRG-RAM literals: 4B tagged | ✅ (L3) / ❌ (L3S) |
 | `zval.value` interpretation | 8-byte union | low 2 bytes only | low used, upper zero-padded |
 | `IS_LONG` precision | 64-bit | 16-bit narrow | meaning shrunk |
 | `IS_DOUBLE` / `IS_ARRAY` / `IS_OBJECT` | supported | compile error | dropped |
@@ -450,8 +459,9 @@ In the end, the **core** of nesphp's claim to Zend compatibility is:
 
 1. The **12B `zend_op` structure** (handler/lineno dropped + each znode_op compressed
    4B→2B) sits in ROM with the same field order/offsets as Zend
-2. The 16B `zval` layout is preserved (with degraded usage of the contents)
-3. The 24B `zend_string` header layout is preserved
+2. The 16B `zval` layout is preserved in the host L3 oracle (with degraded
+   usage of the contents; the live L3S path narrows literals to 4B tagged)
+3. The 24B `zend_string` header layout is preserved (host L3 only; L3S omits it)
 4. Opcode numbers (`0x88 = ZEND_ECHO`, etc.) match PHP 8.4
 
 Thanks to those four points:

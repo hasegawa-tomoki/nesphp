@@ -1,4 +1,4 @@
-# 11. CHR bank switching (CNROM + PPUCTRL)
+# 11. CHR switching (CHR-RAM bulk copy + PPUCTRL)
 
 [← README](./README.md) | [← 10-devlog](./10-devlog.md)
 
@@ -10,12 +10,14 @@ more practical: "I want each slide to be flashy with a different tile set."
 
 | Level | Means | Granularity | Switch cost | Implementation |
 |---|---|---|---|---|
-| **(A)** | `PPUCTRL` bit 4 | Selects between two pattern tables in the same bank | 1 instruction (STA $2000) | `NESPHP_NES_CHR_BG` |
-| **(B)** | CNROM bank register | Switches between four 8KB CHR banks | 1 instruction (bus-conflict-safe STA) | `NESPHP_NES_CHR_BANK` |
+| **(A)** | `PPUCTRL` bits 3/4 (fixed at reset) | BG fetches from PPU $0000, sprites from $1000 — two independent pattern tables | 0 (static configuration) | reset code |
+| **(B)** | 4KB bulk copy from PRG-ROM (`CHRDATA`) into CHR-RAM | Replaces the BG or sprite pattern table with one of four 4KB CHR sets | ~25 ms transfer (brief black flash in sprite_mode) | `NESPHP_NES_CHR_BG` / `NESPHP_NES_CHR_SPR` (`chr_bulk_transfer`) |
 
-Combining both gives **up to 4 × 2 = 8 pattern tables**. All of them are static
-(burned into ROM), so to swap content per slide, prepare CHR data under `chr/`
-and rebuild via `make_font.php`.
+The source data is static (four 4KB CHR sets burned into PRG-ROM bank 1), so to
+swap content per slide, prepare CHR data under `chr/` and rebuild via
+`make_font.php`. Because the PPU side is CHR-**RAM**, "switching" means copying
+— there is no CHR bank register anymore (the CNROM / CHR-ROM eras are history,
+see the evolution table below).
 
 ## Mapper: MMC1 (mapper 1, SXROM-equivalent + CHR-RAM)
 
@@ -47,40 +49,24 @@ The single source of truth is `vm/nesphp.s` `.segment "HEADER"` and `vm/nesphp.c
 
 ### CHR layout
 
-In MMC1's 4KB CHR banking mode, 32KB CHR-ROM is addressed as eight 4KB banks.
-The physical layout of font.chr (8KB × 4) is unchanged, but **mapping to PPU
-is now in 4KB units**:
+`chr/make_font.php` still generates a 32KB `font.chr` (4 × 8KB), but the ROM
+bakes only its **first 16KB** into PRG-ROM bank 1 (the `CHRDATA` segment,
+`.incbin "chr/font.chr", 0, $4000` in `vm/nesphp.s`), addressed as **four 4KB
+CHR sets**:
 
 ```
-CHR-ROM (32KB) = 8 × 4KB banks
-├── 4KB bank 0: normal font (old CNROM bank 0 PT0)
-├── 4KB bank 1: inverse font (old CNROM bank 0 PT1)
-├── 4KB bank 2: normal font (old CNROM bank 1 PT0)
-├── 4KB bank 3: inverse font (old CNROM bank 1 PT1)
-├── 4KB banks 4-5: (old CNROM bank 2)
-└── 4KB banks 6-7: (old CNROM bank 3)
+CHRDATA (PRG-ROM bank 1, 16KB) = 4 × 4KB CHR sets
+├── set 0: normal font + custom tiles (old font.chr bank 0 PT0)
+├── set 1: inverse font               (old font.chr bank 0 PT1)
+├── set 2: copy of set 0              (old font.chr bank 1 PT0)
+└── set 3: copy of set 1              (old font.chr bank 1 PT1)
+   (font.chr's second 16KB — old banks 2-3 — is not baked into the ROM)
 ```
 
-Two MMC1 CHR registers map them into PPU space:
-- **CHR bank 0 register ($A000)** → which 4KB bank lands at PPU $0000-$0FFF
-- **CHR bank 1 register ($C000)** → which 4KB bank lands at PPU $1000-$1FFF
-
-### Backward compatibility
-
-`nes_chr_bank($n)` keeps the same API as the CNROM era. Internally it sets
-**CHR bank 0 = N×2 and CHR bank 1 = N×2+1** simultaneously (equivalent to old
-8KB bank N):
-
-```asm
-; Internal behavior of nes_chr_bank(1)
-LDA #2           ; 1 * 2
-MMC1_WRITE $A000  ; CHR bank 0 = 4KB bank 2
-LDA #3           ; 1 * 2 + 1
-MMC1_WRITE $C000  ; CHR bank 1 = 4KB bank 3
-```
-
-`chr/make_font.php` produces it. To put unique tiles per bank, edit the
-`$banks` array and re-run `php chr/make_font.php`.
+At boot, the reset code copies the first 8KB (sets 0-1) into CHR-RAM: set 0 →
+PPU $0000 (BG pattern table), set 1 → PPU $1000 (sprite pattern table).
+`nes_chr_bg($n)` / `nes_chr_spr($n)` re-copy any 4KB set at runtime via the
+shared `chr_bulk_transfer` subroutine.
 
 ### MMC1 serial write protocol
 
@@ -106,75 +92,69 @@ Four address ranges select which register:
 | Address | Register | Purpose |
 |---|---|---|
 | $8000-$9FFF | Control | mirroring, PRG bank mode, CHR bank mode |
-| $A000-$BFFF | CHR bank 0 | 4KB bank number for PPU $0000-$0FFF |
-| $C000-$DFFF | CHR bank 1 | 4KB bank number for PPU $1000-$1FFF |
+| $A000-$BFFF | CHR bank 0 | **repurposed on SXROM + CHR-RAM**: bits 2-3 = PRG-RAM bank select ($6000-$7FFF window, see [02-ram-layout](./02-ram-layout.md)) |
+| $C000-$DFFF | CHR bank 1 | unused under CHR-RAM (8KB CHR-RAM is not banked) |
 | $E000-$FFFF | PRG bank | 16KB bank number for $8000-$BFFF + WRAM enable |
 
 Unlike CNROM, no bus conflicts occur (MMC1 has its own dedicated shift register IC).
 
-## `NESPHP_NES_CHR_BG` (0xF6): switch BG 4KB CHR bank
+## `NESPHP_NES_CHR_BG` (0xF6): replace the BG 4KB CHR set
 
 ### Call
 
 ```php
-nes_chr_bg(0);  // BG → 4KB bank 0 (normal font)
-nes_chr_bg(1);  // BG → 4KB bank 1 (inverse font)
-nes_chr_bg(2);  // BG → 4KB bank 2 (custom)
-// ... up to 7 (32KB / 4KB = 8 banks)
+nes_chr_bg(0);  // BG → CHR set 0 (normal font + custom tiles)
+nes_chr_bg(1);  // BG → CHR set 1 (inverse font)
+// ... up to 3 (CHRDATA 16KB / 4KB = 4 sets)
 ```
 
-The argument is a compile-time integer literal (0-7).
+The argument is a compile-time integer literal (0-3; clamped with `AND #$03`).
 
 ### VM implementation
 
-Serial 5-bit write to the MMC1 CHR bank 0 register ($A000):
+Calls `chr_bulk_transfer` with PPU destination hi byte $00:
 
-```asm
-LDA OP1_VAL+1
-AND #$07
-MMC1_WRITE $A000
-```
+1. In sprite_mode: disable NMI + rendering OFF (brief forced blanking, same
+   pattern as `nes_cls`; ~25 ms ≈ 1.5 frames of black flash). In
+   forced_blanking mode the copy happens directly with no visual side effect
+2. Switch PRG bank to 1 (`CHRDATA` mapped at $8000-$BFFF)
+3. Copy 4KB from `$8000 + set × $1000` to PPU $0000-$0FFF via PPUDATA
+4. Restore PRG bank 0; in sprite_mode: wait for VBlank, re-run OAM DMA,
+   rendering back ON
 
-The selected bank is mapped to PPU $0000-$0FFF. PPUCTRL bit 4 = 0 (set at
-reset), so BG fetches its tiles from there. **Sprites at $1000 are completely
-unaffected**.
+PPUCTRL bit 4 = 0 (set at reset), so BG fetches its tiles from $0000.
+**The sprite pattern table at $1000 is untouched**.
 
-## `NESPHP_NES_CHR_SPR` (0xF5): switch sprite 4KB CHR bank
+## `NESPHP_NES_CHR_SPR` (0xF5): replace the sprite 4KB CHR set
 
 ### Call
 
 ```php
-nes_chr_spr(0);  // sprite → 4KB bank 0 (normal font)
-nes_chr_spr(4);  // sprite → 4KB bank 4 (custom)
+nes_chr_spr(0);  // sprite → CHR set 0 (normal font + custom tiles)
+nes_chr_spr(2);  // sprite → CHR set 2 (custom)
 ```
 
-The argument is a compile-time integer literal (0-7).
+The argument is a compile-time integer literal (0-3).
 
 ### VM implementation
 
-Serial 5-bit write to the MMC1 CHR bank 1 register ($C000):
-
-```asm
-LDA OP1_VAL+1
-AND #$07
-MMC1_WRITE $C000
-```
-
-The selected bank is mapped to PPU $1000-$1FFF. PPUCTRL bit 3 = 1 (set at
-reset), so sprites fetch from there. **BG at $0000 is completely unaffected**.
+Same `chr_bulk_transfer`, PPU destination hi byte $10 → copies the selected
+set to PPU $1000-$1FFF. PPUCTRL bit 3 = 1 (set at reset), so sprites fetch
+from there. **The BG pattern table at $0000 is untouched**.
 
 ### BG / sprite separation via PPUCTRL
 
 `PPUCTRL = %00001000` is set at reset:
-- bit 4 = 0: BG uses PPU $0000-$0FFF (= controlled by CHR bank 0 register)
-- bit 3 = 1: sprite uses PPU $1000-$1FFF (= controlled by CHR bank 1 register)
+- bit 4 = 0: BG uses PPU $0000-$0FFF (= the region `nes_chr_bg` overwrites)
+- bit 3 = 1: sprite uses PPU $1000-$1FFF (= the region `nes_chr_spr` overwrites)
 
 This setup lets `nes_chr_bg` and `nes_chr_spr` operate **fully independently**,
 structurally eliminating the CNROM-era issue of "bank switching corrupts
 sprites".
 
-The default state has CHR bank 0 = CHR bank 1 = 0 (both pointing at 4KB bank 0
-= the normal font), so **the visual is identical to before**.
+The boot-time state (set 0 = normal font at $0000, set 1 = inverse font at
+$1000) reproduces the original 8KB PT0/PT1 layout of `font.chr` bank 0, so
+**the visual is identical to before the CHR-RAM migration**.
 
 ### Serializer folding (same pattern for both)
 
@@ -193,30 +173,30 @@ DO_FCALL_BY_NAME                     →  NESPHP_NES_CHR_BG
 ### Pattern 1: switch BG to inverse (sprite stays)
 
 ```php
-nes_chr_bg(1);  // BG → 4KB bank 1 (inverse font)
+nes_chr_bg(1);  // BG → CHR set 1 (inverse font)
 nes_puts(4, 4, "HIGHLIGHTED");
-nes_chr_bg(0);  // BG → 4KB bank 0 (back to normal)
+nes_chr_bg(0);  // BG → CHR set 0 (back to normal)
 nes_puts(4, 6, "NORMAL TEXT");
-// Sprite watches $1000 (CHR bank 1 register), so unaffected
+// Sprite watches $1000, which nes_chr_bg never touches
 ```
 
 ### Pattern 2: switch BG and sprite independently
 
 ```php
-// BG uses decorative font bank, sprite is pinned to normal font bank
-nes_chr_bg(2);    // BG → 4KB bank 2 (custom font)
-nes_chr_spr(0);   // sprite → 4KB bank 0 (normal font)
+// BG uses decorative font set, sprite is pinned to normal font set
+nes_chr_bg(2);    // BG → CHR set 2 (custom font)
+nes_chr_spr(0);   // sprite → CHR set 0 (normal font)
 // → Only BG redesigned; sprite continues displaying 'X' stably
 ```
 
 ### Pattern 3: slide transition
 
 ```php
-nes_chr_bg(4);   // BG → title font (4KB bank 4)
+nes_chr_bg(2);   // BG → title font (CHR set 2)
 nes_cls();
 nes_puts(4, 4, "SLIDE TITLE");
 $k = fgets(STDIN);
-nes_chr_bg(0);   // BG → body font (4KB bank 0)
+nes_chr_bg(0);   // BG → body font (CHR set 0)
 nes_cls();
 nes_puts(4, 4, "BODY CONTENT");
 ```
@@ -235,7 +215,9 @@ make                           # incremental rebuild (CHR change propagates to a
 ```
 
 The Makefile lists `chr/font.chr` as a dependency, so regenerating it relinks
-all existing examples with the new CHR.
+all existing examples with the new CHR. Remember that only the **first 16KB**
+of the generated 32KB reaches the ROM (`CHRDATA` = 4 sets of 4KB) — editing
+font.chr's banks 2-3 has no effect on the build.
 
 ### Tile byte layout (recap)
 
@@ -333,10 +315,14 @@ a 2×2 arrangement.
 |---|---|
 | 0x00 | blank (default nametable value, safer not to use) |
 | 0x01-0x04 | Japanese flag (`examples/color.php`) |
-| **0x05-0x0B** | Tetris piece tiles × 7 (I/O/T/S/Z/L/J, `examples/tetris.php`) |
-| **0x0C** | Tetris brick wall (`examples/tetris.php`) |
-| 0x0D-0x1F | Available for custom tiles (19 tiles) |
-| 0x20-0x7E | ASCII font (auto-generated by make_font.php) |
+| **0x05-0x0B** | Tetris piece tiles × 7 (I/O/T/S/Z/L/J, `examples/tetris.php` / `tetris2.php` / `tetris3.php`) |
+| **0x0C** | Brick wall (Tetris walls, `elephpant.php` ground) |
+| **0x10-0x13** | elePHPant sprite 16×16 = 2×2 tiles, standing (`examples/elephpant.php`) |
+| **0x14-0x15** | elePHPant walk-frame lower body (stride) |
+| **0x16-0x19** | Cloud 16×16 = 2×2 tiles (SMB-style) |
+| **0x1A-0x1D** | ? block 16×16 = 2×2 tiles (SMB-style) |
+| 0x0D-0x0F, 0x1E-0x1F | Available for custom tiles (5 tiles) |
+| 0x20-0x7E | ASCII font (auto-generated by make_font.php; digits and uppercase use chunky 7×7 arcade-style bold glyphs, the rest 5×7) |
 | 0x7F | DEL (unused, available for custom) |
 | 0x80-0xFF | Pattern table 1 side (unused, available for custom) |
 
@@ -386,7 +372,9 @@ $bank1 = build_bank($fontDecorative);
 $banks = [0 => $bank0, 1 => $bank1, 2 => $bank0, 3 => $bank0];
 ```
 
-From PHP, `nes_chr_bank(1)` switches to the decorative font.
+`$banks[0]` PT0/PT1 become CHR sets 0/1, `$banks[1]` PT0/PT1 become sets 2/3
+(banks 2-3 never reach the ROM). With the layout above, `nes_chr_bg(2)`
+switches BG to the decorative font's PT0.
 
 ### Example 2: Place logos or graphic tiles at custom tile numbers
 
@@ -438,23 +426,25 @@ To set color 2 to a different color (e.g. `$0F, $30, $26, $00`), edit
 
 ### Size limits
 
-CNROM totaled **32KB CHR-ROM** (4 × 8KB). Beyond that, mapper promotion (GxROM
-/ UxROM + CHR-RAM, etc.) becomes necessary. Future CHR-RAM support would let
-us inject tiles from PRG at runtime.
+`CHRDATA` occupies all of PRG-ROM bank 1 = **16KB = 4 CHR sets**. Holding more
+sets would require spending another PRG bank (bank 2 is currently spare) or
+compressing tile data. Since the PPU side is CHR-RAM, injecting or generating
+tiles from PRG at runtime is structurally possible — only the copy-loop
+intrinsics exist today.
 
 ## Limitations
 
 | Limit | Reason | Mitigation |
 |---|---|---|
-| `nes_chr_bank` / `nes_chr_bg` tears during sprite_mode | Writes apply immediately and aren't VBlank-synced | Add CHR switch commands to the Phase 3 NMI queue (future) |
+| `nes_chr_bg` / `nes_chr_spr` cause a ~25 ms black flash in sprite_mode | A 4KB PPUDATA transfer doesn't fit in VBlank, so the brief forced-blanking path (NMI off → copy → rendering on) is used | Split the copy across multiple VBlanks via the NMI queue (future) |
 | No mid-frame switching | No scanline IRQ (MMC1 has no timer) | Promote to MMC3 |
-| Sprite pattern table is outside `nes_chr_bg`'s scope | The intrinsic that touches bit 3 isn't implemented | Add `nes_chr_spr($n)` |
-| Banks 1-3 default to a copy of bank 0 | That's how `chr/make_font.php` builds it | Edit `$banks` and regenerate |
-| No runtime tile-data changes | CHR-**ROM** is unwriteable | Switch to a CHR-RAM configuration |
+| Only 4 CHR sets | CHRDATA = PRG-ROM bank 1 (16KB) only | Use PRG bank 2 (spare) for more CHRDATA |
+| Sets 2-3 default to copies of sets 0-1 | That's how `chr/make_font.php` builds it | Edit `$banks` and regenerate |
+| No per-tile runtime writes | No intrinsic exposes PPUDATA-level tile writes (CHR-RAM itself is writable) | Add a `nes_chr_poke`-style intrinsic (future) |
 
 ## Related documents
 
 - [01-rom-format](./01-rom-format.md) — iNES header, PRG / CHR capacities
-- [04-opcode-mapping](./04-opcode-mapping.md) — `NESPHP_NES_CHR_BANK` / `NESPHP_NES_CHR_BG` numbers
+- [04-opcode-mapping](./04-opcode-mapping.md) — `NESPHP_NES_CHR_BG` / `NESPHP_NES_CHR_SPR` numbers
 - [06-display-io](./06-display-io.md) — Meaning of every PPUCTRL bit, palette
 - [10-devlog](./10-devlog.md) — Phase 5D design history

@@ -128,9 +128,9 @@ LDA VM_LITBASE+1
 ADC TMP0+1
 STA TMP1+1
 
-; TMP1 が指す 16B zval から 4B tagged に narrow
-; (type は u1.type_info の下位 1B = オフセット 8)
-LDY #8
+; TMP1 が指す 4B tagged zval をロード (literal は 4B tagged で格納済み)
+; (レイアウト: [v0, v1, v2, type] — type はオフセット 3)
+LDY #3
 LDA (TMP1),Y
 STA OP1_VAL              ; type ID を OP1_VAL のオフセット 0 に
 ; IS_LONG/IS_STRING の場合は value の下位 2B を payload lo/hi に

@@ -72,9 +72,9 @@
                                               │
                                               ▼ compile_and_emit (6502)
                                               │  - lex <?php echo "..." ;
-                                              │  - emit 12B zend_op / 16B zval
+                                              │  - emit 12B zend_op / 4B tagged zval
                                               │    (zend_string は使わず zval に
-                                              │     ROM offset + length を直接埋め込む)
+                                              │     STR_POOL offset + length を直接埋め込む)
                                               │
                                               ▼ VM main_loop で実行
 ```
@@ -87,10 +87,10 @@
 |------|------|------|
 | L1 | 独自 nesphp-bc に翻訳。opcode 番号・operand 符号化・zval 全て独自 | × (ロマン不足) |
 | **L3** | **Zend の `zend_op` を NESPHP 圧縮形 (12B、handler/lineno 削除 + 各 znode_op を 4B→2B 圧縮) で ROM に焼く。literals は Zend 互換 16B zval のまま、6502 VM が Zend のフィールドオフセットを直読み**。PHP ソースはホスト側 `serializer.php` が opcode にコンパイルして ROM に焼く | **○** (host-compile 経路) |
-| **L3S** | **L3 の発展。PHP ソースを ROM に生で焼き、NES 起動時に 6502 自身が lex/parse/codegen。zend_string 構造体は省略し、zval に (ROM offset, length) を直接埋め込む**。詳細は [13-compiler](./13-compiler.md) | **○** (self-hosted 経路、`make build/X.nes` がデフォルト) |
+| **L3S** | **L3 の発展。PHP ソースを ROM に生で焼き、NES 起動時に 6502 自身が lex/parse/codegen し、4B tagged zval の literal を PRG-RAM に emit する。zend_string 構造体は省略し、zval に (STR_POOL offset, length) を直接埋め込む**。詳細は [13-compiler](./13-compiler.md) | **○** (self-hosted 経路、`make build/X.nes` がデフォルト) |
 | L4 | L3 + zval 16B もそのまま RAM、IS_LONG 64bit 完全再現 | × (2KB RAM 不足) |
 
-L3 と L3S は**並存**。ホスト側 `serializer.php` は検証オラクルとして残置し、`make build/X.host.nes` で L3 経路のビルドも可能。詳細は [01-rom-format](./01-rom-format.md) と [02-ram-layout](./02-ram-layout.md) と [13-compiler](./13-compiler.md)。
+L3 と L3S は**並存**。ホスト側 `serializer.php` は検証オラクル (`make build/X.host.ops.bin`) として残置。その 16B literal 出力は op 列オラクル専用 — 4B literal 移行以降、VM の resolver は 16B レイアウトを読まなくなったため、これを `.nes` に焼く Makefile ターゲットは存在しない。詳細は [01-rom-format](./01-rom-format.md) と [02-ram-layout](./02-ram-layout.md) と [13-compiler](./13-compiler.md)。
 
 ## やらないこと (明示的に諦めるもの)
 
