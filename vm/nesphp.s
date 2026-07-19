@@ -213,7 +213,7 @@ STR_POOL_END     = $8000          ; bank 2 末尾 (= 8KB)
 
 ; Array runtime プール: PRG-RAM bank 1 ($6000-$7FFF when bank 1 mapped) を専有。
 ; 全 8KB が ARR_POOL に使える (旧 720B → 11x 拡大、tetris 等でメモリ圧改善)。
-; 各配列は header 4B (count, capacity) + 要素 (capacity × 16B zval)。
+; 各配列は header 4B (count, capacity) + 要素 (capacity × 4B tagged zval)。
 ; ARR_POOL_HEAD は init_array_pool で ARR_POOL_BASE にセットされ、追記型で成長、
 ; ARR_POOL_END に達したら err_screen。
 ;
@@ -4070,28 +4070,27 @@ epn_wait:
 ; =============================================================================
 ; ZEND_INIT_ARRAY / ZEND_ADD_ARRAY_ELEMENT / ZEND_FETCH_DIM_R / ZEND_COUNT
 ;
-; 配列は ARR_POOL_BASE ($7000) から ARR_POOL_END ($7800) の 2KB pool に追記型で
-; allocate。各配列の layout:
+; 配列は ARR_POOL_BASE-ARR_POOL_END (bank 1、8KB) の pool に追記型で allocate。
+; 各配列の layout:
 ;   offset 0-1: count (u16、現在の要素数)
 ;   offset 2-3: capacity (u16、確保済みスロット数)
-;   offset 4+:  capacity × 16 bytes (zval 配列)
+;   offset 4+:  capacity × 4 bytes (4B tagged zval: [v0, v1, v2, type])
+; 要素は VM 内部の 4B tagged 形式そのまま (16B zend zval は literal 専用)。
 ; 配列 zval (4B tagged) は [TYPE_ARRAY, ptr_lo, ptr_hi, 0]。
 ; pool 枯渇で handle_unimpl へジャンプ。GC 無しで追記のみ。
 ; =============================================================================
 
 ; handle_zend_init_array: op1 = capacity (raw u16, IS_UNUSED type)。
 ; 新配列を alloc し、count=0/cap=capacity で初期化、RESULT に TYPE_ARRAY + pool
-; 内 ptr を返す。MVP: cap < 16 を想定。
+; 内 ptr を返す。cap は 8bit (op1 lo) を想定。
 handle_zend_init_array:
     LDY #0
     LDA (VM_PC), Y             ; op1 lo = cap (bank 0、op_array 読出)
     STA TMP0
-    ; needed = 4 + cap*16
+    ; needed = 4 + cap*4
     LDA TMP0
     ASL A
-    ASL A
-    ASL A
-    ASL A                      ; A = (cap*16) & $FF
+    ASL A                      ; A = (cap*4) & $FF
     CLC
     ADC #4
     STA TMP1                   ; needed lo
@@ -4102,7 +4101,9 @@ handle_zend_init_array:
     LSR A
     LSR A
     LSR A
-    LSR A                      ; A = cap >> 4 (cap*16 の上位 byte)
+    LSR A
+    LSR A
+    LSR A                      ; A = cap >> 6 (cap*4 の上位 byte)
     CLC
     ADC TMP1+1
     STA TMP1+1
@@ -4160,7 +4161,7 @@ ia_have_space:
     JMP advance
 
 ; handle_zend_add_array_element: op1 = array、op2 = element。
-; array->count 番目に element の 16B zval を書き込み、count++。
+; array->count 番目に element の 4B tagged zval を書き込み、count++。
 handle_zend_add_array_element:
     JSR resolve_op1            ; bank 0: array zval を OP1_VAL に展開
     JSR resolve_op2            ; bank 0: element zval を OP2_VAL に展開
@@ -4169,7 +4170,7 @@ handle_zend_add_array_element:
     LDA OP1_VAL+2
     STA TMP0+1                 ; TMP0 = array ptr (bank 1 view address)
 
-    ; --- bank 1 へ切替: ARR_POOL の count 読み + 16B zval 書き + count++ ---
+    ; --- bank 1 へ切替: ARR_POOL の count 読み + 4B zval 書き + count++ ---
     PRG_RAM_BANK1
 
     ; count を 16-bit で読む (count_lo, count_hi)
@@ -4179,16 +4180,16 @@ handle_zend_add_array_element:
     INY
     LDA (TMP0), Y
     STA TMP1+1                 ; count_hi
-    ; (count * 16) を 16-bit で計算 (count_hi:count_lo を 4 回左シフト)
+    ; (count * 4) を 16-bit で計算 (count_hi:count_lo を 2 回左シフト)
     LDA TMP1                   ; restore A = count_lo
-    LDX #4
-aae_mul16:
+    LDX #2
+aae_mul4:
     ASL A
     ROL TMP1+1
     DEX
-    BNE aae_mul16
-    STA TMP1                   ; TMP1 = (count*16) & $FFFF
-    ; dest = TMP0 + 4 + count*16
+    BNE aae_mul4
+    STA TMP1                   ; TMP1 = (count*4) & $FFFF
+    ; dest = TMP0 + 4 + count*4
     CLC
     LDA TMP0
     ADC #4
@@ -4203,7 +4204,7 @@ aae_mul16:
     LDA TMP2+1
     ADC TMP1+1
     STA TMP2+1                 ; dest hi
-    ; 16B zval を書く (4B tagged -> 16B zval)
+    ; 4B tagged zval を書く [v0, v1, v2, type]
     LDY #0
     LDA OP2_VAL+1
     STA (TMP2), Y
@@ -4214,21 +4215,8 @@ aae_mul16:
     LDA OP2_VAL+3
     STA (TMP2), Y
     INY
-    LDA #0
-aae_zero1:
-    STA (TMP2), Y
-    INY
-    CPY #8
-    BNE aae_zero1
     LDA OP2_VAL                ; type
     STA (TMP2), Y
-    INY
-    LDA #0
-aae_zero2:
-    STA (TMP2), Y
-    INY
-    CPY #16
-    BNE aae_zero2
     ; count++
     LDY #0
     LDA (TMP0), Y
@@ -4247,7 +4235,7 @@ aae_done:
     JMP advance
 
 ; handle_zend_fetch_dim_r: op1 = array、op2 = index (IS_LONG)。
-; array[index] の 16B zval を RESULT (4B tagged) に展開。
+; array[index] の 4B tagged zval を RESULT に展開。
 handle_zend_fetch_dim_r:
     JSR resolve_op1            ; bank 0: array zval
     JSR resolve_op2            ; bank 0: index zval
@@ -4255,20 +4243,20 @@ handle_zend_fetch_dim_r:
     STA TMP0
     LDA OP1_VAL+2
     STA TMP0+1
-    ; index*16 を 16-bit で計算 (TMP2 = index*16、ZP のみ、bank 不問)
+    ; index*4 を 16-bit で計算 (TMP2 = index*4、ZP のみ、bank 不問)
     LDA OP2_VAL+1
     STA TMP2                   ; index_lo
     LDA OP2_VAL+2
     STA TMP2+1                 ; index_hi
     LDA TMP2
-    LDX #4
-fdr_mul16:
+    LDX #2
+fdr_mul4:
     ASL A
     ROL TMP2+1
     DEX
-    BNE fdr_mul16
-    STA TMP2                   ; TMP2 = index*16
-    ; src = base + 4 + index*16 → TMP1
+    BNE fdr_mul4
+    STA TMP2                   ; TMP2 = index*4
+    ; src = base + 4 + index*4 → TMP1
     CLC
     LDA TMP0
     ADC #4
@@ -4284,9 +4272,9 @@ fdr_mul16:
     ADC TMP2+1
     STA TMP1+1
 
-    ; --- bank 1 へ切替: ARR_POOL から zval 読出 ---
+    ; --- bank 1 へ切替: ARR_POOL から 4B tagged zval 読出 ---
     PRG_RAM_BANK1
-    ; zval[0..2] → RESULT_VAL+1..+3
+    ; [v0, v1, v2] → RESULT_VAL+1..+3、[type] → RESULT_VAL
     LDY #0
     LDA (TMP1), Y
     STA RESULT_VAL+1
@@ -4296,7 +4284,7 @@ fdr_mul16:
     INY
     LDA (TMP1), Y
     STA RESULT_VAL+3
-    LDY #8
+    INY
     LDA (TMP1), Y
     STA RESULT_VAL
     PRG_RAM_BANK0
@@ -4389,15 +4377,18 @@ asd_slot_ready:
     PHA
     LDA TMP0
     PHA
-    ; dest = TMP0 + 4 + slot*16 (16-bit、N >= 16 でも正しく動く)
     LDA TMP1
-    LDX #4
-asd_mul16:
+    PHA                            ; slot lo も退避 (末尾の count 更新で使う。
+                                   ; TMP1 は下の mul で slot*4 に化けるため)
+    ; dest = TMP0 + 4 + slot*4 (16-bit、slot が大きくても正しく動く)
+    LDA TMP1
+    LDX #2
+asd_mul4:
     ASL A
     ROL TMP1+1
     DEX
-    BNE asd_mul16
-    STA TMP1                       ; TMP1 = slot*16 (16-bit)
+    BNE asd_mul4
+    STA TMP1                       ; TMP1 = slot*4 (16-bit)
     CLC
     LDA TMP0
     ADC #4
@@ -4422,10 +4413,10 @@ asd_mul16:
 :
     JSR resolve_op1                ; bank 0: OP1_VAL = value (TMP0 clobber される)
 
-    ; --- bank 1 へ切替: 16B zval 書込 + count 更新 (連続して bank 1 で実行) ---
+    ; --- bank 1 へ切替: 4B zval 書込 + count 更新 (連続して bank 1 で実行) ---
     PRG_RAM_BANK1
 
-    ; 16B zval を (TMP2) に書込
+    ; 4B tagged zval を (TMP2) に書込 [v0, v1, v2, type]
     LDY #0
     LDA OP1_VAL+1
     STA (TMP2), Y
@@ -4436,22 +4427,13 @@ asd_mul16:
     LDA OP1_VAL+3
     STA (TMP2), Y
     INY
-    LDA #0
-asd_zero1:
-    STA (TMP2), Y
-    INY
-    CPY #8
-    BNE asd_zero1
     LDA OP1_VAL                    ; type
     STA (TMP2), Y
-    INY
-    LDA #0
-asd_zero2:
-    STA (TMP2), Y
-    INY
-    CPY #16
-    BNE asd_zero2
-    ; array ptr を stack から復元して count 更新 (PLA/STA は bank 不問)
+    ; slot lo と array ptr を stack から復元して count 更新 (PLA/STA は bank 不問)
+    ; (旧実装は mul で潰れた後の TMP1 = slot*16 の下位バイトを slot と誤用して
+    ;  count を破壊していた)
+    PLA
+    STA TMP1                       ; slot lo
     PLA
     STA TMP0
     PLA

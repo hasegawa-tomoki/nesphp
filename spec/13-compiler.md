@@ -270,7 +270,7 @@ $i = 0; while ($i < 10) { $i = $i + 1; }
 | `nes_btn();` standalone | `NESPHP_NES_BTN` (0 args, result_type = IS_UNUSED, side-effect = read_controller) |
 | `nes_btn()` (expr) | `NESPHP_NES_BTN` result = TMP (IS_LONG = buttons bitmask). Caller checks bits with `$b & mask` |
 | `[expr, expr, ...]` | `ZEND_INIT_ARRAY` (op1 = elem count raw, result = new TMP) + `ZEND_ADD_ARRAY_ELEMENT` per element (op1 = array TMP, op2 = element). Result is an IS_ARRAY TMP holding a pool pointer |
-| `$a[idx]` | `ZEND_FETCH_DIM_R` (op1 = CV array, op2 = index, result = new TMP). Narrows the 16B element zval to 4B tagged |
+| `$a[idx]` | `ZEND_FETCH_DIM_R` (op1 = CV array, op2 = index, result = new TMP). Pool elements are stored as 4B tagged zvals, read out as-is (16B zvals are literal-only) |
 | `count($a)` | `ZEND_COUNT` (op1 = array, result = new TMP, IS_LONG = element count) |
 | `$a[i] = v;` | `ZEND_ASSIGN_DIM` (op1=CV array, op2=index) + `ZEND_OP_DATA` (op1=value). Handler writes a 16B zval into array[i] across the 2-op set, count = max(count, i+1) |
 | `$a[] = v;` | Same as above but op2_type = IS_UNUSED (append). slot = current count, count++ after the write |
