@@ -150,14 +150,13 @@ while ($game_over === 0) {
     if ($b & 0x04)    { $dy = 1; }
 
     if ($dx | $dy | $rot_d) {
-        // 旧位置消去 (3 フェーズ前にまとめて)
-        $i = 0;
-        while ($i < 16) {
-            if (($shape >> $i) & 1) {
-                nes_put($px + ($i & 3), $py + ($i >> 2), " ");
-            }
-            $i = $i + 1;
-        }
+        // 移動前の状態を保存。衝突判定は $grid ビットマスクだけを見るので
+        // 画面はまだ触らない (消去→判定→再描画だと判定の数フレーム間
+        // ピースが消えてちらつく)。描画は判定が全部終わってから差分だけ行う。
+        $old_shape = $shape;
+        $old_px = $px;
+        $old_py = $py;
+        $moved = 0;
 
         // Phase 0: 回転 (現在位置で形だけ変える、collide なら無視)
         if ($rot_d) {
@@ -181,6 +180,7 @@ while ($game_over === 0) {
             if ($collide === 0) {
                 $rot = $new_rot;
                 $shape = $new_shape;
+                $moved = 1;
             }
         }
 
@@ -203,6 +203,7 @@ while ($game_over === 0) {
             }
             if ($collide === 0) {
                 $px = $new_px;
+                $moved = 1;
             }
         }
 
@@ -226,16 +227,44 @@ while ($game_over === 0) {
             }
             if ($collide === 0) {
                 $py = $new_py;
+                $moved = 1;
             } else {
                 $locked = 1;
             }
         }
 
-        // 現在位置にピースを描画 (move でも lock 直前でも同じ)
+        // 差分描画: 新位置を先に描いてから、新位置と重ならない旧セルだけ消す。
+        // どの瞬間もピースが画面から完全に消えないので、erase→draw が別々の
+        // VBlank に流れてもちらつかない。重なりセルは同一タイルなので触らない。
+        // 注: if ($moved) で囲むとネストが 8 段になり compiler の backpatch
+        // stack (7 段) を超えるので、$i = 16 でループをスキップする方式。
         $i = 0;
+        if ($moved === 0) { $i = 16; }
         while ($i < 16) {
             if (($shape >> $i) & 1) {
                 nes_put($px + ($i & 3), $py + ($i >> 2), $tile);
+            }
+            $i = $i + 1;
+        }
+        $i = 0;
+        if ($moved === 0) { $i = 16; }
+        while ($i < 16) {
+            if (($old_shape >> $i) & 1) {
+                $cx = $old_px + ($i & 3);
+                $cy = $old_py + ($i >> 2);
+                // 新ピースのローカル座標 (+4 オフセットで負数を回避)
+                $lx = $cx + 4 - $px;
+                $ly = $cy + 4 - $py;
+                $keep = 0;
+                if ($lx >= 4 && $lx < 8) {
+                    if ($ly >= 4 && $ly < 8) {
+                        $j = $ly * 4 + $lx - 20;
+                        $keep = ($shape >> $j) & 1;
+                    }
+                }
+                if ($keep === 0) {
+                    nes_put($cx, $cy, " ");
+                }
             }
             $i = $i + 1;
         }

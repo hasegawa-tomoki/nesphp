@@ -387,7 +387,9 @@ cas_dim_after_index:
     LDY #ZOP_OP2_TYPE
     STA (CMP_OP_HEAD), Y
     PLA
-    LDY #5
+    LDY #ZOP_OP2+1         ; op2 hi (旧: #5 = result フィールドに誤書込。
+                           ; IS_CONST でリテラル offset >= 256 (= literal idx 16
+                           ; 以上) のとき index が別リテラルに化けるバグだった)
     STA (CMP_OP_HEAD), Y
     PLA
     LDY #ZOP_OP2
