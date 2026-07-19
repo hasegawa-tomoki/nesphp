@@ -129,8 +129,8 @@ ADC TMP0+1
 STA TMP1+1
 
 ; Load the 4B tagged zval at TMP1 (literals are stored as 4B tagged)
-; (type is the low byte of u1.type_info at offset 8)
-LDY #8
+; (layout: [v0, v1, v2, type] — type is at offset 3)
+LDY #3
 LDA (TMP1),Y
 STA OP1_VAL              ; type ID into OP1_VAL byte 0
 ; For IS_LONG/IS_STRING, copy the low 2B of value to payload lo/hi
