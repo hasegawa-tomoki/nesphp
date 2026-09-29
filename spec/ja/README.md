@@ -28,6 +28,7 @@
 | 11 | [11-chr-banks](./11-chr-banks.md) | MMC1 SXROM + CHR-RAM 構成、CHR タイル割当 (フォント / テトリスピース / レンガ壁 / elePHPant など) |
 | 12 | [12-zend-diff](./12-zend-diff.md) | Zend 原本の構造体 (`zend_op` / `zval` / `zend_string` / `zend_op_array`) と nesphp の改変点 10 項目 |
 | 13 | [13-compiler](./13-compiler.md) | on-NES コンパイラ (L3S: PHP ソースを NES 起動時に 6502 がコンパイル) の単一の真実 |
+| 14 | [14-map-scroll](./14-map-scroll.md) | スクロールするマップ (`nes_scroll` / `nes_map_rect`)、PRG-ROM bank 2 のゲームデータ (`nes_rom_copy`)、グリフ動的読み込みによる日本語メッセージ (`nes_chr_copy`)、NMI 駆動の滑らかなカメラ (`nes_cam_move`)、128KB ROM と RUNTIME bank、NMI flush 予算、マップエディタ、op 数の実測 |
 
 ## 最短読み方
 

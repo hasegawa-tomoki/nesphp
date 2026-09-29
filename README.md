@@ -6,7 +6,7 @@ A PHP VM that ships PHP source straight onto a Famicom (6502) and **lets the NES
 
 - **L3S (self-hosted)**: PHP source is burned raw into the ROM. At power-on the 6502 lex/parse/codegen → emits NESPHP-compressed `zend_op 12B` / 4B tagged zval literals into PRG-RAM → existing VM executes. **This is the only path that produces a `.nes`**
 - **L3 (host-compile) is oracle-only**: `serializer.php` is still alive. `make build/NAME.host.ops.bin` produces a 12B opcode binary used to cross-check L3S output (op sequence only — its literals are still 16B zvals, which the VM's resolvers no longer read since the 4B tagged zval migration), and no Makefile target bakes it into a `.nes`
-- **Mapper**: MMC1 (mapper 1, SXROM-equivalent) — **PRG-ROM 64KB (4 × 16KB) + CHR-RAM 8KB + PRG-RAM 32KB (4 × 8KB)**, NES 2.0 header
+- **Mapper**: MMC1 (mapper 1, SXROM-equivalent) — **PRG-ROM 128KB (8 × 16KB) + CHR-RAM 8KB + PRG-RAM 32KB (4 × 8KB)**, NES 2.0 header
 - **Verified on**: PHP 8.4 (version-locked) + cc65 + fceux/Mesen + real hardware (EverDrive N8 + red-and-white Famicom)
 
 Detailed design lives under [`spec/`](./spec/) (TOC: [`spec/README.md`](./spec/README.md)). The romance is that **knowledge of PHP syntax exists only on the NES side**.

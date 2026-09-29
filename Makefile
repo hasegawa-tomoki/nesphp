@@ -50,6 +50,9 @@ $(BUILD_DIR)/%.src.bin: examples/%.php $(PACK_SRC) | $(BUILD_DIR)
 	@echo "[make] (1) pack      $< → $@"
 	@$(PHP) $(PACK_SRC) $< $@
 
+# require で取り込む生成データ (map-edit/index.html が出力) への追加依存
+$(BUILD_DIR)/town.src.bin: examples/town_map.php
+
 # --- オラクル用 (host-compile path): NAME.host.ops.bin ---
 # 正解データ生成 + 検証に使う。本線ビルド (NAME.nes) には含まれない。
 $(BUILD_DIR)/%.ops.txt: examples/%.php | $(BUILD_DIR)
@@ -63,11 +66,18 @@ $(BUILD_DIR)/%.host.ops.bin: $(BUILD_DIR)/%.ops.txt $(SERIALIZER)
 	@echo "[make] oracle serialize $< → $@"
 	@$(PHP) $(SERIALIZER) $< $@
 
+# --- (1b) ゲームデータ: examples/NAME.data.bin (map-edit が出力) があれば使う、無ければ空 ---
+# PRG-ROM bank 2 (GAMEDATA segment) に焼かれ、nes_rom_copy / nes_chr_copy で読む。
+.SECONDEXPANSION:
+$(BUILD_DIR)/%.data.bin: $$(wildcard examples/$$*.data.bin) | $(BUILD_DIR)
+	@if [ -f examples/$*.data.bin ]; then cp examples/$*.data.bin $@; else : > $@; fi
+
 # --- (2) ca65 アセンブル ---
-# vm/nesphp.s は build/src.bin を固定パスで .incbin するので、対象の
-# NAME.src.bin を build/src.bin にコピーしてからアセンブルする。
-$(BUILD_DIR)/%.o: $(VM_SRCS) $(BUILD_DIR)/%.src.bin $(CHR_FONT) | $(BUILD_DIR)
+# vm/nesphp.s は build/src.bin と build/data.bin を固定パスで .incbin するので、対象の
+# NAME.src.bin / NAME.data.bin をコピーしてからアセンブルする。
+$(BUILD_DIR)/%.o: $(VM_SRCS) $(BUILD_DIR)/%.src.bin $(BUILD_DIR)/%.data.bin $(CHR_FONT) | $(BUILD_DIR)
 	@cp $(BUILD_DIR)/$*.src.bin $(BUILD_DIR)/src.bin
+	@cp $(BUILD_DIR)/$*.data.bin $(BUILD_DIR)/data.bin
 	@echo "[make] (2) assemble  $(VM_SRC) → $@"
 	@$(CA65) -I vm $(VM_SRC) -o $@
 

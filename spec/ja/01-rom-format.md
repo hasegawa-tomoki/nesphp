@@ -209,7 +209,7 @@ Offset     Bytes                                             ASCII
 ```
 
 ヘッダの `04 00 10 08 00 00 09 07` は **NES 2.0** 形式の MMC1 (mapper 1, SXROM):
-PRG-ROM = 4 × 16KB = 64KB、CHR-ROM = 0 (= CHR-RAM 8KB を申告)、Flags 7 = `08`
+PRG-ROM = 8 × 16KB = 128KB (bank 構成は [14-map-scroll](./14-map-scroll.md))、CHR-ROM = 0 (= CHR-RAM 8KB を申告)、Flags 7 = `08`
 (bit 2-3 = `10` → NES 2.0 marker)、byte 10 = `09` (PRG-RAM = 64 << 9 = 32KB
 volatile)、byte 11 = `07` (CHR-RAM = 64 << 7 = 8KB volatile)。Flags 6 上位 nibble
 = 1 → mapper 1。

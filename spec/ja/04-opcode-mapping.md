@@ -120,6 +120,16 @@ SXROM 化に伴い PRG-RAM bank 3 を **8 KB の汎用バイト領域** とし�
 
 | opcode | 番号 | 役割 |
 |---|---|---|
+| `NESPHP_NES_CAM_WAIT` | **0xDE** | `nes_cam_wait()` → NMI のカメラ補間が終わるまで待つ |
+| `NESPHP_NES_OBJ_AT` | **0xDF** | `$r = nes_obj_at($x, $y)` → そのマスのオブジェクトレコード (0 / 1 + msg、式) |
+| `NESPHP_NES_OBJ_DRAW` | **0xE0** | `nes_obj_draw($cpx, $cpy, $n)` → オブジェクトレコードをカメラ基準の sprite に配置 |
+| `NESPHP_NES_CAM_MOVE` | **0xE1** | `nes_cam_move($dx, $dy, $frames)` → NMI 駆動の scroll / sprite 補間 (frames の bit 8 = 勇者モード) |
+| `NESPHP_NES_CHR_COPY` | **0xE2** | `nes_chr_copy($tile, $src, $n)` → PRG-ROM bank 2 (GAMEDATA) の 16 byte タイル × n を CHR-RAM の BG タイル `$tile` 以降へ (sprite_mode では一時ブランキング) |
+| `NESPHP_NES_ROM_COPY` | **0xE3** | `nes_rom_copy($dst, $src, $len)` → PRG-ROM bank 2 → PRG-RAM bank 3 |
+| `NESPHP_NES_MAP_RECT` | **0xE4** | `nes_map_rect($mx, $my, $w, $h)` → bank 3 のマップからメタタイル矩形を描く ([14-map-scroll](./14-map-scroll.md))。`$h` は CV 限定 (extended_value 経由) |
+| `NESPHP_NES_MAP_CFG` | **0xE5** | `nes_map_cfg($mw, $mode)` → マップ幅と描画モード、bank 3 offset 4080 の PALTAB 取り込み |
+| `NESPHP_NES_SPRITE_TILE` | **0xE6** | `nes_sprite_tile($idx, $tile)` → OAM[$idx*4+1] = tile、どちらも runtime |
+| `NESPHP_NES_SCROLL` | **0xE7** | `nes_scroll($x, $y)` → BG スクロール (x 0-511, y 0-239)。sprite_mode では NMI キュー経由 |
 | `NESPHP_NES_PEEK_EXT` | **0xE8** | `nes_peek_ext($offset)` → bank 3 の `$6000+offset` から 1 byte 読出 |
 | `NESPHP_NES_PEEK16_EXT` | **0xE9** | `nes_peek16_ext($offset)` → bank 3 から 2 byte LE 読出 |
 | `NESPHP_NES_POKE_EXT` | **0xEA** | `nes_poke_ext($offset, $byte)` → bank 3 に 1 byte 書込 |

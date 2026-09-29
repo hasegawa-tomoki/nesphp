@@ -4,7 +4,7 @@ PHP ソースをファミコン (6502) にそのまま持ち込み、**NES 自�
 
 - **L3S (self-hosted)**: PHP ソースを ROM に生のまま焼き、電源 ON で 6502 が lex/parse/codegen → NESPHP 圧縮レイアウト `zend_op 12B` / 4B tagged zval リテラルを PRG-RAM に emit → 既存 VM で実行。**`.nes` になる経路はこれだけ**
 - **L3 (host-compile) はオラクル限定**: `serializer.php` は生きており `make build/NAME.host.ops.bin` で 12B opcode バイナリを生成可能 (L3S の出力と突き合わせる op 列検証用。リテラルは 16B zval のままで、4B tagged zval 移行後の VM リゾルバはこのレイアウトを読めない)。`.nes` に焼く Makefile target は無い
-- **マッパー**: MMC1 (mapper 1, SXROM 相当)、**PRG-ROM 64KB (4 × 16KB) + CHR-RAM 8KB + PRG-RAM 32KB (4 × 8KB)**、NES 2.0 ヘッダ
+- **マッパー**: MMC1 (mapper 1, SXROM 相当)、**PRG-ROM 128KB (8 × 16KB) + CHR-RAM 8KB + PRG-RAM 32KB (4 × 8KB)**、NES 2.0 ヘッダ
 - **動作確認**: PHP 8.4 (version lock) + cc65 + fceux/Mesen + 実機 (EverDrive N8 + 赤白ファミコン)
 
 詳細な設計は [`spec/`](./spec/) ディレクトリ (目次は [`spec/README.md`](./spec/README.md))。**「PHP 構文の知識は NES 側にだけ存在する」**ことがロマンの核。

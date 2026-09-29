@@ -204,7 +204,7 @@ Offset     Bytes                                             ASCII
 00018010   [ PRG bank 2 (16KB, reserved), PRG bank 3 ($C000-$FFFF, CODE fixed) ]
 ```
 
-The header `04 00 10 08 00 00 09 07` is **NES 2.0** MMC1 (mapper 1, SXROM): PRG-ROM = 4 × 16KB = 64KB, CHR-ROM = 0 (declares CHR-RAM 8KB), Flags 7 = `08` (bit 2-3 = `10` → NES 2.0 marker), byte 10 = `09` (PRG-RAM = 64 << 9 = 32KB volatile), byte 11 = `07` (CHR-RAM = 64 << 7 = 8KB volatile). High nibble of Flags 6 = 1 → mapper 1.
+The header `08 00 10 08 00 00 09 07` is **NES 2.0** MMC1 (mapper 1, SXROM): PRG-ROM = 8 × 16KB = 128KB (bank layout in [14-map-scroll](./14-map-scroll.md)), CHR-ROM = 0 (declares CHR-RAM 8KB), Flags 7 = `08` (bit 2-3 = `10` → NES 2.0 marker), byte 10 = `09` (PRG-RAM = 64 << 9 = 32KB volatile), byte 11 = `07` (CHR-RAM = 64 << 7 = 8KB volatile). High nibble of Flags 6 = 1 → mapper 1.
 
 PRG-RAM 32KB bank assignment: bank 0 = op_array + literals, bank 1 = ARR_POOL, bank 2 = STR_POOL, bank 3 = USER_RAM_EXT. Details in [11-chr-banks](./11-chr-banks.md) and [02-ram-layout § PRG-RAM](./02-ram-layout.md).
 

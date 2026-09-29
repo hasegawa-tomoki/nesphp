@@ -25,7 +25,7 @@
 
 ```
 4E 45 53 1A   "NES" + EOF
-04            byte 4 = PRG-ROM = 4 * 16KB = 64KB
+08            byte 4 = PRG-ROM = 8 * 16KB = 128KB (0 PHPSRC, 1 CHRDATA, 2 GAMEDATA, 3 RUNTIME, 4-6 空き, 7 CODE。14-map-scroll 参照)
 00            byte 5 = CHR-ROM = 0 (CHR-RAM 化)
 10            byte 6 (Flags 6): mapper LSB nibble = 1 (MMC1)
 08            byte 7 (Flags 7): bit 2-3 = NES 2.0 marker
@@ -44,7 +44,7 @@
 |---|---|---|---|
 | CHR | 32KB CHR-ROM | 128KB CHR-ROM 上限 | **8KB CHR-RAM** (起動時に PRG bank 1 から 8KB を PPU $0000-$1FFF へ転送) |
 | CHR 切替粒度 | 8KB 一括 | 4KB × 2 面 | **CHR-RAM では bank 切替の意味は薄い** ($A000/$C000 reg は SXROM では PRG-RAM bank select に流用) |
-| PRG-ROM | なし | 16KB 単位 ($8000 切替、$C000 固定) | **64KB**: bank 3 ($C000 固定) = VM CODE、bank 0/1/2 ($8000 切替可) = PHPSRC / CHRDATA / 予備 |
+| PRG-ROM | なし | 16KB 単位 ($8000 切替、$C000 固定) | **128KB**: bank 7 ($C000 固定) = VM CODE、bank 0-3 ($8000 切替可) = PHPSRC / CHRDATA / GAMEDATA / RUNTIME、4-6 空き |
 | PRG-RAM (WRAM) | なし | 8KB ($6000-$7FFF 単一 bank) | **32KB = 4 × 8KB bank** ($A000 reg bit 2-3 で切替): bank 0 = op_array+literals、bank 1 = ARR_POOL、bank 2 = STR_POOL、bank 3 = USER_RAM_EXT |
 
 ### CHR 配置
@@ -321,7 +321,17 @@ PHP 側では `nes_palette` で色 1 = `$30` (白)、色 2 = `$16` (暗い赤) �
 | 0x0D-0x0F, 0x1E-0x1F | カスタムタイルに利用可能 (5 タイル) |
 | 0x20-0x7E | ASCII フォント (make_font.php が自動生成。数字と大文字は chunky な 7×7 アーケード風 bold glyph、残りは 5×7) |
 | 0x7F | DEL (未使用、カスタム利用可) |
-| 0x80-0xFF | pattern table 1 側 (未使用、カスタム利用可) |
+| 0x80-0x87 | 漢字グリフ (misaki、`examples/fontdemo.php`) |
+| **0x88-0xBF** | ドラクエ風の街 BG メタタイル 14 種 × (2×2 タイル)。`chr/make_town_tiles.php` が生成 (WALL 0x88 / FLOOR 0x8C / GRASS 0x90 / TREE 0x94 / STAIRS 0x98 / BARS 0x9C / CHEST 0xA0 / DOOR 0xA4 / COUNTER 0xA8 / WATER 0xAC / BRIDGE 0xB0 / BED 0xB4 / PHPLOGO 0xB8 / ELEPHANT 0xBC、`examples/town.php`) |
+| 0xC0-0xF7 | メッセージのグリフスロット (56 個): 開いているメッセージの日本語グリフを `nes_chr_copy` で実行時に載せる ([14-map-scroll](./14-map-scroll.md))。メタタイル種類 14 以降を足すときはここを削る |
+| 0xF8-0xFF | メッセージ窓の枠 8×8 単体タイル (左上, 上, 右上, 左, 右, 左下, 下, 右下。`examples/town.php`) |
+
+上の表は CHR set 0 (BG 側)。sprite は起動時 PPU $1000 = CHR set 1 を参照するので、
+sprite タイルは set 1 に置く: 0x10-0x15 (elePHPant タイルのコピー) と 0x80-0xA7
+(街のキャラ、各 16×16 = 2×2 タイル、正面向き、歩行は水平反転で表現: HERO 0x80 /
+HERO 0x80 正面, 0x84 後ろ, 0x88 / 0x8C 横 2 フレーム / SOLDIER 0x90 / TOWNSMAN 0x94 / SIENNE 0x98 / YOUTH 0x9C / WOMAN 0xA0 / BOY 0xA4)。
+どちらも `chr/make_town_tiles.php` が書き込む。このスクリプトは `chr/font.chr` に
+パッチし、同じデータで `chr/make_font.php` も書き直すので chr-edit との往復が崩れない。
 
 #### 具体例: テトリスピース (タイル 0x05-0x0B) と レンガ壁 (0x0C)
 

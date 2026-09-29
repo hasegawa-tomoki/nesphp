@@ -114,6 +114,16 @@ API that uses PRG-RAM bank 3 as **8 KB of generic byte storage**, enabled by the
 
 | opcode | Number | Role |
 |---|---|---|
+| `NESPHP_NES_CAM_WAIT` | **0xDE** | `nes_cam_wait()` → waits for the NMI camera tween |
+| `NESPHP_NES_OBJ_AT` | **0xDF** | `$r = nes_obj_at($x, $y)` → 0 or 1 + msg of the object record at that cell (expression) |
+| `NESPHP_NES_OBJ_DRAW` | **0xE0** | `nes_obj_draw($cpx, $cpy, $n)` → places object records as sprites relative to the camera |
+| `NESPHP_NES_CAM_MOVE` | **0xE1** | `nes_cam_move($dx, $dy, $frames)` → NMI-driven scroll / sprite tween (bit 8 of frames = hero mode) |
+| `NESPHP_NES_CHR_COPY` | **0xE2** | `nes_chr_copy($tile, $src, $n)` → n 16-byte tiles from PRG-ROM bank 2 (GAMEDATA) to CHR-RAM BG tile `$tile` (brief blanking in sprite_mode) |
+| `NESPHP_NES_ROM_COPY` | **0xE3** | `nes_rom_copy($dst, $src, $len)` → PRG-ROM bank 2 → PRG-RAM bank 3 |
+| `NESPHP_NES_MAP_RECT` | **0xE4** | `nes_map_rect($mx, $my, $w, $h)` → draws a metatile rectangle from the bank-3 map ([14-map-scroll](./14-map-scroll.md)). `$h` must be a CV (goes through extended_value) |
+| `NESPHP_NES_MAP_CFG` | **0xE5** | `nes_map_cfg($mw, $mode)` → map width, draw mode, loads PALTAB from bank 3 offset 4080 |
+| `NESPHP_NES_SPRITE_TILE` | **0xE6** | `nes_sprite_tile($idx, $tile)` → OAM[$idx*4+1] = tile, both runtime |
+| `NESPHP_NES_SCROLL` | **0xE7** | `nes_scroll($x, $y)` → BG scroll (x 0-511, y 0-239); queued on the NMI queue in sprite_mode |
 | `NESPHP_NES_PEEK_EXT` | **0xE8** | `nes_peek_ext($offset)` → reads 1 byte from `$6000+offset` in bank 3 |
 | `NESPHP_NES_PEEK16_EXT` | **0xE9** | `nes_peek16_ext($offset)` → reads 2 LE bytes from bank 3 |
 | `NESPHP_NES_POKE_EXT` | **0xEA** | `nes_poke_ext($offset, $byte)` → writes 1 byte to bank 3 |

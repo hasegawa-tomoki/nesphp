@@ -51,6 +51,20 @@ ZEND_RETURN           = 62
 ZEND_ECHO             = 136
 
 ; --- nesphp カスタム opcode (0xE0-0xFF は Zend 未使用領域) ---
+; PRG-ROM bank 番号。compile 中は $8000 に bank 0 (PHPSRC)、compile 後は PRG_RUNTIME_BANK を
+; マップしておく (実行時専用の大きい handler は RUNTIME segment = bank 3 に置いて固定 bank の
+; 16KB を節約)。bank 1/2 へ一時的に切り替える handler は戻すとき PRG_RUNTIME_BANK を書く。
+PRG_RUNTIME_BANK        = 3
+NESPHP_NES_CAM_WAIT     = $DE   ; nes_cam_wait(): nes_cam_move の補間が終わるまで待つ
+NESPHP_NES_OBJ_AT       = $DF   ; nes_obj_at($x, $y): マス (x, y) のオブジェクトを探し 0 (なし) / 1 + msg を返す
+NESPHP_NES_OBJ_DRAW     = $E0   ; nes_obj_draw($cpx, $cpy, $n): bank 3 のオブジェクトレコードから NPC sprite を OAM に配置
+NESPHP_NES_CAM_MOVE     = $E1   ; nes_cam_move($dx, $dy, $frames|mode<<8): NMI がカメラ (or 勇者) を毎フレーム補間、完了まで待つ
+NESPHP_NES_CHR_COPY     = $E2   ; nes_chr_copy($tile, $src, $n): PRG bank 2 の 16B タイル × n を CHR-RAM ($0000 + tile*16) へ
+NESPHP_NES_ROM_COPY     = $E3   ; nes_rom_copy($dst, $src, $len): PRG bank 2 (GAMEDATA) → PRG-RAM bank 3
+NESPHP_NES_MAP_RECT     = $E4   ; nes_map_rect($mx, $my, $w, $h): bank 3 のマップからメタタイル矩形を描く
+NESPHP_NES_MAP_CFG      = $E5   ; nes_map_cfg($mw, $mode): マップ幅と描画モード、PALTAB 取り込み
+NESPHP_NES_SPRITE_TILE  = $E6   ; nes_sprite_tile($idx, $tile): OAM[$idx*4+1] = tile (runtime 可)
+NESPHP_NES_SCROLL       = $E7   ; nes_scroll($x, $y): BG スクロール (x 0-511, y 0-239)
 NESPHP_NES_PEEK_EXT     = $E8   ; PRG-RAM bank 2 ($6000+offset) から 1 byte 読出
 NESPHP_NES_PEEK16_EXT   = $E9   ; PRG-RAM bank 2 から 2 byte LE 読出
 NESPHP_NES_POKE_EXT     = $EA   ; PRG-RAM bank 2 に 1 byte 書込
@@ -253,11 +267,46 @@ NMI_QUEUE_ADDR    = $0300
 ; --- print_int16 用の digit バッファ (最長 "-32768" = 6 文字) ---
 INT_PRINT_BUFFER  = $0600
 
-; --- attribute table の RAM shadow (64 バイト) ---
+; --- attribute table の RAM shadow (128 バイト = nametable 0/1 × 64B) ---
 ; nes_attr の read-modify-write で使用。attribute table 1 byte は 4 つの
 ; 2×2 タイルブロックのパレット情報を共有するため、1 ブロックだけ変えるには
 ; 他の 3 ブロックの値を壊さないようにする必要がある。
+; $0608-$0647 = nametable 0 ($23C0)、$0648-$0687 = nametable 1 ($27C0)。
 ATTR_SHADOW       = $0608
+
+; --- nes_map_rect 用 (spec/14-map-scroll.md) ---
+; MAP_PALTAB: メタタイル種類 (0-15) → BG パレット。nes_map_cfg が bank 3 の
+;             MAP_PALTAB_EXT ($6000 + 4080) から 16B コピーする。
+; MR_*: nes_map_rect の作業変数 (ZP を節約するため内蔵 RAM)。
+MAP_PALTAB        = $0688
+MAP_PALTAB_EXT    = $6FF0        ; bank 3 offset 4080
+MR_MX             = $0698        ; 矩形左上のマップ x
+MR_MY             = $0699        ; 現在行のマップ y
+MR_W              = $069A
+MR_H              = $069B        ; 残り行数
+MR_SRC            = $069C        ; 現在行の bank 3 先頭アドレス (2B)
+MR_X              = $069E        ; 列カウンタ
+MR_BY             = $069F        ; my % 15 (attr ブロック y)
+MR_NTR            = $06A0        ; nametable 行 = MR_BY * 2
+MR_T              = $06A1        ; タイル基点
+MR_P              = $06A2        ; パレット
+MR_MUL            = $06A3        ; 乗算作業 (2B)
+OBJ_COUNT         = $06A5        ; 直近の nes_obj_draw に渡されたオブジェクト数 (nes_obj_at が使う)
+MR_AMIN0          = $06A6        ; nes_map_rect: 行モードで触った attr byte の範囲 (nametable 0 / 1)
+MR_AMAX0          = $06A7
+MR_AMIN1          = $06A8
+MR_AMAX1          = $06A9
+MR_NTC            = $06AA        ; 矩形左端の nametable 列 (0-63)
+MR_TC             = $06AB        ; 列モード: 処理中のタイル列 (0/1)
+OBJ_ROT_TMP       = $06AC        ; nmi_obj_rotate の退避バッファ (16B = 1 オブジェクト分の OAM)
+OAM_BUSY          = $06BC        ; nes_obj_draw が OAM shadow を書き換え中 (1 なら NMI は回転しない)
+OBJ_VIS           = $06BD        ; 直近の nes_obj_draw で実際に sprite を割り当てた (画面内の) オブジェクト数
+ANIM_CNT          = $06BE        ; nmi_obj_anim のフレームカウンタ (ANIM_PERIOD フレームごとにコマ切替)
+ANIM_PERIOD       = 24           ; NPC 足踏みのコマ間隔 (フレーム、24 ≈ 0.4 秒)
+ANIM_PHASE        = $06BF        ; NPC の歩行コマ (0 = A、1 = B: タイル +$20)
+MR_ROWBUF_T       = $0500        ; 行モード: 上段タイル行のバッファ (2*W byte、TMP page を借用)
+MR_ROWBUF_B       = $0520        ; 行モード: 下段
+MR_COLBUF         = $0540        ; 列モード: 1 タイル列分 (2*H byte、+32 増分で書く)
 
 ; =============================================================================
 ; ゼロページ VM レジスタ
@@ -355,6 +404,21 @@ ppu_ctrl_shadow: .res 1
 nmi_queue_write: .res 1
 nmi_queue_read:  .res 1
 
+; BG スクロール shadow (nes_scroll)。x の bit 8 / y の nametable 選択は
+; ppu_ctrl_shadow の bit 0-1 に置く。NMI が毎フレーム PPUCTRL + PPUSCROLL に書く。
+scroll_x:        .res 1
+scroll_y:        .res 1
+
+; nes_map_cfg / nes_map_rect (spec/14-map-scroll.md)
+map_w:           .res 1    ; マップ幅 (メタタイル、1-255)
+map_mode:        .res 1    ; bit 0-1: 0 = 2x2 全部 / 1 = 上段タイル行のみ / 2 = 下段のみ、bit 2: attr を書かない
+
+; nes_cam_move: NMI 側のカメラ補間 (spec/14-map-scroll.md)
+cam_dx:          .res 1    ; 1 フレームあたりの移動量 (符号付き 8 bit)
+cam_dy:          .res 1
+cam_frames:      .res 1    ; 残りフレーム数 (0 = 停止)。NMI が減らし、nes_cam_move は 0 になるまで待つ
+cam_mode:        .res 1    ; 0 = scroll を進め、slot 4-63 の sprite を逆方向へずらす / 1 = slot 0-3 (勇者) を dx,dy だけ動かす
+
 ; =============================================================================
 ; iNES ヘッダ  (MMC1 / mapper 1、標準 SXROM: PRG-ROM 64KB / CHR-RAM 8KB / PRG-RAM 32KB)
 ;
@@ -368,7 +432,7 @@ nmi_queue_read:  .res 1
 ; =============================================================================
 .segment "HEADER"
     .byte "NES", $1A
-    .byte 4                ; PRG-ROM = 4 * 16KB = 64KB
+    .byte 8                ; PRG-ROM = 8 * 16KB = 128KB (0 = PHPSRC, 1 = CHRDATA, 2 = GAMEDATA, 3 = RUNTIME, 7 = CODE 固定)
     .byte 0                ; CHR-ROM = 0 → CHR-RAM 8KB を申告
     .byte %00010000        ; Flags 6: mapper LSB = 1 (上位 nibble), mirroring = horizontal(0)
     .byte %00001000        ; Flags 7: mapper MSB = 0、bit 2-3 = 10 (NES 2.0 marker)
@@ -419,7 +483,8 @@ reset:
     STA $8000
 
     ; Control ($8000): CHR 4KB mode (bit4=1), PRG fix-last mode (bit3-2=11),
-    ;                  horizontal mirroring (bit1-0=10)
+    ;                  vertical mirroring (bit1-0=10: nametable 0/1 が横に並ぶ =
+    ;                  横スクロールは継ぎ目なし、縦は 240px で wrap)
     ;   %11110 = $1E
     LDA #$1E
     MMC1_WRITE $8000
@@ -455,6 +520,12 @@ clear_wram_loop:
     STA $0700, X
     INX
     BNE clear_wram_loop
+
+    ; ppu_ctrl_shadow は ZEROPAGE にあり直前のクリアで 0 に戻るので再設定する
+    ; (bit 3 = 1 を失うと enable_sprite_mode が PPUCTRL=$80 を書き、sprite が
+    ; $0000 = BG 側 set 0 を参照してしまう)
+    LDA #%00001000
+    STA ppu_ctrl_shadow
 
     ; nes_rand の LFSR 初期値を 1 にする (0 は退化点で永遠に 0 を返すため)。
     ; ユーザが nes_srand を呼ばずに nes_rand を使ってもとりあえず動く決定列を出す。
@@ -544,6 +615,9 @@ chr_copy_inner:
     ;                          だけのスタブ。以降の HDR_* 読み出しは $6000 系を見る。
     ; Phase B 以降: 本物のコンパイラ (PHP ソース → L3 opcode) に置き換える予定。
     JSR compile_and_emit
+    ; compile 後は PHPSRC (bank 0) 不要 → 実行時専用コードの RUNTIME bank を $8000 に
+    LDA #PRG_RUNTIME_BANK
+    MMC1_WRITE $E000
 
     ; php_version を確認
     LDA HDR_PHP_MAJOR
@@ -681,6 +755,46 @@ main_loop:
     CMP #NESPHP_NES_ATTR
     BNE :+
     JMP handle_nesphp_nes_attr
+:
+    CMP #NESPHP_NES_SCROLL
+    BNE :+
+    JMP handle_nesphp_nes_scroll
+:
+    CMP #NESPHP_NES_SPRITE_TILE
+    BNE :+
+    JMP handle_nesphp_nes_sprite_tile
+:
+    CMP #NESPHP_NES_MAP_CFG
+    BNE :+
+    JMP handle_nesphp_nes_map_cfg
+:
+    CMP #NESPHP_NES_MAP_RECT
+    BNE :+
+    JMP handle_nesphp_nes_map_rect
+:
+    CMP #NESPHP_NES_ROM_COPY
+    BNE :+
+    JMP handle_nesphp_nes_rom_copy
+:
+    CMP #NESPHP_NES_OBJ_DRAW
+    BNE :+
+    JMP handle_nesphp_nes_obj_draw
+:
+    CMP #NESPHP_NES_OBJ_AT
+    BNE :+
+    JMP handle_nesphp_nes_obj_at
+:
+    CMP #NESPHP_NES_CAM_WAIT
+    BNE :+
+    JMP handle_nesphp_nes_cam_wait
+:
+    CMP #NESPHP_NES_CAM_MOVE
+    BNE :+
+    JMP handle_nesphp_nes_cam_move
+:
+    CMP #NESPHP_NES_CHR_COPY
+    BNE :+
+    JMP handle_nesphp_nes_chr_copy
 :
     CMP #NESPHP_NES_VSYNC
     BNE :+
@@ -1365,10 +1479,7 @@ pwb_done:
 ; ZEND_RETURN: PPUMASK 有効化 → halt
 ; -----------------------------------------------------------------------------
 handle_zend_return:
-    BIT PPUSTATUS
-    LDA #0
-    STA PPUSCROLL
-    STA PPUSCROLL
+    JSR apply_scroll
     LDA #%00001110
     STA PPUMASK
 halt:
@@ -2533,12 +2644,24 @@ read_ctrl_loop:
 ; disable_rendering_restore: PPUMASK=0 にして PPUADDR を PPU_CURSOR に戻す
 ; -----------------------------------------------------------------------------
 enable_rendering:
-    BIT PPUSTATUS
-    LDA #0
-    STA PPUSCROLL
-    STA PPUSCROLL
+    JSR apply_scroll
     LDA #%00001110
     STA PPUMASK
+    RTS
+
+; -----------------------------------------------------------------------------
+; apply_scroll: ppu_ctrl_shadow (nametable 選択 bit 0-1 含む) と scroll_x/y を
+; PPU に書く。PPUADDR 書き込み後は内部 t/v レジスタが汚れるので、VBlank 中
+; (NMI 末尾 / 一時ブランキング復帰時) に毎回呼ぶ。
+; -----------------------------------------------------------------------------
+apply_scroll:
+    BIT PPUSTATUS
+    LDA ppu_ctrl_shadow
+    STA PPUCTRL
+    LDA scroll_x
+    STA PPUSCROLL
+    LDA scroll_y
+    STA PPUSCROLL
     RTS
 
 disable_rendering_restore:
@@ -2597,7 +2720,8 @@ np_from_long:
     STA INT_PRINT_BUFFER
 
 np_addr:
-    ; nametable アドレス = $2000 + y*32 + x → TMP0
+    ; nametable アドレス = $2000 + (x & 32 ? $400 : 0) + y*32 + (x & 31) → TMP0
+    ; x 32-63 は nametable 1 ($2400、vertical mirroring で右隣に並ぶ)
     LDA OP2_VAL+1
     STA TMP0
     LDA #0
@@ -2614,16 +2738,19 @@ np_addr:
     ROL TMP0+1
     CLC
     LDA OP1_VAL+1
+    AND #$1F
     ADC TMP0
     STA TMP0
     LDA #0
     ADC TMP0+1
     STA TMP0+1
+    LDA OP1_VAL+1
+    AND #$20
+    BEQ :+
+    LDA #$04
+:
     CLC
-    LDA TMP0
-    ADC #$00
-    STA TMP0
-    LDA TMP0+1
+    ADC TMP0+1
     ADC #$20
     STA TMP0+1
 
@@ -2669,7 +2796,9 @@ handle_nesphp_nes_puts:
     LDY #3                 ; type byte
     LDA (TMP0), Y
     CMP #TYPE_STRING
-    BNE nps_type_err
+    BEQ :+
+    JMP nps_type_err
+:
 
     ; 新方式: value bytes 0-1 = val[] への OPS_BASE 相対 offset、byte 2 = length
     LDY #0
@@ -2689,7 +2818,10 @@ handle_nesphp_nes_puts:
     LDA (TMP0), Y
     STA TMP2                ; len
 
-    ; nametable addr = $2000 + y*32 + x, store in TMP0
+    ; nametable addr = $2000 + (x & 32 ? $400 : 0) + y*32 + (x & 31) → TMP0
+    ; x 32-63 は nametable 1。文字列が列 31/63 をまたぐ場合は同じ行の隣の
+    ; nametable 先頭 (列 0 / 32) に続きを書く (64 列 wrap、スクロール中の
+    ; メッセージ窓用)。
     LDA OP2_VAL+1
     STA TMP0
     LDA #0
@@ -2704,20 +2836,72 @@ handle_nesphp_nes_puts:
     ROL TMP0+1
     ASL TMP0
     ROL TMP0+1
-    ; + x
+    ; + (x & 31)
     CLC
     LDA OP1_VAL+1
+    AND #$1F
     ADC TMP0
     STA TMP0
     LDA #0
     ADC TMP0+1
     STA TMP0+1
-    ; + $2000
-    LDA TMP0+1
+    ; + $2000 (+ $400 if x & 32)
+    LDA OP1_VAL+1
+    AND #$20
+    BEQ :+
+    LDA #$04
+:
     CLC
+    ADC TMP0+1
     ADC #$20
     STA TMP0+1
 
+    ; 残り列数 = 32 - (x & 31)。len がそれを超えるなら 2 回に分ける
+    LDA OP1_VAL+1
+    AND #$1F
+    STA DIV_COUNTER        ; x & 31 (一時利用)
+    LDA #32
+    SEC
+    SBC DIV_COUNTER        ; A = 32 - (x & 31) = この nametable に書ける残り列数
+    CMP TMP2
+    BCS nps_single         ; 残り列数 >= len → 1 回で書ける
+    ; --- 2 分割: 前半 (残り列数) ---
+    STA DIV_COUNTER        ; DIV_COUNTER = len1
+    LDA TMP2
+    SEC
+    SBC DIV_COUNTER
+    PHA                    ; len2 を退避
+    LDA DIV_COUNTER
+    STA TMP2               ; TMP2 = len1
+    PRG_RAM_BANK2
+    JSR ppu_write_bytes
+    PRG_RAM_BANK0
+    ; --- 後半: src += len1、addr = 隣の nametable の同じ行の先頭 ---
+    CLC
+    LDA TMP1
+    ADC DIV_COUNTER
+    STA TMP1
+    BCC :+
+    INC TMP1+1
+:
+    ; addr lo: 行先頭 = (addr - (x&31)) → 現在の addr lo から x&31 を引く
+    LDA OP1_VAL+1
+    AND #$1F
+    STA DIV_COUNTER
+    SEC
+    LDA TMP0
+    SBC DIV_COUNTER
+    STA TMP0
+    BCS :+
+    DEC TMP0+1
+:
+    ; nametable を反転 ($20xx <-> $24xx)
+    LDA TMP0+1
+    EOR #$04
+    STA TMP0+1
+    PLA
+    STA TMP2               ; len2
+nps_single:
     ; TMP0=addr, TMP1=src ptr (bank 2 STR_POOL), TMP2=len で ppu_write_bytes に委譲
     ; (forced_blanking は直書き、sprite_mode は NMI キューに積む)
     PRG_RAM_BANK2
@@ -2817,10 +3001,8 @@ cls_wait_vb:
     LDA #>OAM_SHADOW
     STA OAM_DMA
 
-    ; 7. scroll をリセット
-    LDA #0
-    STA PPUSCROLL
-    STA PPUSCROLL
+    ; 7. scroll を shadow から復元 (PPUADDR 連続書込で汚れた t/v を戻す)
+    JSR apply_scroll
 
     ; 8. rendering 再有効化 (BG + sprite)
     LDA #%00011110
@@ -2956,7 +3138,7 @@ chr_xfer_inner:
     BNE chr_xfer_outer
 
     ; PRG bank 0 (PHPSRC) に戻す
-    LDA #0
+    LDA #PRG_RUNTIME_BANK
     MMC1_WRITE $E000
 
     ; sprite_mode のときだけ rendering 復帰処理
@@ -2973,10 +3155,8 @@ chr_xfer_wait_vb:
     LDA #>OAM_SHADOW
     STA OAM_DMA
 
-    ; scroll リセット (PPUADDR 連続書込で内部 scroll latch がズレている)
-    LDA #0
-    STA PPUSCROLL
-    STA PPUSCROLL
+    ; scroll を shadow から復元 (PPUADDR 連続書込で内部 scroll latch がズレている)
+    JSR apply_scroll
 
     ; rendering 復帰 (BG + sprite enable)
     LDA #%00011110
@@ -3175,12 +3355,32 @@ handle_nesphp_nes_attr:
 
     LDA RESULT_VAL
     CMP #TYPE_LONG
-    BNE attr_err
+    BEQ :+
+    JMP attr_err
+:
     LDA RESULT_VAL+1
+    STA TMP2
+    JSR attr_write
+    JMP advance
+
+; attr_rmw: 2x2 ブロック (OP1_VAL+1 = x 0-31, OP2_VAL+1 = y 0-14) に TMP2 = pal を設定
+; (ATTR_SHADOW の read-modify-write だけ。nes_attr / nes_map_rect が使う)。TMP0-2 / A / X / Y を壊す。
+attr_rmw:
+    LDA TMP2
     AND #$03               ; pal を 0-3 にクランプ
     STA TMP2               ; TMP2 = pal (2 bit)
 
-    ; attr byte index = (y / 2) * 8 + (x / 2)
+    ; nametable 選択: x 16-31 (2×2 ブロック座標) は nametable 1
+    ; TMP0+1 = shadow オフセット (0 or 64)
+    LDA #0
+    STA TMP0+1
+    LDA OP1_VAL+1
+    AND #$10
+    BEQ :+
+    LDA #64
+    STA TMP0+1
+:
+    ; attr byte index = (y / 2) * 8 + ((x & 15) / 2)
     LDA OP2_VAL+1          ; y
     LSR A                  ; y / 2
     ASL A
@@ -3188,6 +3388,7 @@ handle_nesphp_nes_attr:
     ASL A                  ; (y / 2) * 8
     STA TMP0               ; TMP0 = (y/2)*8
     LDA OP1_VAL+1          ; x
+    AND #$0F
     LSR A                  ; x / 2
     CLC
     ADC TMP0
@@ -3235,30 +3436,1058 @@ attr_shift_mask:
     JMP attr_shift_mask
 attr_mask_done:
     EOR #$FF               ; A = ~(0x03 << shift) = mask
-    AND ATTR_SHADOW, X     ; 既存の byte から対象 quadrant だけクリア
+    STA TMP2+1             ; mask を退避
+    TXA
+    CLC
+    ADC TMP0+1             ; + nametable オフセット (0 / 64)
+    TAY                    ; Y = shadow index (0-127)
+    LDA TMP2+1
+    AND ATTR_SHADOW, Y     ; 既存の byte から対象 quadrant だけクリア
     ORA TMP1               ; pal を OR で合成
-    STA ATTR_SHADOW, X     ; shadow に書き戻す
+    STA ATTR_SHADOW, Y     ; shadow に書き戻す
+    RTS
 
-    ; PPU に 1 バイト書き込む: $23C0 + X
+; attr_write: attr_rmw (shadow 更新) + その byte を PPU に書く。
+; 入力は attr_rmw と同じ。attr_rmw は X = attr byte index (0-63)、TMP0+1 = 0/64 (nametable) を残す。
+attr_write:
+    JSR attr_rmw
+
+    ; PPU に 1 バイト書き込む: $23C0 (NT0) / $27C0 (NT1) + X
     STA INT_PRINT_BUFFER
     TXA
     CLC
     ADC #$C0
     STA TMP0               ; PPU addr lo = $C0 + byte_index
-    LDA #$23
-    ADC #0                 ; carry (index >= 64 なら $24xx だが通常ありえない)
-    STA TMP0+1             ; PPU addr hi = $23
+    LDA TMP0+1             ; 0 / 64
+    LSR A
+    LSR A
+    LSR A
+    LSR A                  ; 0 / 4
+    CLC
+    ADC #$23
+    STA TMP0+1             ; PPU addr hi = $23 / $27
     LDA #<INT_PRINT_BUFFER
     STA TMP1
     LDA #>INT_PRINT_BUFFER
     STA TMP1+1
     LDA #1
     STA TMP2
-    JSR ppu_write_bytes
-    JMP advance
+    JMP ppu_write_bytes    ; (RTS は ppu_write_bytes が行う)
 
 attr_err:
     JMP handle_unimpl
+
+; =============================================================================
+; NESPHP_NES_MAP_CFG (0xE5): nes_map_cfg($mw, $mode)
+;   op1 = マップ幅 (メタタイル数、1-255)、op2 = 描画モード (map_mode 参照)
+;   あわせて bank 3 の MAP_PALTAB_EXT (offset 4080, 16B) を MAP_PALTAB にコピーする
+;   (メタタイル種類 → BG パレット)。マップデータを nes_pokestr_ext で置いた後に呼ぶ。
+; =============================================================================
+handle_nesphp_nes_map_cfg:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA OP1_VAL+1
+    STA map_w
+    LDA OP2_VAL+1
+    STA map_mode
+    PRG_RAM_BANK3
+    LDX #15
+:   LDA MAP_PALTAB_EXT, X
+    STA MAP_PALTAB, X
+    DEX
+    BPL :-
+    PRG_RAM_BANK0
+    JMP advance
+
+; #############################################################################
+; RUNTIME segment (PRG bank 3、compile 後に $8000-$BFFF へマップ): 実行時専用の
+; 大きい handler。NMI から呼ばれるものや、PRG bank を切り替える handler は置けない。
+; #############################################################################
+.segment "RUNTIME"
+
+; =============================================================================
+; NESPHP_NES_MAP_RECT (0xE4): nes_map_rect($mx, $my, $w, $h)
+;   op1 = mx, op2 = my (マップ座標、メタタイル単位)、result = w、ext = h の CV オフセット
+;   (4 引数目はコンパイラが CV 変数に限定する)。
+;
+; bank 3 のマップ (1 byte/マス、offset = my * map_w + mx) を読み、各マスを
+;   タイル: $88 + (byte & 31) * 4 から 2x2 (TL, TR / BL, BR)
+;   nametable: 列 = (mx * 2) & 63 (横 2 枚 = 64 列)、行 = (my % 15) * 2 (縦 30 行で wrap)
+;   attr:      ブロック (mx & 31, my % 15)、パレット = MAP_PALTAB[byte & 31]
+; に描く。map_mode bit 0-1 で上段/下段だけ、bit 2 で attr 省略 (スクロール時に
+; オーバースキャンに隠れた 1 タイル行だけ書くため)。書き込みは ppu_write_bytes 経由
+; (forced_blanking = 直書き、sprite_mode = NMI キュー)。
+; =============================================================================
+handle_nesphp_nes_map_rect:
+    JSR resolve_op1
+    JSR resolve_op2
+    JSR resolve_result
+    LDA OP1_VAL+1
+    STA MR_MX
+    LDA OP2_VAL+1
+    STA MR_MY
+    LDA RESULT_VAL+1
+    STA MR_W
+    LDY #ZOP_EXT
+    JSR cv_addr_y          ; TMP0 = h の CV アドレス
+    LDY #1
+    LDA (TMP0), Y
+    STA MR_H
+    LDA MR_MX
+    ASL A
+    AND #$3F
+    STA MR_NTC             ; 左端の nametable 列
+    ; 列モード (w = 1、2x2 全部) はタイル列を +32 増分の 1 エントリで書く
+    LDA MR_W
+    CMP #1
+    BNE mr_row_loop
+    LDA map_mode
+    AND #$03
+    BNE mr_row_loop
+    JMP mr_column
+
+; ---------------------------------------------------------------- 行モード
+mr_row_loop:
+    LDA MR_H
+    BNE :+
+    JMP advance
+:
+    JSR mr_row_src         ; MR_SRC = bank 3 の行先頭、MR_BY / MR_NTR
+    LDA #$FF
+    STA MR_AMIN0
+    STA MR_AMIN1
+    LDA #0
+    STA MR_AMAX0
+    STA MR_AMAX1
+    ; --- pass 1: マップ byte → 上段/下段バッファ、attr は shadow だけ更新 ---
+    LDA #0
+    STA MR_X
+mr_r_col:
+    LDA MR_X
+    CMP MR_W
+    BCC :+
+    JMP mr_r_write
+:
+    JSR mr_read_cell       ; MR_T = タイル基点、MR_P = パレット (MR_SRC + MR_X)
+    LDA MR_X
+    ASL A
+    TAX                    ; X = 2 * 列
+    LDA MR_T
+    STA MR_ROWBUF_T, X
+    CLC
+    ADC #1
+    STA MR_ROWBUF_T+1, X
+    ADC #1
+    STA MR_ROWBUF_B, X
+    ADC #1
+    STA MR_ROWBUF_B+1, X
+    LDA map_mode
+    AND #$04
+    BNE mr_r_next
+    ; attr shadow 更新 + 触った index の範囲を nametable ごとに記録
+    LDA MR_MX
+    CLC
+    ADC MR_X
+    AND #$1F
+    STA OP1_VAL+1
+    LDA MR_BY
+    STA OP2_VAL+1
+    LDA MR_P
+    STA TMP2
+    JSR attr_rmw           ; X = index、TMP0+1 = 0 / 64
+    LDA TMP0+1
+    BNE mr_r_nt1
+    CPX MR_AMIN0
+    BCS :+
+    STX MR_AMIN0
+:
+    CPX MR_AMAX0
+    BCC mr_r_next
+    STX MR_AMAX0
+    JMP mr_r_next
+mr_r_nt1:
+    CPX MR_AMIN1
+    BCS :+
+    STX MR_AMIN1
+:
+    CPX MR_AMAX1
+    BCC mr_r_next
+    STX MR_AMAX1
+mr_r_next:
+    INC MR_X
+    JMP mr_r_col
+
+mr_r_write:
+    ; --- pass 2: タイル行を 1-2 エントリで書く (列 63 → 0 の折り返しで分割) ---
+    LDA map_mode
+    AND #$03
+    CMP #2
+    BEQ :+
+    LDA #<MR_ROWBUF_T
+    STA TMP1
+    LDA #>MR_ROWBUF_T
+    STA TMP1+1
+    LDA MR_NTR
+    JSR mr_write_row
+:
+    LDA map_mode
+    AND #$03
+    CMP #1
+    BEQ :+
+    LDA #<MR_ROWBUF_B
+    STA TMP1
+    LDA #>MR_ROWBUF_B
+    STA TMP1+1
+    LDA MR_NTR
+    CLC
+    ADC #1
+    JSR mr_write_row
+:
+    ; --- pass 3: attr byte を nametable ごとに連続範囲で書く ---
+    LDA MR_AMAX0
+    CMP MR_AMIN0
+    BCC :+
+    LDA #0
+    JSR mr_write_attr_range
+:
+    LDA MR_AMAX1
+    CMP MR_AMIN1
+    BCC :+
+    LDA #1
+    JSR mr_write_attr_range
+:
+    INC MR_MY
+    DEC MR_H
+    JMP mr_row_loop
+
+; mr_write_row: A = nametable 行 (0-29)、TMP1 = バッファ、長さ 2*W。MR_NTC から書き、
+; nametable の境界 (列 32 / 64) をまたぐ分は隣の nametable の同じ行の先頭に続けて書く
+; (PPU の auto-increment は nametable 内で次の行に進んでしまうため、境界で必ず分割する)
+mr_write_row:
+    STA MR_TC              ; 行番号を一時保存
+    LDA MR_NTC
+    JSR mr_nt_addr         ; TMP0 = アドレス (MR_TC 行、A 列)
+    LDA MR_W
+    ASL A
+    STA TMP2               ; len = 2W
+    ; この nametable に残る列数 = 32 - (ntc & 31)
+    LDA MR_NTC
+    AND #$1F
+    STA DIV_COUNTER
+    LDA #32
+    SEC
+    SBC DIV_COUNTER
+    CMP TMP2
+    BCS mr_wr_single       ; 収まる
+    STA DIV_COUNTER        ; len1
+    LDA TMP2
+    SEC
+    SBC DIV_COUNTER
+    PHA                    ; len2
+    LDA DIV_COUNTER
+    STA TMP2
+    JSR ppu_write_bytes
+    CLC
+    LDA TMP1
+    ADC DIV_COUNTER
+    STA TMP1
+    BCC :+
+    INC TMP1+1
+:
+    LDA MR_NTC
+    EOR #$20
+    AND #$20               ; 隣の nametable の列 0 / 32
+    JSR mr_nt_addr
+    PLA
+    STA TMP2
+mr_wr_single:
+    JMP ppu_write_bytes
+
+; mr_nt_addr: A = nametable 列 (0-63)、MR_TC = 行 (0-29) → TMP0 = PPU アドレス
+mr_nt_addr:
+    PHA
+    AND #$1F
+    STA TMP0
+    LDA MR_TC
+    AND #$07
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    ORA TMP0
+    STA TMP0               ; lo
+    LDA MR_TC
+    LSR A
+    LSR A
+    LSR A
+    CLC
+    ADC #$20
+    STA TMP0+1
+    PLA
+    AND #$20
+    BEQ :+
+    LDA TMP0+1
+    CLC
+    ADC #$04
+    STA TMP0+1
+:
+    RTS
+
+; mr_write_attr_range: A = nametable (0/1)。MR_AMIN/AMAX の範囲の shadow を $23C0/$27C0 に書く
+mr_write_attr_range:
+    TAX
+    BNE :+
+    LDA MR_AMIN0
+    STA DIV_COUNTER
+    LDA MR_AMAX0
+    JMP mr_war_go
+:
+    LDA MR_AMIN1
+    STA DIV_COUNTER
+    LDA MR_AMAX1
+mr_war_go:
+    SEC
+    SBC DIV_COUNTER
+    CLC
+    ADC #1
+    STA TMP2               ; len = max - min + 1
+    TXA                    ; nametable
+    ASL A
+    ASL A
+    CLC
+    ADC #$23
+    STA TMP0+1             ; $23 / $27
+    LDA DIV_COUNTER
+    CLC
+    ADC #$C0
+    STA TMP0               ; $C0 + min
+    ; src = ATTR_SHADOW + nt*64 + min
+    TXA
+    BEQ :+
+    LDA #64
+:
+    CLC
+    ADC DIV_COUNTER
+    ADC #<ATTR_SHADOW
+    STA TMP1
+    LDA #>ATTR_SHADOW
+    ADC #0
+    STA TMP1+1
+    JMP ppu_write_bytes
+
+; ---------------------------------------------------------------- 列モード
+; w = 1: タイル列 0/1 それぞれを +32 増分の 1 エントリ (行 30 で折り返す分は 2 つ目) で書く
+mr_column:
+    LDA #0
+    STA MR_TC
+mr_c_tc:
+    JSR mr_row_src         ; MR_SRC = 行 MY の先頭 + MX、MR_NTR (MY 基準)
+    LDA MR_MY
+    PHA                    ; MY を退避 (列ごとに戻す)
+    LDA #0
+    STA MR_X               ; k = 0..H-1 (バッファ index は 2k)
+mr_c_k:
+    LDA MR_X
+    CMP MR_H
+    BCC :+
+    JMP mr_c_write
+:
+    LDA #0
+    STA TMP2
+    JSR mr_read_cell_src   ; MR_SRC 直下の byte → MR_T / MR_P
+    LDA MR_X
+    ASL A
+    TAX
+    LDA MR_T
+    CLC
+    ADC MR_TC              ; 上段: 基点 + tc
+    STA MR_COLBUF, X
+    ADC #2                 ; 下段: 基点 + tc + 2
+    STA MR_COLBUF+1, X
+    ; attr (タイル列 0 のときだけ、モードに attr 省略が無ければ)
+    LDA MR_TC
+    BNE mr_c_no_attr
+    LDA map_mode
+    AND #$04
+    BNE mr_c_no_attr
+    LDA MR_MX
+    AND #$1F
+    STA OP1_VAL+1
+    LDA MR_MY
+:   CMP #15
+    BCC :+
+    SBC #15
+    JMP :-
+:
+    STA OP2_VAL+1
+    LDA MR_P
+    STA TMP2
+    JSR attr_write
+mr_c_no_attr:
+    ; 次の行: MR_SRC += map_w、MY++
+    CLC
+    LDA MR_SRC
+    ADC map_w
+    STA MR_SRC
+    BCC :+
+    INC MR_SRC+1
+:
+    INC MR_MY
+    INC MR_X
+    JMP mr_c_k
+mr_c_write:
+    PLA
+    STA MR_MY              ; MY を戻す
+    ; 開始行 ntr0 = (MY % 15) * 2、長さ 2H。行 30 で折り返す分は同じ nametable の行 0 から
+    LDA MR_NTR
+    STA MR_AMIN0           ; 一時: 開始行
+    LDA MR_H
+    ASL A
+    STA TMP2               ; len = 2H
+    LDA #30
+    SEC
+    SBC MR_NTR             ; 残り行数
+    CMP TMP2
+    BCS :+
+    STA DIV_COUNTER        ; len1 = 30 - ntr0
+    LDA TMP2
+    SEC
+    SBC DIV_COUNTER
+    PHA                    ; len2
+    LDA DIV_COUNTER
+    STA TMP2
+    JSR mr_col_entry       ; 前半
+    LDA #0
+    STA MR_NTR             ; 後半は行 0 から
+    PLA
+    STA TMP2
+    LDA #<MR_COLBUF
+    CLC
+    ADC DIV_COUNTER
+    STA TMP1
+    LDA #>MR_COLBUF
+    ADC #0
+    STA TMP1+1
+    JSR ppu_write_bytes_at_col
+    JMP mr_c_next_tc
+:
+    JSR mr_col_entry
+mr_c_next_tc:
+    INC MR_TC
+    LDA MR_TC
+    CMP #2
+    BEQ :+
+    JMP mr_c_tc
+:
+    JMP advance
+
+; mr_col_entry: MR_COLBUF 先頭から TMP2 byte を、行 MR_NTR / 列 MR_NTC + MR_TC に +32 増分で書く
+mr_col_entry:
+    LDA #<MR_COLBUF
+    STA TMP1
+    LDA #>MR_COLBUF
+    STA TMP1+1
+ppu_write_bytes_at_col:
+    LDA MR_NTR
+    STA MR_AMAX0           ; mr_nt_addr は MR_TC を行として使うので一時退避
+    LDA MR_TC
+    PHA
+    LDA MR_NTR
+    STA MR_TC
+    LDA MR_NTC
+    CLC
+    ADC MR_AMAX0
+    SEC
+    SBC MR_NTR             ; (= MR_NTC、計算の見た目合わせ)
+    PLA
+    STA MR_AMAX0           ; tc
+    CLC
+    ADC MR_NTC             ; 列 = ntc + tc (63 + 1 の折り返しは列モードでは起きない: ntc は偶数)
+    JSR mr_nt_addr
+    LDA MR_AMAX0
+    STA MR_TC              ; tc を戻す
+    LDA TMP0+1
+    ORA #$80               ; +32 増分フラグ
+    STA TMP0+1
+    JMP ppu_write_bytes
+
+; ---------------------------------------------------------------- 共通
+; mr_row_src: MR_SRC = $6000 + MY * map_w + MX、MR_BY = MY % 15、MR_NTR = MR_BY * 2
+mr_row_src:
+    LDA #0
+    STA MR_SRC
+    STA MR_SRC+1
+    STA MR_MUL+1
+    LDA MR_MY
+    STA MR_MUL
+    LDA map_w
+    STA TMP2
+    LDX #8
+mr_mul_loop:
+    LSR TMP2
+    BCC :+
+    CLC
+    LDA MR_SRC
+    ADC MR_MUL
+    STA MR_SRC
+    LDA MR_SRC+1
+    ADC MR_MUL+1
+    STA MR_SRC+1
+:
+    ASL MR_MUL
+    ROL MR_MUL+1
+    DEX
+    BNE mr_mul_loop
+    CLC
+    LDA MR_SRC
+    ADC MR_MX
+    STA MR_SRC
+    LDA MR_SRC+1
+    ADC #>USER_RAM_EXT_BASE
+    STA MR_SRC+1
+    LDA MR_MY
+:   CMP #15
+    BCC :+
+    SBC #15
+    JMP :-
+:
+    STA MR_BY
+    ASL A
+    STA MR_NTR
+    RTS
+
+; mr_read_cell: bank 3 の (MR_SRC + MR_X) → MR_T (タイル基点 $88 + 種類*4)、MR_P (パレット)
+mr_read_cell:
+    LDA MR_X
+    STA TMP2
+    JMP mr_read_cell_go
+mr_read_cell_src:          ; TMP2 = 0 で呼ぶ (MR_SRC 直下)
+mr_read_cell_go:
+    LDA MR_SRC
+    STA TMP1
+    LDA MR_SRC+1
+    STA TMP1+1
+    PRG_RAM_BANK3
+    LDY TMP2
+    LDA (TMP1), Y
+    STA MR_T
+    PRG_RAM_BANK0
+    LDA MR_T
+    AND #$1F
+    TAX
+    LDA MAP_PALTAB, X
+    STA MR_P
+    TXA
+    ASL A
+    ASL A
+    CLC
+    ADC #$88
+    STA MR_T
+    RTS
+
+.segment "CODE"
+
+; =============================================================================
+; NESPHP_NES_ROM_COPY (0xE3): nes_rom_copy($dst, $src, $len)
+;   op1 = dst (PRG-RAM bank 3 offset 0-8191)、op2 = src (PRG-ROM bank 2 = GAMEDATA
+;   segment の offset 0-16383)、result = len (byte 数、最大 8192)。全部 runtime int。
+;   ゲームデータ (マップ / メッセージなど、build/NAME.data.bin) を起動時に bank 3 へ
+;   展開する。PRG-ROM bank ($8000) と PRG-RAM bank ($6000) は独立に切り替えられる
+;   ので中継バッファなしで直接コピーできる。8KB で約 0.15 秒。
+; =============================================================================
+handle_nesphp_nes_rom_copy:
+    JSR resolve_op1
+    JSR resolve_op2
+    JSR resolve_result
+    CLC
+    LDA OP1_VAL+1
+    STA TMP0
+    LDA OP1_VAL+2
+    AND #$1F
+    ADC #>USER_RAM_EXT_BASE
+    STA TMP0+1             ; dst = $6000 + offset
+    CLC
+    LDA OP2_VAL+1
+    STA TMP1
+    LDA OP2_VAL+2
+    AND #$3F
+    ADC #$80
+    STA TMP1+1             ; src = $8000 + offset (bank 2 選択後)
+    LDA RESULT_VAL+1
+    STA TMP2
+    LDA RESULT_VAL+2
+    STA TMP2+1             ; len (16 bit)
+    LDA #2
+    MMC1_WRITE $E000       ; PRG-ROM bank 2 を $8000-$BFFF に
+    PRG_RAM_BANK3
+    LDY #0
+rc_loop:
+    LDA TMP2
+    ORA TMP2+1
+    BEQ rc_done
+    LDA (TMP1), Y
+    STA (TMP0), Y
+    INC TMP0
+    BNE :+
+    INC TMP0+1
+:
+    INC TMP1
+    BNE :+
+    INC TMP1+1
+:
+    LDA TMP2
+    BNE :+
+    DEC TMP2+1
+:
+    DEC TMP2
+    JMP rc_loop
+rc_done:
+    PRG_RAM_BANK0
+    LDA #PRG_RUNTIME_BANK
+    MMC1_WRITE $E000       ; RUNTIME bank に戻す
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_CHR_COPY (0xE2): nes_chr_copy($tile, $src, $n)
+;   op1 = 転送先タイル番号 (BG pattern table $0000 側、0-255)、op2 = PRG-ROM bank 2
+;   (GAMEDATA) の offset (16 byte/タイルのビットマップ列)、result = タイル数。
+;   メッセージに出てくる漢字/かなグリフを、窓を開く直前に CHR-RAM へ載せる用途
+;   (spec/14-map-scroll.md)。sprite_mode では nes_cls と同じ一時ブランキング
+;   (NMI off → 書込 → VBlank 待ち → OAM DMA → scroll 復元 → rendering on) で
+;   1 フレーム黒くなる。forced_blanking なら直書き。
+; =============================================================================
+handle_nesphp_nes_chr_copy:
+    JSR resolve_op1
+    JSR resolve_op2
+    JSR resolve_result
+    LDA sprite_mode_on
+    BEQ cc_no_blank
+    LDA ppu_ctrl_shadow
+    PHA
+    AND #$7F
+    STA ppu_ctrl_shadow
+    STA PPUCTRL            ; NMI off
+    LDA #0
+    STA PPUMASK            ; 強制 blanking
+cc_no_blank:
+    LDA #2
+    MMC1_WRITE $E000       ; PRG-ROM bank 2
+    BIT PPUSTATUS
+    LDA OP1_VAL+1
+    LSR A
+    LSR A
+    LSR A
+    LSR A
+    STA PPUADDR            ; hi = tile >> 4
+    LDA OP1_VAL+1
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    STA PPUADDR            ; lo = (tile & 15) << 4
+    CLC
+    LDA OP2_VAL+1
+    STA TMP1
+    LDA OP2_VAL+2
+    AND #$3F
+    ADC #$80
+    STA TMP1+1             ; src = $8000 + offset
+    LDX RESULT_VAL+1       ; n (0 なら何もしない、256 は不可)
+    BEQ cc_end
+cc_tile:
+    LDY #0
+cc_byte:
+    LDA (TMP1), Y
+    STA PPUDATA
+    INY
+    CPY #16
+    BNE cc_byte
+    CLC
+    LDA TMP1
+    ADC #16
+    STA TMP1
+    BCC :+
+    INC TMP1+1
+:
+    DEX
+    BNE cc_tile
+cc_end:
+    LDA #PRG_RUNTIME_BANK
+    MMC1_WRITE $E000       ; RUNTIME bank に戻す
+    LDA sprite_mode_on
+    BEQ cc_done
+    BIT PPUSTATUS
+cc_wait_vb:
+    BIT PPUSTATUS
+    BPL cc_wait_vb
+    LDA #>OAM_SHADOW
+    STA OAM_DMA
+    JSR apply_scroll
+    LDA #%00011110
+    STA PPUMASK
+    PLA
+    STA ppu_ctrl_shadow
+    STA PPUCTRL            ; NMI 復帰
+cc_done:
+    JMP advance
+
+.segment "RUNTIME"
+
+; =============================================================================
+; NESPHP_NES_OBJ_DRAW (0xE0): nes_obj_draw($cpx, $cpy, $n)
+;   op1 = カメラ x (px)、op2 = カメラ y (px)、result = オブジェクト数 (0-15)。
+;   result の上位 byte (0 以外) = 「画面 y がこの値以上の sprite は隠す」しきい値
+;   (メッセージ窓に重なる NPC だけ隠す用。0 なら 224 = 通常の画面下端)。
+;   bank 3 の 4096 から 5 byte レコード [x, y, type, msg, pal] を読み、画面内のものから順に
+;   OAM slot 4 以降へ 4 枚ずつ詰めて配置する (画面外や宝箱は slot を消費しない。画面内に
+;   出せるのは 15 体まで、それ以上は描かれない)。16x16 (タイル $90 + type*4)。pal は bit 0-1 = 頭 (上 2 枚)、
+;   bit 2-3 = 体 (下 2 枚) の sprite パレット (金髪 + 桃色の服のように 4 色使うため)。画面外 (x < 0, x > 240,
+;   y < 0, y >= しきい値) と type $FF (宝箱) は y=240 で隠す。PHP で書くと 1 体 30 op
+;   かかるので VM 側に持つ (spec/14-map-scroll.md)。
+; =============================================================================
+handle_nesphp_nes_obj_draw:
+    JSR resolve_op1
+    JSR resolve_op2
+    JSR resolve_result
+    LDA #<(USER_RAM_EXT_BASE + 4096)
+    STA TMP1
+    LDA #>(USER_RAM_EXT_BASE + 4096)
+    STA TMP1+1             ; TMP1 = レコードポインタ
+    LDA #1
+    STA OAM_BUSY           ; 書き換え中は NMI の回転を止める
+    LDX #16                ; X = OAM offset (slot 4)
+    LDA RESULT_VAL+1
+    STA MR_H               ; 残り個数 (MR_* を作業用に借用)
+    STA OBJ_COUNT          ; nes_obj_at 用に覚えておく
+    LDA RESULT_VAL+2
+    BNE :+
+    LDA #224               ; しきい値の既定 = 画面下端
+:
+    STA MR_TC              ; y のしきい値 (MR_TC を借用)
+od_loop:
+    LDA MR_H
+    BNE :+
+    JMP od_finish
+:
+    CPX #0
+    BNE :+
+    JMP od_finish          ; slot 64 到達 (X が wrap): これ以上は描けない
+:
+    DEC MR_H
+    PRG_RAM_BANK3
+    LDY #0
+    LDA (TMP1), Y
+    STA MR_MX              ; x (マス)
+    INY
+    LDA (TMP1), Y
+    STA MR_MY              ; y (マス)
+    INY
+    LDA (TMP1), Y
+    STA MR_T               ; type
+    LDY #4
+    LDA (TMP1), Y
+    STA MR_P               ; pal
+    PRG_RAM_BANK0
+    CLC
+    LDA TMP1
+    ADC #5
+    STA TMP1
+    BCC :+
+    INC TMP1+1
+:
+    LDA MR_T
+    CMP #$FF
+    BNE :+
+    JMP od_hide
+:
+    ; sx = x*16 - cpx (16 bit) → hi == 0 かつ lo <= 240 で表示
+    LDA #0
+    STA MR_MUL+1
+    LDA MR_MX
+    ASL A
+    ROL MR_MUL+1
+    ASL A
+    ROL MR_MUL+1
+    ASL A
+    ROL MR_MUL+1
+    ASL A
+    ROL MR_MUL+1
+    SEC
+    SBC OP1_VAL+1
+    STA MR_X               ; sx lo
+    LDA MR_MUL+1
+    SBC OP1_VAL+2
+    BEQ :+
+    JMP od_hide
+:
+    LDA MR_X
+    CMP #241
+    BCC :+
+    JMP od_hide
+:
+    ; sy = y*16 - cpy - 1
+    LDA #0
+    STA MR_MUL+1
+    LDA MR_MY
+    ASL A
+    ROL MR_MUL+1
+    ASL A
+    ROL MR_MUL+1
+    ASL A
+    ROL MR_MUL+1
+    ASL A
+    ROL MR_MUL+1
+    SEC
+    SBC OP2_VAL+1
+    STA MR_BY              ; sy lo
+    LDA MR_MUL+1
+    SBC OP2_VAL+2
+    BNE od_hide
+    LDA MR_BY
+    SEC
+    SBC #1
+    BCC od_hide            ; sy = 0 → -1 は隠す (画面最上段 1 px 欠けより単純に)
+    CMP MR_TC
+    BCS od_hide            ; しきい値以上 (画面外 or 窓に重なる) は隠す
+    STA MR_BY
+    ; タイル基点 = $90 + type*4 (+$20 = 2 コマ目、nmi_obj_anim と同じ位相で描く)
+    LDA MR_T
+    ASL A
+    ASL A
+    CLC
+    ADC #$90
+    LDY ANIM_PHASE
+    BEQ :+
+    CLC
+    ADC #$20
+:
+    STA MR_T
+    ; 4 sprite: [y, tile, attr, x]
+    LDA MR_BY
+    STA OAM_SHADOW, X
+    STA OAM_SHADOW+4, X
+    CLC
+    ADC #8
+    STA OAM_SHADOW+8, X
+    STA OAM_SHADOW+12, X
+    LDA MR_T
+    STA OAM_SHADOW+1, X
+    CLC
+    ADC #1
+    STA OAM_SHADOW+5, X
+    ADC #1
+    STA OAM_SHADOW+9, X
+    ADC #1
+    STA OAM_SHADOW+13, X
+    LDA MR_P
+    AND #$03
+    STA OAM_SHADOW+2, X    ; 上 2 枚 (頭) = pal bit 0-1
+    STA OAM_SHADOW+6, X
+    LDA MR_P
+    LSR A
+    LSR A
+    AND #$03
+    STA OAM_SHADOW+10, X   ; 下 2 枚 (体) = pal bit 2-3
+    STA OAM_SHADOW+14, X
+    LDA MR_X
+    STA OAM_SHADOW+3, X
+    STA OAM_SHADOW+11, X
+    CLC
+    ADC #8
+    STA OAM_SHADOW+7, X
+    STA OAM_SHADOW+15, X
+    TXA
+    CLC
+    ADC #16
+    TAX                    ; 描いたときだけ次の slot へ
+od_hide:
+    JMP od_loop
+od_finish:
+    ; 残りの slot (X から 63 まで) を隠す。X = 0 なら全 slot 使用済み
+    LDA #15
+    STA OBJ_VIS
+    CPX #0
+    BEQ od_clear_done      ; X = 0 (wrap) = 15 体すべて使用
+    TXA
+    LSR A
+    LSR A
+    LSR A
+    LSR A
+    SEC
+    SBC #1
+    STA OBJ_VIS            ; X / 16 - 1 = 画面内のオブジェクト数 (slot 4 = offset 16 が 0 体目)
+    LDA #240
+od_clear:
+    STA OAM_SHADOW, X
+    INX
+    INX
+    INX
+    INX
+    BNE od_clear
+od_clear_done:
+    LDA #0
+    STA OAM_BUSY
+    JMP advance
+
+; =============================================================================
+; NESPHP_NES_OBJ_AT (0xDF): $r = nes_obj_at($x, $y)  (式として使う、戻り値 IS_LONG)
+;   マス (x, y) にあるオブジェクトレコード (bank 3 の 4096 から 5 byte × OBJ_COUNT、
+;   OBJ_COUNT は直近の nes_obj_draw の $n) を探し、無ければ 0、あれば 1 + msg を返す。
+;   sprite を持たないレコード (type $FF) なら bit 8 も立てる (通行判定に使わないため)。
+;   歩く先の当たり判定と A ボタンの会話相手探しを 1 op で済ませる (PHP のループだと
+;   1 体あたり約 12 op)。
+; =============================================================================
+handle_nesphp_nes_obj_at:
+    JSR resolve_op1
+    JSR resolve_op2
+    LDA #<(USER_RAM_EXT_BASE + 4096)
+    STA TMP1
+    LDA #>(USER_RAM_EXT_BASE + 4096)
+    STA TMP1+1
+    LDX OBJ_COUNT
+    LDA #0
+    STA RESULT_VAL+1       ; 見つからなければ 0
+    PRG_RAM_BANK3
+oa_loop:
+    CPX #0
+    BEQ oa_done
+    DEX
+    LDY #0
+    LDA (TMP1), Y
+    CMP OP1_VAL+1
+    BNE oa_next
+    INY
+    LDA (TMP1), Y
+    CMP OP2_VAL+1
+    BNE oa_next
+    LDY #3
+    LDA (TMP1), Y
+    CLC
+    ADC #1
+    STA RESULT_VAL+1       ; 1 + msg
+    LDY #2
+    LDA (TMP1), Y
+    CMP #$FF
+    BNE :+
+    LDA #1
+    STA RESULT_VAL+2       ; bit 8 = sprite なし (type $FF: 宝箱や任意のマスのセリフ、通行は妨げない)
+    JMP oa_done2
+:
+    JMP oa_done
+oa_next:
+    CLC
+    LDA TMP1
+    ADC #5
+    STA TMP1
+    BCC oa_loop
+    INC TMP1+1
+    JMP oa_loop
+oa_done:
+    LDA #0
+    STA RESULT_VAL+2
+oa_done2:
+    PRG_RAM_BANK0
+    LDA #TYPE_LONG
+    STA RESULT_VAL
+    LDA #0
+    STA RESULT_VAL+3
+    JSR write_result
+    JMP advance
+
+.segment "CODE"
+
+; =============================================================================
+; NESPHP_NES_CAM_MOVE (0xE1): nes_cam_move($dx, $dy, $frames)
+;   op1 = 1 フレームの dx、op2 = dy (符号付き)、result = フレーム数 (bit 8 = 1 なら
+;   勇者モード: scroll ではなく slot 0-3 を動かす)。NMI (nmi_cam_tween) が毎フレーム
+;   進める。この handler は前の補間が終わるのを待ってから新しい値を設定し、すぐ戻る
+;   (補間中に PHP が次の入力判定をできるように)。完了待ちは nes_cam_wait()。
+;   forced_blanking (NMI なし) では何もしない (呼び出し側が歩き終わりに nes_scroll で
+;   同期する前提)。
+; =============================================================================
+handle_nesphp_nes_cam_move:
+    JSR resolve_op1
+    JSR resolve_op2
+    JSR resolve_result
+    LDA sprite_mode_on
+    BEQ cm_done
+:
+    LDA cam_frames
+    BNE :-                 ; 前の補間が残っていれば終わるまで待つ
+    LDA OP1_VAL+1
+    STA cam_dx
+    LDA OP2_VAL+1
+    STA cam_dy
+    LDA RESULT_VAL+2
+    AND #$01
+    STA cam_mode
+    LDA RESULT_VAL+1
+    STA cam_frames         ; 最後に書く (NMI はこれが 0 の間は何もしない)
+cm_done:
+    JMP advance
+
+; NESPHP_NES_CAM_WAIT (0xDE): nes_cam_wait() — 補間が終わるまで spin (0 引数)
+handle_nesphp_nes_cam_wait:
+    LDA sprite_mode_on
+    BEQ :++
+:
+    LDA cam_frames
+    BNE :-
+:
+    JMP advance
+
+
+; =============================================================================
+; NESPHP_NES_SCROLL (0xE7): BG スクロール位置を設定
+;
+; 引数 (2 つ、どちらも runtime int 可):
+;   op1 = x (0-511: bit 8 = nametable 横選択)
+;   op2 = y (0-239: nametable は縦 30 行 = 240px で wrap するので 240 以上は不可)
+;
+; forced_blanking: shadow を直接更新 (rendering ON 時に apply_scroll が使う)。
+; sprite_mode:     NMI キューに scroll エントリ [$FE | x_hi][x_lo][1][y] を積む。
+;                  直前に積んだ nametable 書き込みと同じ VBlank で flush される
+;                  ので「端の列/行を書いてから 8px ずらす」が 1 フレームで揃う。
+; =============================================================================
+handle_nesphp_nes_scroll:
+    JSR resolve_op1        ; OP1_VAL = x
+    JSR resolve_op2        ; OP2_VAL = y
+    LDA sprite_mode_on
+    BNE ns_queue
+
+    ; forced_blanking: 直接 shadow へ
+    LDA OP1_VAL+1
+    STA scroll_x
+    LDA OP2_VAL+1
+    STA scroll_y
+    LDA OP1_VAL+2
+    AND #$01
+    STA TMP0
+    LDA ppu_ctrl_shadow
+    AND #$FC
+    ORA TMP0
+    STA ppu_ctrl_shadow
+    JMP advance
+
+ns_queue:
+    ; enqueue_ppu_nt に [hi = $FE | x_hi][lo = x_lo][len = 1][data = y] を積ませる
+    LDA OP2_VAL+1
+    STA INT_PRINT_BUFFER   ; data = y
+    LDA OP1_VAL+1
+    STA TMP0               ; lo = x_lo
+    LDA OP1_VAL+2
+    AND #$01
+    ORA #$FE
+    STA TMP0+1             ; hi = $FE | x_hi
+    LDA #<INT_PRINT_BUFFER
+    STA TMP1
+    LDA #>INT_PRINT_BUFFER
+    STA TMP1+1
+    LDA #1
+    STA TMP2
+    JSR enqueue_ppu_nt
+    JMP advance
 
 ; =============================================================================
 ; NESPHP_NES_VSYNC (0xFA): 次 VBlank まで spin
@@ -3430,6 +4659,21 @@ handle_nesphp_nes_sprite_attr:
 ; BCC で XOR 分岐させると 8 byte で書ける。
 ; rand_state = 0 だと永遠に 0 を返すので reset で 1 に初期化済み。
 ; =============================================================================
+; NESPHP_NES_SPRITE_TILE (0xE6): OAM[$idx*4+1] = tile
+;   op1 = $idx (0-63)、op2 = $tile。どちらも runtime int 可。nes_sprite_at の $tile は
+;   リテラル限定なので、向き/種類でタイルが変わる場合はこちらで後から差し替える。
+handle_nesphp_nes_sprite_tile:
+    JSR resolve_op1        ; OP1_VAL = $idx
+    JSR resolve_op2        ; OP2_VAL = $tile
+    LDA OP1_VAL+1
+    AND #$3F
+    ASL A
+    ASL A
+    TAX                    ; X = OAM offset
+    LDA OP2_VAL+1
+    STA OAM_SHADOW + 1, X  ; tile
+    JMP advance
+
 handle_nesphp_nes_rand:
     LSR rand_state+1       ; hi >>= 1, C = old hi bit 0
     ROR rand_state         ; lo = (lo>>1) | (C<<7), C = old lo bit 0
@@ -3786,10 +5030,12 @@ handle_nesphp_nes_poke_ext:
 ; op1 = $offset、result slot = $string (= 3 引数 intrinsic 枠と同じ慣習)
 ;
 ; ソース ($string) は STR_POOL (PRG-RAM bank 2)、宛先は bank 3。両方を同時に
-; マップできないので、内蔵 RAM の text buffer ($0600-$06FF, 256B) を中継
+; マップできないので、内蔵 RAM の TMP スロット page ($0500-$05FF, 256B) を中継
+; (statement 形式の呼び出し中は TMP が未使用なので借りる。$0600 page は
+; ATTR_SHADOW / MAP_PALTAB があるので使わない)
 ; バッファとして使う 2-stage コピー:
-;   stage 1 (bank 2): STR_POOL → $0600 (string max 255 bytes、1 chunk で足りる)
-;   stage 2 (bank 3): $0600 → USER_RAM_EXT[$offset]
+;   stage 1 (bank 2): STR_POOL → $0500 (string max 255 bytes、1 chunk で足りる)
+;   stage 2 (bank 3): $0500 → USER_RAM_EXT[$offset]
 ; =============================================================================
 handle_nesphp_nes_pokestr_ext:
     JSR resolve_op1
@@ -3811,14 +5057,14 @@ handle_nesphp_nes_pokestr_ext:
     LDA RESULT_VAL+3
     STA TMP2
 
-    ; --- stage 1 (bank 2): STR_POOL → 内蔵 RAM 中継 ($0600+) ---
+    ; --- stage 1 (bank 2): STR_POOL → 内蔵 RAM 中継 ($0500+) ---
     PRG_RAM_BANK2
     LDY #0
 nps_ext_to_ram:
     CPY TMP2
     BEQ nps_ext_to_ram_done
     LDA (TMP0), Y
-    STA $0600, Y
+    STA $0500, Y
     INY
     BNE nps_ext_to_ram
 nps_ext_to_ram_done:
@@ -3838,7 +5084,7 @@ nps_ext_to_ram_done:
 nps_ext_to_bank3:
     CPY TMP2
     BEQ nps_ext_to_bank3_done
-    LDA $0600, Y
+    LDA $0500, Y
     STA (TMP1), Y
     INY
     BNE nps_ext_to_bank3
@@ -3867,17 +5113,12 @@ enable_sprite_mode:
     LDA #>OAM_SHADOW       ; $02
     STA OAM_DMA
 
-    ; scroll (0, 0)
-    BIT PPUSTATUS
-    LDA #0
-    STA PPUSCROLL
-    STA PPUSCROLL
-
-    ; PPUCTRL: NMI enable。BG pattern table bit は shadow の現在値を継承する
+    ; PPUCTRL: NMI enable。BG pattern table bit / nametable 選択 bit は shadow の
+    ; 現在値を継承する。scroll も shadow から適用 (apply_scroll が PPUCTRL も書く)
     LDA ppu_ctrl_shadow
     ORA #%10000000
     STA ppu_ctrl_shadow
-    STA PPUCTRL
+    JSR apply_scroll
 
     ; PPUMASK: BG + sprite 有効、左端 8 ピクセルも表示
     LDA #%00011110
@@ -3923,11 +5164,18 @@ nmi:
     ; フレームカウンタを進める (nes_vsync が差分を spin wait する)
     INC vblank_frame
 
-    ; scroll をリセット (PPUADDR 書き込みで v レジスタが汚染される可能性への対策)
-    BIT PPUSTATUS
-    LDA #0
-    STA PPUSCROLL
-    STA PPUSCROLL
+    ; scroll を shadow から適用 (PPUADDR 書き込みで v レジスタが汚染されるので毎回)。
+    ; flush_nmi_queue 内の scroll エントリはここで初めて画面に反映される =
+    ; 同じキューに積まれた nametable 書き込みと同じ VBlank で切り替わる。
+    JSR apply_scroll
+
+    ; カメラ補間 (nes_cam_move)。PPU には触らず shadow (scroll / OAM) だけ更新するので
+    ; VBlank の外にはみ出しても構わない → VBlank 必須の処理の後に置く。
+    JSR nmi_cam_tween
+    ; 1 走査線 8 枚制限で消える sprite を毎フレーム入れ替える (ちらつきにする)
+    JSR nmi_obj_rotate
+    ; NPC の歩行アニメ (ANIM_PERIOD フレームごとに 2 コマを切り替え)
+    JSR nmi_obj_anim
 
     PLA
     STA TMP2
@@ -3947,6 +5195,215 @@ nmi:
     RTI
 
 ; =============================================================================
+; nmi_obj_rotate: NPC の OAM (slot 4 から OBJ_VIS 体 × 16 byte、画面内のものだけ) を毎フレーム 1 体ぶん回転
+;   NES は 1 走査線に 8 枚 (16px のキャラ 4 体) までで、超えた分は OAM で後ろのものが
+;   描かれない。順番を回すと消える相手が毎フレーム変わり、消えずにちらつく (DQ 等と同じ)。
+;   5 体以上のときだけ行う (4 体以下では超過が起きない)。nes_obj_draw の書き換え中は
+;   OAM_BUSY が立つので skip する。勇者 (slot 0-3) は常に最優先で回さない。
+; =============================================================================
+nmi_obj_rotate:
+    LDA OAM_BUSY
+    BNE nor_done
+    LDA OBJ_VIS
+    CMP #5
+    BCC nor_done
+    ; tmp = obj[0]
+    LDX #0
+:   LDA OAM_SHADOW+16, X
+    STA OBJ_ROT_TMP, X
+    INX
+    CPX #16
+    BNE :-
+    ; obj[1..n-1] → obj[0..n-2] (16*(n-1) byte を 16 byte 手前へ)
+    LDA OBJ_VIS
+    SEC
+    SBC #1
+    ASL A
+    ASL A
+    ASL A
+    ASL A
+    STA TMP0               ; count = 16*(n-1) (n <= 15 なので 8 bit に収まる)
+    LDX #0
+:   LDA OAM_SHADOW+32, X
+    STA OAM_SHADOW+16, X
+    INX
+    CPX TMP0
+    BNE :-
+    ; obj[n-1] = tmp
+    LDY #0
+:   LDA OBJ_ROT_TMP, Y
+    STA OAM_SHADOW+16, X
+    INX
+    INY
+    CPY #16
+    BNE :-
+nor_done:
+    RTS
+
+; =============================================================================
+; nmi_obj_anim: NPC の歩行アニメ (2 コマ)。ANIM_PERIOD フレームごとに ANIM_PHASE を反転し、
+;   slot 4-63 の OAM タイル番号に +$20 (A→B) / -$20 (B→A) する (2 コマ目は set 1 の
+;   $B0-$C7 = 1 コマ目 + $20 に置く約束)。nes_obj_draw は ANIM_PHASE を見て描くので
+;   再配置後も位相が続く。nes_obj_draw を一度も呼んでいない (OBJ_COUNT = 0) プログラムでは
+;   何もしない。OAM_BUSY 中は数えず 1 フレーム遅らせる。
+; =============================================================================
+nmi_obj_anim:
+    LDA OBJ_COUNT
+    BEQ noa_done
+    LDA OAM_BUSY
+    BNE noa_done
+    INC ANIM_CNT
+    LDA ANIM_CNT
+    CMP #ANIM_PERIOD
+    BNE noa_done
+    LDA #0
+    STA ANIM_CNT
+    LDA ANIM_PHASE
+    EOR #1
+    STA ANIM_PHASE
+    BEQ :+
+    LDA #$20
+    BNE :++
+:   LDA #$E0               ; -$20
+:   STA TMP0
+    LDX #16 + 1            ; slot 4 の tile byte
+    LDY #60                ; slot 4-63
+:   LDA OAM_SHADOW, X
+    CLC
+    ADC TMP0
+    STA OAM_SHADOW, X
+    INX
+    INX
+    INX
+    INX
+    DEY
+    BNE :-
+noa_done:
+    RTS
+
+; =============================================================================
+; nmi_cam_tween: nes_cam_move の 1 フレーム分
+;   cam_mode 0: scroll (9 bit x / 0-239 y) += (dx, dy)、slot 4-63 の表示中 sprite を
+;               (-dx, -dy) ずらす。画面端を越えたら y=240 で隠す (次の nes_obj_draw で復帰)
+;   cam_mode 1: slot 0-3 (勇者) を (+dx, +dy) ずらす (カメラがマップ端で止まっている歩き)
+; =============================================================================
+nmi_cam_tween:
+    LDA cam_frames
+    BNE :+
+    RTS
+:
+    DEC cam_frames
+    LDA cam_mode
+    BEQ nct_camera
+    ; --- 勇者モード ---
+    LDX #0
+nct_hero_loop:
+    LDA OAM_SHADOW+3, X
+    CLC
+    ADC cam_dx
+    STA OAM_SHADOW+3, X
+    LDA OAM_SHADOW, X
+    CLC
+    ADC cam_dy
+    STA OAM_SHADOW, X
+    INX
+    INX
+    INX
+    INX
+    CPX #16
+    BNE nct_hero_loop
+    RTS
+
+nct_camera:
+    ; --- scroll x (9 bit): lo = scroll_x, hi = ppu_ctrl_shadow bit 0 ---
+    LDA cam_dx
+    CLC
+    ADC scroll_x
+    STA scroll_x
+    LDA ppu_ctrl_shadow
+    AND #$01
+    STA TMP0
+    LDA cam_dx
+    BMI nct_x_neg
+    LDA TMP0
+    ADC #0                 ; carry = 桁上がり
+    JMP nct_x_store
+nct_x_neg:
+    LDA TMP0
+    ADC #$FF               ; 符号拡張 (-1 + carry)
+nct_x_store:
+    AND #$01
+    STA TMP0
+    LDA ppu_ctrl_shadow
+    AND #$FE
+    ORA TMP0
+    STA ppu_ctrl_shadow
+    ; --- scroll y: 0-239 で wrap ---
+    LDA cam_dy
+    BMI nct_y_neg
+    CLC
+    ADC scroll_y
+    CMP #240
+    BCC nct_y_store
+    SBC #240
+    JMP nct_y_store
+nct_y_neg:
+    CLC
+    ADC scroll_y
+    BCS nct_y_store        ; carry set = 借りなし = 0 以上
+    CLC
+    ADC #240
+nct_y_store:
+    STA scroll_y
+    ; --- slot 4-63 の sprite を逆方向へ ---
+    LDX #16
+nct_spr_loop:
+    LDA OAM_SHADOW, X
+    CMP #240
+    BCS nct_spr_next       ; 非表示
+    ; x -= dx (dx >= 0 で借りが出たら左端越え、dx < 0 で桁上がりなら右端越え → 隠す)
+    LDA OAM_SHADOW+3, X
+    SEC
+    SBC cam_dx
+    STA TMP0
+    LDA cam_dx
+    BMI nct_x_chk_neg
+    BCC nct_spr_hide       ; dx >= 0: 借り → 0 未満
+    JMP nct_spr_x_ok
+nct_x_chk_neg:
+    BCS nct_spr_hide       ; dx < 0: 桁上がり → 255 超
+nct_spr_x_ok:
+    LDA TMP0
+    STA OAM_SHADOW+3, X
+    ; y -= dy、結果が 0-223 の外なら隠す
+    LDA OAM_SHADOW, X
+    SEC
+    SBC cam_dy
+    STA TMP0
+    LDA cam_dy
+    BMI nct_y_chk_neg
+    BCC nct_spr_hide
+    JMP nct_spr_y_ok
+nct_y_chk_neg:
+    BCS nct_spr_hide
+nct_spr_y_ok:
+    LDA TMP0
+    CMP #224
+    BCS nct_spr_hide
+    STA OAM_SHADOW, X
+    JMP nct_spr_next
+nct_spr_hide:
+    LDA #240
+    STA OAM_SHADOW, X
+nct_spr_next:
+    INX
+    INX
+    INX
+    INX
+    BNE nct_spr_loop       ; X が 256 で 0 に戻ったら終了
+    RTS
+
+; =============================================================================
 ; flush_nmi_queue: NMI_QUEUE に積まれた nametable 書き込みを PPU に流し込む
 ;
 ; キューフォーマット (byte stream):
@@ -3962,36 +5419,100 @@ nmi:
 ; あり race はない。VBlank 予算 (~2273 cycles) を超えないよう、1 エントリは
 ; 最大 3 + 253 = 256 バイトまで (= キュー全体)。
 ; =============================================================================
+; 1 回の NMI で流す量の上限。単位は「データ 1 byte = 1、エントリ 1 本 = +NMI_ENTRY_COST」
+; (実測のサイクル: データ 1 byte = 15 cycle、エントリの固定処理 ≈ 90 cycle = 6 単位)。
+; VBlank は 2273 cycle、NMI 固定分 (レジスタ退避 + OAM DMA 513 + apply_scroll) ≈ 620 cycle
+; なので flush に使えるのは約 1650 cycle ≈ 110 単位。余裕を見て 90 単位 (1350 cycle)。
+; エントリを処理する前にコストを見て、足りなければそのエントリごと次のフレームに回す
+; (処理後に引く方式だと最後の 1 本が予算をはみ出す)。超えると描画開始後の PPUDATA
+; 書き込みが v レジスタの汚染で無関係な場所に化ける (実測で 3 回踏んだ)。
+NMI_FLUSH_BUDGET = 90
+NMI_ENTRY_COST   = 6
+
 flush_nmi_queue:
     LDX nmi_queue_read
     CPX nmi_queue_write
     BEQ fnq_done                 ; 空
+    LDA #NMI_FLUSH_BUDGET
+    STA TMP1                     ; 残り予算 (NMI が TMP1 を退避済み)
 fnq_loop:
+    ; --- コストの事前チェック: len は X+2 (ring なので Y 経由で wrap) ---
+    TXA
+    CLC
+    ADC #2
+    TAY
+    LDA NMI_QUEUE_ADDR, Y        ; len
+    CLC
+    ADC #NMI_ENTRY_COST
+    CMP TMP1
+    BEQ :+
+    BCS fnq_done                 ; cost > 残り → 次フレーム
+:
+    STA TMP2
+    SEC
+    LDA TMP1
+    SBC TMP2
+    STA TMP1
+    ; --- エントリ処理 ---
     BIT PPUSTATUS
-    LDA NMI_QUEUE_ADDR, X        ; addr_hi
+    LDA NMI_QUEUE_ADDR, X        ; addr_hi (bit 7 = +32 増分モード: 縦 1 列を 1 エントリで書く)
+    CMP #$FE
+    BCS fnq_scroll               ; $FE/$FF = scroll エントリ (nes_scroll)
+    LDY #0
+    STY TMP2                     ; 0 = 横 (増分 +1 のまま)
+    CMP #$80
+    BCC fnq_horiz
+    PHA
+    LDA ppu_ctrl_shadow
+    ORA #$04
+    STA PPUCTRL                  ; PPUDATA の増分を +32 に
+    STA TMP2                     ; != 0: エントリ後に増分を戻す
+    PLA
+    AND #$3F
+fnq_horiz:
     STA PPUADDR
     INX
     LDA NMI_QUEUE_ADDR, X        ; addr_lo
     STA PPUADDR
     INX
-    LDA NMI_QUEUE_ADDR, X        ; len
-    STA TMP0
+    LDA NMI_QUEUE_ADDR, X        ; len (1-253、0 は積まれない)
+    TAY
     INX
-    LDY #0
 fnq_inner:
-    CPY TMP0
-    BEQ fnq_entry_done
     LDA NMI_QUEUE_ADDR, X
     STA PPUDATA
     INX
-    INY
+    DEY
     BNE fnq_inner
+    LDA TMP2
+    BEQ fnq_entry_done
+    LDA ppu_ctrl_shadow
+    STA PPUCTRL                  ; 増分を +1 に戻す
 fnq_entry_done:
     CPX nmi_queue_write
     BNE fnq_loop                 ; まだエントリがある (== なら空)
 fnq_done:
-    STX nmi_queue_read           ; read を write に追いつかせる
+    STX nmi_queue_read           ; read を処理済み位置まで進める
     RTS
+
+    ; scroll エントリ: [$FE | x_hi][x_lo][1][y]。PPU には書かず shadow だけ更新
+    ; (NMI 末尾の apply_scroll が反映する)
+fnq_scroll:
+    AND #$01
+    STA TMP0
+    LDA ppu_ctrl_shadow
+    AND #$FC
+    ORA TMP0
+    STA ppu_ctrl_shadow
+    INX
+    LDA NMI_QUEUE_ADDR, X        ; x_lo
+    STA scroll_x
+    INX                          ; len (= 1) を読み飛ばす
+    INX
+    LDA NMI_QUEUE_ADDR, X        ; y
+    STA scroll_y
+    INX
+    JMP fnq_entry_done
 
 ; =============================================================================
 ; enqueue_ppu_nt: NMI キューに nametable 書き込みエントリを追加する
@@ -4493,3 +6014,12 @@ palette_data:
 ; =============================================================================
 .segment "CHRDATA"
     .incbin "chr/font.chr", 0, $4000  ; 16KB (4 セット分、PRG_BANK1 全域)
+
+; =============================================================================
+; GAMEDATA — PRG-ROM bank 2 (16KB)。example ごとの examples/NAME.data.bin (なければ
+; 空) を Makefile が build/data.bin にコピーして焼く。nes_rom_copy で PRG-RAM bank 3
+; へ展開したり、nes_chr_copy で CHR-RAM へグリフを転送したりする (spec/14-map-scroll.md)。
+; =============================================================================
+.segment "GAMEDATA"
+    .incbin "build/data.bin"
+    .byte $FF                         ; 空ファイルでも segment を空にしない

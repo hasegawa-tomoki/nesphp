@@ -95,6 +95,16 @@ INT_PEEK_EXT    = 21    ; nes_peek_ext($offset) — 13-bit offset、bank 2
 INT_POKE_EXT    = 22    ; nes_poke_ext($offset, $byte) — bank 2
 INT_POKESTR_EXT = 23    ; nes_pokestr_ext($offset, $string) — bank 2
 INT_PEEK16_EXT  = 24    ; nes_peek16_ext($offset) — bank 2
+INT_SCROLL      = 25    ; nes_scroll($x, $y) — 2 引数 全 runtime、戻り値なし
+INT_SPRITE_TILE = 26    ; nes_sprite_tile($idx, $tile) — 2 引数 全 runtime、戻り値なし
+INT_MAP_CFG     = 27    ; nes_map_cfg($mw, $mode) — 2 引数 全 runtime
+INT_MAP_RECT    = 28    ; nes_map_rect($mx, $my, $w, $h) — 4 引数、$h は CV 変数限定
+INT_ROM_COPY    = 29    ; nes_rom_copy($dst, $src, $len) — 3 引数 全 runtime
+INT_CHR_COPY    = 30    ; nes_chr_copy($tile, $src, $n) — 3 引数 全 runtime
+INT_OBJ_DRAW    = 31    ; nes_obj_draw($cpx, $cpy, $n) — 3 引数 全 runtime
+INT_CAM_MOVE    = 32    ; nes_cam_move($dx, $dy, $frames) — 3 引数 全 runtime
+INT_OBJ_AT      = 33    ; nes_obj_at($x, $y) — 式専用、IS_LONG 返却
+INT_CAM_WAIT    = 34    ; nes_cam_wait() — 0 引数、戻り値なし
 INT_NOT_FOUND   = $FF
 
 ARG_STDIN_SENTINEL = $FE
@@ -1819,7 +1829,9 @@ cpp_ident:
     JMP cpp_ident_btn
 :
     CMP #INT_COUNT
-    BEQ cpp_ident_count
+    BNE :+
+    JMP cpp_ident_count
+:
     CMP #INT_RAND
     BNE :+
     JMP cpp_ident_rand
@@ -1840,7 +1852,87 @@ cpp_ident:
     BNE :+
     JMP cpp_ident_peek16_ext
 :
+    CMP #INT_OBJ_AT
+    BNE :+
+    JMP cpp_ident_obj_at
+:
     JMP cmp_error
+
+; nes_obj_at($x, $y) 式: '(' expr ',' expr ')'、op1 = $x, op2 = $y, result = 新 TMP
+cpp_ident_obj_at:
+    JSR cmp_lex_next
+    LDA CMP_TOK_KIND
+    CMP #TK_LPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_lex_next
+    JSR cmp_parse_expr               ; CMP_EXPR = $x
+    LDA CMP_EXPR_VAL
+    PHA
+    LDA CMP_EXPR_VAL+1
+    PHA
+    LDA CMP_EXPR_TYPE
+    PHA                              ; $x を退避 (2 つ目の式が op を出すかもしれない)
+    LDA CMP_TOK_KIND
+    CMP #TK_COMMA
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_lex_next
+    JSR cmp_parse_expr               ; CMP_EXPR = $y
+    LDA CMP_TOK_KIND
+    CMP #TK_RPAREN
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op_zero
+    LDY #ZOP_OP2
+    LDA CMP_EXPR_VAL
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA CMP_EXPR_VAL+1
+    STA (CMP_OP_HEAD), Y
+    LDY #ZOP_OP2_TYPE
+    LDA CMP_EXPR_TYPE
+    STA (CMP_OP_HEAD), Y
+    PLA
+    LDY #ZOP_OP1_TYPE
+    STA (CMP_OP_HEAD), Y
+    PLA
+    LDY #1
+    STA (CMP_OP_HEAD), Y
+    PLA
+    LDY #0
+    STA (CMP_OP_HEAD), Y
+    LDX CMP_TMP_COUNT
+    CPX #64
+    BCC :+
+    JMP cmp_error
+:
+    JSR cmp_lit_idx_to_offset
+    LDY #ZOP_RESULT
+    LDA TMP0
+    STA (CMP_OP_HEAD), Y
+    INY
+    LDA TMP0+1
+    STA (CMP_OP_HEAD), Y
+    LDY #ZOP_RESULT_TYPE
+    LDA #IS_TMP_VAR
+    STA (CMP_OP_HEAD), Y
+    LDY #ZOP_OPCODE
+    LDA #NESPHP_NES_OBJ_AT
+    STA (CMP_OP_HEAD), Y
+    INC CMP_TMP_COUNT
+    JSR cmp_op_finish
+    LDA TMP0
+    STA CMP_EXPR_VAL
+    LDA TMP0+1
+    STA CMP_EXPR_VAL+1
+    LDA #IS_TMP_VAR
+    STA CMP_EXPR_TYPE
+    JSR cmp_lex_next                 ; ')' を consume
+    RTS
 
 ; count($a) 式: '(' expr ')' をパース、ZEND_COUNT op1=expr、result = 新 TMP
 cpp_ident_count:
@@ -3395,6 +3487,86 @@ cmp_match_intrinsic:
     LDA #INT_ATTR
     RTS
 :
+    LDA #<intrinsic_name_nes_scroll
+    LDX #>intrinsic_name_nes_scroll
+    LDY #10
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_SCROLL
+    RTS
+:
+    LDA #<intrinsic_name_nes_sprite_tile
+    LDX #>intrinsic_name_nes_sprite_tile
+    LDY #15
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_SPRITE_TILE
+    RTS
+:
+    LDA #<intrinsic_name_nes_map_cfg
+    LDX #>intrinsic_name_nes_map_cfg
+    LDY #11
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_MAP_CFG
+    RTS
+:
+    LDA #<intrinsic_name_nes_map_rect
+    LDX #>intrinsic_name_nes_map_rect
+    LDY #12
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_MAP_RECT
+    RTS
+:
+    LDA #<intrinsic_name_nes_rom_copy
+    LDX #>intrinsic_name_nes_rom_copy
+    LDY #12
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_ROM_COPY
+    RTS
+:
+    LDA #<intrinsic_name_nes_chr_copy
+    LDX #>intrinsic_name_nes_chr_copy
+    LDY #12
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_CHR_COPY
+    RTS
+:
+    LDA #<intrinsic_name_nes_obj_draw
+    LDX #>intrinsic_name_nes_obj_draw
+    LDY #12
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_OBJ_DRAW
+    RTS
+:
+    LDA #<intrinsic_name_nes_cam_move
+    LDX #>intrinsic_name_nes_cam_move
+    LDY #12
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_CAM_MOVE
+    RTS
+:
+    LDA #<intrinsic_name_nes_obj_at
+    LDX #>intrinsic_name_nes_obj_at
+    LDY #10
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_OBJ_AT
+    RTS
+:
+    LDA #<intrinsic_name_nes_cam_wait
+    LDX #>intrinsic_name_nes_cam_wait
+    LDY #12
+    JSR cmi_try_match
+    BCS :+
+    LDA #INT_CAM_WAIT
+    RTS
+:
     LDA #<intrinsic_name_nes_vsync
     LDX #>intrinsic_name_nes_vsync
     LDY #9
@@ -3553,6 +3725,16 @@ intrinsic_name_nes_peek16_ext:  .byte "nes_peek16_ext"
 intrinsic_name_nes_poke_ext:    .byte "nes_poke_ext"
 intrinsic_name_nes_pokestr_ext: .byte "nes_pokestr_ext"
 intrinsic_name_nes_attr:      .byte "nes_attr"
+intrinsic_name_nes_scroll:    .byte "nes_scroll"
+intrinsic_name_nes_sprite_tile: .byte "nes_sprite_tile"
+intrinsic_name_nes_map_cfg:   .byte "nes_map_cfg"
+intrinsic_name_nes_map_rect:  .byte "nes_map_rect"
+intrinsic_name_nes_rom_copy:  .byte "nes_rom_copy"
+intrinsic_name_nes_chr_copy:  .byte "nes_chr_copy"
+intrinsic_name_nes_obj_draw:  .byte "nes_obj_draw"
+intrinsic_name_nes_cam_move:  .byte "nes_cam_move"
+intrinsic_name_nes_obj_at:    .byte "nes_obj_at"
+intrinsic_name_nes_cam_wait:  .byte "nes_cam_wait"
 intrinsic_name_nes_vsync:     .byte "nes_vsync"
 intrinsic_name_nes_btn:       .byte "nes_btn"
 intrinsic_name_count:         .byte "count"
@@ -3596,6 +3778,16 @@ cmp_emit_jmp_table:
     .word cmp_emit_poke_ext         ; INT_POKE_EXT (22)
     .word cmp_emit_pokestr_ext      ; INT_POKESTR_EXT (23)
     .word cmp_emit_peek_stmt        ; INT_PEEK16_EXT (24) — stmt 文脈は NOP
+    .word cmp_emit_scroll           ; INT_SCROLL (25)
+    .word cmp_emit_sprite_tile      ; INT_SPRITE_TILE (26)
+    .word cmp_emit_map_cfg          ; INT_MAP_CFG (27)
+    .word cmp_emit_map_rect         ; INT_MAP_RECT (28)
+    .word cmp_emit_rom_copy         ; INT_ROM_COPY (29)
+    .word cmp_emit_chr_copy         ; INT_CHR_COPY (30)
+    .word cmp_emit_obj_draw         ; INT_OBJ_DRAW (31)
+    .word cmp_emit_cam_move         ; INT_CAM_MOVE (32)
+    .word cmp_emit_peek_stmt        ; INT_OBJ_AT (33) — stmt 文脈は NOP
+    .word cmp_emit_cam_wait         ; INT_CAM_WAIT (34)
 
 cmp_emit_cls:
     LDA CMP_ARG_COUNT
@@ -3807,6 +3999,137 @@ cmp_emit_attr:
     JSR cmp_set_result_from_arg
     LDY #ZOP_OPCODE
     LDA #NESPHP_NES_ATTR
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_scroll($x, $y) — どちらも any operand type
+; op1 = $x, op2 = $y
+cmp_emit_scroll:
+    LDA CMP_ARG_COUNT
+    CMP #2
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDY #ZOP_OPCODE
+    LDA #NESPHP_NES_SCROLL
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_sprite_tile($idx, $tile) — どちらも any operand type
+cmp_emit_sprite_tile:
+    LDA CMP_ARG_COUNT
+    CMP #2
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDY #ZOP_OPCODE
+    LDA #NESPHP_NES_SPRITE_TILE
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_map_cfg($mw, $mode) — どちらも any operand type
+cmp_emit_map_cfg:
+    LDA CMP_ARG_COUNT
+    CMP #2
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDY #ZOP_OPCODE
+    LDA #NESPHP_NES_MAP_CFG
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_map_rect($mx, $my, $w, $h)
+; op1 = $mx, op2 = $my, result = $w (any operand type)、extended_value = $h の CV オフセット
+; (extended_value には型がないので 4 引数目は CV 変数に限定。式や定数はコンパイルエラー)
+cmp_emit_map_rect:
+    LDA CMP_ARG_COUNT
+    CMP #4
+    BEQ :+
+    JMP cmp_error
+:
+    LDA CMP_ARG_TYPES+3
+    CMP #IS_CV
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDX #2
+    JSR cmp_set_result_from_arg
+    LDX #3
+    JSR cmp_set_extended_from_arg
+    LDY #ZOP_OPCODE
+    LDA #NESPHP_NES_MAP_RECT
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_rom_copy($dst, $src, $len) / nes_chr_copy($tile, $src, $n)
+; 3 引数とも any operand type。op1, op2, result (3 引数目、nes_putint と同じ慣習)
+cmp_emit_rom_copy:
+    LDA #NESPHP_NES_ROM_COPY
+    JMP cmp_emit_3args
+cmp_emit_chr_copy:
+    LDA #NESPHP_NES_CHR_COPY
+    JMP cmp_emit_3args
+cmp_emit_obj_draw:
+    LDA #NESPHP_NES_OBJ_DRAW
+    JMP cmp_emit_3args
+cmp_emit_cam_move:
+    LDA #NESPHP_NES_CAM_MOVE
+cmp_emit_3args:
+    PHA
+    LDA CMP_ARG_COUNT
+    CMP #3
+    BEQ :+
+    PLA
+    JMP cmp_error
+:
+    JSR cmp_op_zero
+    LDX #0
+    JSR cmp_set_op1_from_arg
+    LDX #1
+    JSR cmp_set_op2_from_arg
+    LDX #2
+    JSR cmp_set_result_from_arg
+    LDY #ZOP_OPCODE
+    PLA
+    STA (CMP_OP_HEAD), Y
+    JSR cmp_op_finish
+    RTS
+
+; nes_cam_wait() — 0 引数、戻り値なし
+cmp_emit_cam_wait:
+    LDA CMP_ARG_COUNT
+    BEQ :+
+    JMP cmp_error
+:
+    JSR cmp_op_zero
+    LDY #ZOP_OPCODE
+    LDA #NESPHP_NES_CAM_WAIT
     STA (CMP_OP_HEAD), Y
     JSR cmp_op_finish
     RTS
