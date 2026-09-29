@@ -171,6 +171,7 @@ while (true) {
 | [`examples/tetris2.php`](./examples/tetris2.php) | テトリス v2: v1 の作り直し — スポーン位置重なりでの正しい GAME OVER 判定、ライン消去の圧縮ロジック整理、衝突判定ループ統合、落下ピースの差分描画 | USER_RAM / USER_RAM_EXT レイアウトは v1 と同系、ext RAM に描画タイル番号を直接保持 |
 | [`examples/tetris3.php`](./examples/tetris3.php) | テトリス v3: ゼロベースの NES 準拠実装 — 10×20 フィールド + 隠し 2 行、中心ピボット回転、NEXT プレビュー、LINES / LEVEL (落下加速)、40/100/300/1200 スコア、DAS リピート、ソフトドロップ | v1/v2 とは独立 (CHR ピースタイルのみ共用) |
 | [`examples/elephpant.php`](./examples/elephpant.php) | マリオ風アクションデモ: 16×16 の elePHPant を慣性つき移動、可変ジャンプ、ダッシュ、歩行アニメ、浮きブロック | 2×2 スプライト合成、`nes_sprite_attr` 水平反転、カスタム CHR タイル (elePHPant / 雲 / ? ブロック)、固定小数点物理 |
+| [`examples/scrolldemo.php`](./examples/scrolldemo.php) | 横スクロールの仕組みデモ (発表資料用): HELLO PHP! を行ごとに 1 文字ずらして敷き詰め、A ボタンで STOP (最初の静止画面) → LOOP (リングを回すだけ) / DRAW (右端に入ってきた 1 列だけを画面内で書き換えて、境目なしに帯を続ける。書き換わる瞬間が見える) / SLOW (1px / 8 フレーム) を切替 | nametable 2 枚 = 512px のリング、`nes_cam_move` の NMI 補間 + 列 1 本 (27 文字) の転送、画面データを bank 3 に列ごとに保持 |
 | [`examples/fontdemo.php`](./examples/fontdemo.php) | 全フォントグリフの一覧表示 (大文字 / 小文字 / 数字 / 記号) | アーケード風太字の数字・大文字グリフの見本 |
 | [`examples/peek_test.php`](./examples/peek_test.php) | peek/poke/pokestr のスモークテスト | USER_RAM への文字列コピー + 1-byte read/write |
 | [`examples/peekext_test.php`](./examples/peekext_test.php) | peek_ext / poke_ext / pokestr_ext のスモークテスト | USER_RAM_EXT (bank 3) への bulk copy + read/write |
