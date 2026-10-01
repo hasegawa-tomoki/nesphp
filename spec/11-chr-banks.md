@@ -43,7 +43,7 @@ The single source of truth is `vm/nesphp.s` `.segment "HEADER"` and `vm/nesphp.c
 | | CNROM (oldest) | MMC1 SNROM (older) | **MMC1 SXROM + CHR-RAM (current)** |
 |---|---|---|---|
 | CHR | 32KB CHR-ROM | up to 128KB CHR-ROM | **8KB CHR-RAM** (8KB transferred from PRG bank 1 to PPU $0000-$1FFF at boot) |
-| CHR switch granularity | 8KB at once | 4KB × 2 | **bank switching is meaningless under CHR-RAM** ($A000/$C000 regs are repurposed as PRG-RAM bank select on SXROM) |
+| CHR switch granularity | 8KB at once | 4KB × 2 | **bank switching is meaningless under CHR-RAM** ($A000/$C000 regs are repurposed as PRG-RAM bank select on SXROM). The control register is fixed to **8KB CHR mode ($0E)**: in 4KB mode the PRG-RAM bank follows PPU A12, i.e. $A000 during BG fetches and $C000 during sprite fetches, so reads of bank 3 return bank 0 bytes intermittently on real hardware (not reproduced by fceux; seen on an EverDrive N8 Pro, 2026-10-01) |
 | PRG-ROM | none | 16KB units ($8000 switched, $C000 fixed) | **128KB**: bank 7 ($C000 fixed) = VM CODE, banks 0-3 ($8000 switched) = PHPSRC / CHRDATA / GAMEDATA / RUNTIME, 4-6 empty |
 | PRG-RAM (WRAM) | none | 8KB ($6000-$7FFF, single bank) | **32KB = 4 × 8KB banks** (selected by $A000 reg bits 2-3): bank 0 = op_array+literals, bank 1 = ARR_POOL, bank 2 = STR_POOL, bank 3 = USER_RAM_EXT |
 

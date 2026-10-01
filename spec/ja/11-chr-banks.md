@@ -43,7 +43,7 @@
 | | CNROM (古) | MMC1 SNROM (旧) | **MMC1 SXROM + CHR-RAM (現在)** |
 |---|---|---|---|
 | CHR | 32KB CHR-ROM | 128KB CHR-ROM 上限 | **8KB CHR-RAM** (起動時に PRG bank 1 から 8KB を PPU $0000-$1FFF へ転送) |
-| CHR 切替粒度 | 8KB 一括 | 4KB × 2 面 | **CHR-RAM では bank 切替の意味は薄い** ($A000/$C000 reg は SXROM では PRG-RAM bank select に流用) |
+| CHR 切替粒度 | 8KB 一括 | 4KB × 2 面 | **CHR-RAM では bank 切替の意味は薄い** ($A000/$C000 reg は SXROM では PRG-RAM bank select に流用)。control は **8KB mode ($0E) 固定**: 4KB mode だと PRG-RAM bank が PPU A12 (BG/sprite fetch) で $A000/$C000 reg の間を揺れ、実機で bank 3 の読み出しが化ける (fceux では再現しない、2026-10-01 EverDrive N8 Pro で確認) |
 | PRG-ROM | なし | 16KB 単位 ($8000 切替、$C000 固定) | **128KB**: bank 7 ($C000 固定) = VM CODE、bank 0-3 ($8000 切替可) = PHPSRC / CHRDATA / GAMEDATA / RUNTIME、4-6 空き |
 | PRG-RAM (WRAM) | なし | 8KB ($6000-$7FFF 単一 bank) | **32KB = 4 × 8KB bank** ($A000 reg bit 2-3 で切替): bank 0 = op_array+literals、bank 1 = ARR_POOL、bank 2 = STR_POOL、bank 3 = USER_RAM_EXT |
 

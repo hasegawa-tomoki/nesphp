@@ -165,6 +165,8 @@ DMC_FREQ     = $4010
 
 ; --- PRG-RAM bank 切替マクロ (SXROM) ---
 ; $A000 reg の bit 2-3 = PRG-RAM bank (CHR-RAM 環境では bit 0-1 は no-op)。
+; MMC1 control は CHR 8KB mode にしてあるので $A000 だけで決まる (4KB mode だと
+; sprite fetch 中は $C000 reg が使われて実機で bank が揺れる。reset の注釈参照)。
 ; bank 1 の値 = %00000100 (bit 2 set)、bank 0 の値 = %00000000。
 ; ARR_POOL を触る handler が入口で BANK1、出口で BANK0 を呼ぶ。
 ; A レジスタを clobber する。両マクロは ~30 cycles (LDA + 5 STA + 4 LSR)。
@@ -482,19 +484,30 @@ reset:
     LDA #$80
     STA $8000
 
-    ; Control ($8000): CHR 4KB mode (bit4=1), PRG fix-last mode (bit3-2=11),
+    ; Control ($8000): CHR 8KB mode (bit4=0), PRG fix-last mode (bit3-2=11),
     ;                  vertical mirroring (bit1-0=10: nametable 0/1 が横に並ぶ =
     ;                  横スクロールは継ぎ目なし、縦は 240px で wrap)
-    ;   %11110 = $1E
-    LDA #$1E
+    ;   %01110 = $0E
+    ;
+    ; **CHR は必ず 8KB mode にする** (2026-10-01、実機 EverDrive N8 Pro で判明)。
+    ; SXROM の PRG-RAM bank 選択 (CHR reg の bit 2-3) は、4KB mode だと PPU が
+    ; $0000 (BG) を読む間は $A000 reg、$1000 (sprite) を読む間は $C000 reg から
+    ; 取られる。描画中は PPU A12 が走査線ごとに BG/sprite で切り替わるので、
+    ; $A000 だけ bank 3 にしても sprite fetch の間は bank 0 に戻り、CPU が
+    ; PRG-RAM bank 3 (マップ / メッセージ) を読むと時々 bank 0 の中身が返る
+    ; (= 街の草原に石壁が湧く)。fceux は $A000 しか見ないので再現しない。
+    ; 8KB mode なら $C000 reg は無視され、PRG-RAM bank は常に $A000 reg で決まる。
+    ; CHR-RAM 8KB は $0000-$1FFF に線形に並ぶので CHR の見え方は 4KB mode と同じ。
+    LDA #$0E
     MMC1_WRITE $8000
 
-    ; CHR bank 0 ($A000): $0000-$0FFF に 4KB bank 0 (通常フォント)
+    ; CHR bank 0 ($A000): 8KB mode では bit 1-4 が 8KB CHR bank (CHR-RAM 8KB では
+    ; 無効)、bit 2-3 が PRG-RAM bank。起動時は 0 (PRG-RAM bank 0)
     LDA #0
     MMC1_WRITE $A000
 
-    ; CHR bank 1 ($C000): $1000-$1FFF に 4KB bank 1 (インバースフォント)
-    LDA #1
+    ; CHR bank 1 ($C000): 8KB mode では無視される。念のため bank 0 と同じ値にしておく
+    LDA #0
     MMC1_WRITE $C000
 
     ; PRG bank ($E000): $8000-$BFFF に PRG bank 0 (ops.bin), WRAM 有効 (bit4=0)
