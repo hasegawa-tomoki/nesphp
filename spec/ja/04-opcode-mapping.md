@@ -77,9 +77,9 @@ Q2: 16 進リテラル `0x..` 対応 (lexer)。Q3: `ZEND_PRE_INC` (34) / `ZEND_P
 | `ZEND_RETURN` | **62 (0x3E)** | MVP | PPUMASK 有効化 (forced_blanking 時) → 無限ループ |
 | `ZEND_ECHO` | **136 (0x88)** | MVP / 延長1 | op1 (IS_STRING / IS_LONG) を PPU nametable に出力。IS_LONG は `print_int16` で decimal ASCII に変換 |
 
-## nesphp カスタム opcode (0xE0-0xFF 帯)
+## nesphp カスタム opcode (0xD2-0xFF 帯)
 
-Zend は 0-209 までを使っているので、`0xE0-0xFF` を nesphp 独自領域として確保。すべて serializer のパターン畳み込みで生成される。
+Zend は 0-209 (0xD1) までを使っているので、`0xD2-0xFF` (46 個) を nesphp 独自領域として確保。当初は 0xE0-0xFF の 32 個だったが 2026-09-29 の街のスクロール対応で使い切り、0xDF から下へ伸ばしている (残り 0xD2-0xDD の 12 個)。すべて serializer / on-NES コンパイラのパターン畳み込みで生成される。
 
 | opcode | 番号 | 役割 |
 |---|---|---|

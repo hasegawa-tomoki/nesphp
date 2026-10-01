@@ -74,9 +74,9 @@ L3S-emitted nesphp custom opcodes (intrinsic folding):
 
 Q2: hex literals `0x..` (lexer). Q3: `ZEND_PRE_INC` (34) / `ZEND_PRE_DEC` (35) / `ZEND_POST_INC` (36) / `ZEND_POST_DEC` (37) emittable in L3S (`++$x` / `$x++` / `--$x` / `$x--`). Q4: `for (init; cond; update) body` lowered into a double-JMP and emitted.
 
-## nesphp custom opcode range (0xE0-0xFF)
+## nesphp custom opcode range (0xD2-0xFF)
 
-Zend uses 0-209, so we reserve `0xE0-0xFF` as nesphp's territory. They are all generated via the serializer's pattern folding.
+Zend uses 0-209 (0xD1), so `0xD2-0xFF` (46 slots) is nesphp's territory. It started as 0xE0-0xFF (32 slots); the town scrolling work on 2026-09-29 used them up and the range now grows downward from 0xDF (0xD2-0xDD, 12 slots, remain free). They are all generated via the serializer's / on-NES compiler's pattern folding.
 
 | opcode | Number | Role |
 |---|---|---|
