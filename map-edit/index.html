@@ -60,7 +60,8 @@
       左ドラッグ: 塗る / 置く<br>
       右クリック: タイルを拾う (スポイト)<br>
       Esc: 「選択 / 編集」に戻る<br>
-      「選択」でオブジェクトをクリックすると右で編集
+      「選択」でオブジェクトをクリックすると右で編集<br>
+      オブジェクトをドラッグで移動 (矢印キーでも)
     </div>
   </div>
 
@@ -84,7 +85,8 @@
       「出力」→ <code>town_map.php</code> と <code>town.data.bin</code> を <code>examples/</code> に保存して <code>make build/town.nes</code>。<br>
       日本語メッセージには BDF (chr-edit/misaki_bdf_2021-05-05/misaki_gothic.bdf) を先に読み込む。<br>
       勇者の開始位置は「勇者」ツールで置く。外周は通行不可のタイルにする (通行可: 床 / 草 / 橋)。<br>
-      宝箱はマップに宝箱タイルを置き、さらに「宝箱」ツールでメッセージを付ける。
+      宝箱はマップに宝箱タイルを置き、さらに「宝箱」ツールでメッセージを付ける。<br>
+      NPC・セリフ・勇者はドラッグで移動 (選択中は矢印キーでも 1 マスずつ動く)。
     </div>
     <textarea id="exportOut" rows="8" style="margin-top:8px" readonly></textarea>
     <div class="row"><button id="copyExportBtn">php をコピー</button> <button id="downloadExportBtn">php をダウンロード</button> <button id="downloadBinBtn">data.bin をダウンロード</button></div>

@@ -35,6 +35,8 @@ const state = {
   zoom: 2,
   selected: null,                     // { kind: 'npc'|'chest', index }
   painting: false,
+  dragging: null,                     // 移動中: { kind: 'npc'|'chest'|'hero', index, fromX, fromY }
+  dragCell: null,                     // 移動先の候補マス (canvas 外なら null)
   bdf: null,                          // Map<codepoint, Uint8Array(8)> (misaki など)
   bdfName: '',
   exportBin: null,                    // 直近の出力 (Uint8Array)
@@ -148,6 +150,27 @@ function render() {
   });
   if (state.heroImg) ctx.drawImage(state.heroImg, m.hero.x * s, m.hero.y * s, s, s);
   else drawMarker(m.hero.x * s, m.hero.y * s, s, 'rgba(80,160,255,0.9)', 'H');
+  // ドラッグ中: 移動先に半透明で描き、置けるなら緑、置けないなら赤の枠
+  const d = state.dragging;
+  if (d && state.dragCell) {
+    const c = state.dragCell;
+    const ok = canPlace(d, c.x, c.y);
+    ctx.globalAlpha = 0.6;
+    if (d.kind === 'npc') {
+      const n = m.npcs[d.index];
+      if (state.sprImgs[n.type]) ctx.drawImage(state.sprImgs[n.type], c.x * s, c.y * s, s, s);
+      else drawMarker(c.x * s, c.y * s, s, 'rgba(255,255,255,0.85)', 'N' + n.type);
+    } else if (d.kind === 'hero') {
+      if (state.heroImg) ctx.drawImage(state.heroImg, c.x * s, c.y * s, s, s);
+      else drawMarker(c.x * s, c.y * s, s, 'rgba(80,160,255,0.9)', 'H');
+    } else {
+      drawBadge(c.x * s, c.y * s, s, m.chests[d.index].msg ? '#ffdc00' : '#ff4040');
+    }
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = ok ? '#40ff40' : '#ff4040';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(c.x * s + 1, c.y * s + 1, s - 2, s - 2);
+  }
   // grid
   ctx.strokeStyle = 'rgba(255,255,255,0.12)';
   ctx.lineWidth = 1;
@@ -202,6 +225,34 @@ function findObject(x, y) {
   if (ci >= 0) return { kind: 'chest', index: ci };
   return null;
 }
+// 移動先に置けるか: 盤面内で、ほかのオブジェクトがいないこと (勇者はどこでも)
+function canPlace(d, x, y) {
+  const m = state.model;
+  if (x < 0 || y < 0 || x >= m.w || y >= m.h) return false;
+  if (d.kind === 'hero') return true;
+  const ex = findObject(x, y);
+  return !ex || (ex.kind === d.kind && ex.index === d.index);
+}
+// オブジェクト (NPC / セリフ / 勇者) を (nx, ny) へ動かす。
+// 宝箱タイルの上のセリフを動かすときは宝箱タイルも一緒に動かし、元のマスはレンガ床にする
+function moveObject(d, nx, ny) {
+  const m = state.model;
+  if (!canPlace(d, nx, ny)) return false;
+  if (d.kind === 'hero') {
+    if (m.hero.x === nx && m.hero.y === ny) return false;
+    m.hero = { x: nx, y: ny };
+    return true;
+  }
+  const o = d.kind === 'npc' ? m.npcs[d.index] : m.chests[d.index];
+  if (!o || (o.x === nx && o.y === ny)) return false;
+  if (d.kind === 'chest' && m.map[o.y][o.x] === 6 && m.map[ny][nx] !== 6) {
+    m.map[ny][nx] = 6;
+    m.map[o.y][o.x] = 1;
+  }
+  o.x = nx;
+  o.y = ny;
+  return true;
+}
 function applyTool(cell) {
   const m = state.model;
   const t = state.tool;
@@ -241,25 +292,89 @@ canvas.addEventListener('mousedown', (e) => {
     refreshTools();
     return;
   }
+  // タイル以外のツールで既存のオブジェクトを押したらドラッグ移動 (選択ツールでは勇者も)
+  if (state.tool.kind !== 'tile') {
+    const m = state.model;
+    const ex = findObject(cell.x, cell.y);
+    if (ex) {
+      state.selected = ex;
+      showObject();
+      state.dragging = { ...ex, fromX: cell.x, fromY: cell.y };
+      state.dragCell = cell;
+      render();
+      return;
+    }
+    if (state.tool.kind === 'select' && m.hero.x === cell.x && m.hero.y === cell.y) {
+      state.dragging = { kind: 'hero', index: 0, fromX: cell.x, fromY: cell.y };
+      state.dragCell = cell;
+      render();
+      return;
+    }
+  }
   state.painting = (state.tool.kind === 'tile');   // セリフ/NPC/宝箱はクリック 1 回 1 個
   applyTool(cell);
 });
 canvas.addEventListener('mousemove', (e) => {
+  if (state.dragging) {
+    const cell = cellFromEvent(e);
+    const prev = state.dragCell;
+    if ((cell && prev && cell.x === prev.x && cell.y === prev.y) || (!cell && !prev)) return;
+    state.dragCell = cell;
+    render();
+    return;
+  }
   if (!state.painting) return;
   const cell = cellFromEvent(e);
   if (cell) applyTool(cell);
 });
-window.addEventListener('mouseup', () => { state.painting = false; });
+canvas.addEventListener('mouseleave', () => {
+  if (state.dragging && state.dragCell) { state.dragCell = null; render(); }
+});
+window.addEventListener('mouseup', () => {
+  state.painting = false;
+  const d = state.dragging;
+  if (!d) return;
+  state.dragging = null;
+  const c = state.dragCell;
+  state.dragCell = null;
+  if (c && (c.x !== d.fromX || c.y !== d.fromY)) {
+    if (moveObject(d, c.x, c.y)) {
+      setStatus(`(${d.fromX}, ${d.fromY}) → (${c.x}, ${c.y}) へ移動`);
+      autosave();
+    } else {
+      setStatus('そのマスにはすでにオブジェクトがあります', true);
+    }
+  }
+  showObject();
+  render();
+});
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
-// Esc で「選択 / 編集」ツールに戻る (テキスト入力中は入力欄のフォーカスを外すだけ)
+// Esc で「選択 / 編集」ツールに戻る (テキスト入力中は入力欄のフォーカスを外すだけ)。
+// 矢印キーで選択中のオブジェクトを 1 マス動かす
+const ARROWS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] };
 window.addEventListener('keydown', (e) => {
-  if (e.key !== 'Escape') return;
   const tag = document.activeElement && document.activeElement.tagName;
-  if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') { document.activeElement.blur(); return; }
-  state.tool = { kind: 'select', type: 0 };
-  refreshTools();
-  setStatus('選択 / 編集');
+  const typing = tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT';
+  if (e.key === 'Escape') {
+    if (typing) { document.activeElement.blur(); return; }
+    state.tool = { kind: 'select', type: 0 };
+    refreshTools();
+    setStatus('選択 / 編集');
+    return;
+  }
+  if (!ARROWS[e.key] || typing || !state.selected) return;
+  const o = currentObject();
+  if (!o) return;
+  e.preventDefault();
+  const [dx, dy] = ARROWS[e.key];
+  if (moveObject(state.selected, o.x + dx, o.y + dy)) {
+    showObject();
+    render();
+    autosave();
+  } else {
+    setStatus('そこには動かせません (盤面の外か、ほかのオブジェクトがいます)', true);
+  }
 });
 
 // --- object panel ---
